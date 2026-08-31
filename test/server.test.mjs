@@ -19,6 +19,7 @@ const expectedTools = [
   "get_transaction_details",
   "list_accounts",
   "list_banks",
+  "register_application",
   "setup_enable_banking",
   "setup_status",
 ];
@@ -39,6 +40,7 @@ test("exposes documented tools with the local Control Panel email", async () => 
     await client.connect(transport);
     const instructions = client.getInstructions() ?? "";
     assert.match(instructions, /setup_enable_banking/);
+    assert.match(instructions, /register_application/);
     assert.match(instructions, /defaults to personal PRODUCTION/);
     assert.match(instructions, /never initiates payments/);
     const response = await client.listTools();
@@ -72,6 +74,20 @@ test("exposes documented tools with the local Control Panel email", async () => 
       undefined,
     );
     assert.equal(setupTool?.inputSchema?.properties?.gdpr_email, undefined);
+    const registerTool = response.tools.find(
+      (tool) => tool.name === "register_application",
+    );
+    assert.equal(
+      registerTool?.inputSchema?.properties?.environment?.default,
+      "PRODUCTION",
+    );
+    assert.equal(
+      registerTool?.inputSchema?.properties?.description?.default,
+      "Read-only personal account-information access",
+    );
+    assert.equal(registerTool?.inputSchema?.properties?.aspsp_name, undefined);
+    assert.equal(registerTool?.inputSchema?.properties?.country, undefined);
+    assert.equal(registerTool?.inputSchema?.properties?.access_profile, undefined);
     const authorizeBankTool = response.tools.find((tool) => tool.name === "authorize_bank");
     assert.equal(
       authorizeBankTool?.inputSchema?.properties?.access_profile?.default,

@@ -321,6 +321,110 @@ test("completes a sandbox setup without shelling to another application", async 
 
 
 
+test("registers an application before bank details are provided", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  const sessionStore = new MemorySessionStore();
+  const controlPanelCalls = [];
+  const controlPanelClient = new ControlPanelClient(async (url, options) => {
+    controlPanelCalls.push({ url: String(url), options });
+    if (String(url).endsWith("getOobConfirmationCode")) {
+      return new Response("{}", { status: 200 });
+    }
+    if (String(url).endsWith("emailLinkSignin")) {
+      return new Response(
+        JSON.stringify({ idToken: "id-token", refreshToken: "refresh-token" }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ app_id: "application-only-id" }), {
+      status: 200,
+    });
+  });
+  const controlPanelAuth = new ControlPanelAuthFlow(
+    controlPanelClient,
+    async () => ({
+      port: 4321,
+      path: `/callback?state=${"A".repeat(43)}`,
+      wait: Promise.resolve("oob-code"),
+      close: async () => {},
+    }),
+  );
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const openedUrls = [];
+  let trustCalls = 0;
+  const setup = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+    controlPanelClient,
+    controlPanelAuth,
+    openBrowser: (url) => openedUrls.push(url),
+    controlPanelAuthStore: new MacKeychainControlPanelAuthStore(
+      new MemorySecretStore(),
+    ),
+    authorizationFlow: new BankAuthorizationFlow(
+      sessionStore,
+      (url) => openedUrls.push(url),
+    ),
+    generateKeyMaterial: async () => ({
+      privateKey,
+      certificate: "certificate",
+    }),
+    trustCertificate: async () => {
+      trustCalls += 1;
+    },
+  });
+
+  const started = await setup.registerApplication({
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "PRODUCTION",
+    redirectUrl: "https://localhost:8765/callback",
+  });
+
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!setup.status.pending) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(started.status, "started");
+  assert.equal(setup.status.phase, "account_link", setup.status.error);
+  assert.equal(setup.status.pending, false);
+  assert.equal(setup.status.appId, "application-only-id");
+  assert.equal(
+    setup.status.message,
+    "Application registered; activate it in the dashboard, then call authorize_bank",
+  );
+  assert.equal(setup.status.dashboardUrl, "https://enablebanking.com/cp/applications");
+  assert.deepEqual(await sessionStore.get(), undefined);
+  assert.deepEqual(await applicationStore.get(), {
+    appId: "application-only-id",
+    privateKey,
+    certificate: "certificate",
+    environment: "PRODUCTION",
+    redirectUrls: ["https://localhost:8765/callback"],
+  });
+  assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
+  assert.equal(trustCalls, 1);
+  assert.equal(controlPanelCalls.length, 3);
+
+  const restarted = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+  });
+  assert.deepEqual(await restarted.getStatus(), {
+    phase: "account_link",
+    pending: false,
+    appId: "application-only-id",
+    dashboardUrl: "https://enablebanking.com/cp/applications",
+    message:
+      "Application registered; activate it in the dashboard, then call authorize_bank",
+  });
+});
+
 class MemoryApplicationStore {
   value;
 

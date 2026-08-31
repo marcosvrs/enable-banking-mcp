@@ -42,18 +42,26 @@ const ACTIVATION_POLL_MS = 5_000;
 const SESSION_TIMEOUT_MS = 6 * 60 * 1000;
 const SESSION_POLL_MS = 1_000;
 
-export interface SetupOptions {
+export interface ApplicationRegistrationOptions {
   controlPanelEmail: string;
   appName: string;
   environment: ApplicationEnvironment;
   redirectUrl: string;
-  aspspName: string;
-  country: string;
   description?: string;
   privacyUrl?: string;
   termsUrl?: string;
+}
+
+export interface SetupOptions extends ApplicationRegistrationOptions {
+  aspspName: string;
+  country: string;
   validUntil?: string;
   accessProfile?: AccessProfile;
+}
+
+export interface NormalizedApplicationRegistrationOptions
+  extends ApplicationRegistrationOptions {
+  gdprEmail?: string;
 }
 
 export interface NormalizedSetupOptions extends SetupOptions {
@@ -61,6 +69,7 @@ export interface NormalizedSetupOptions extends SetupOptions {
   redirectUrl: string;
   country: string;
   validUntil: string;
+  accessProfile: AccessProfile;
 }
 
 export type SetupPhase =
@@ -68,6 +77,7 @@ export type SetupPhase =
   | "control_panel_auth"
   | "registering_application"
   | "account_link"
+  | "application_ready"
   | "bank_authorization"
   | "complete"
   | "failed";
@@ -148,10 +158,39 @@ export class ApplicationSetupFlow {
           }
         : { phase: "idle", pending: false };
     }
+    if (application && !session && this.current.phase === "idle") {
+      return applicationStatus(application);
+    }
     return this.status;
   }
 
+  async registerApplication(
+    options: ApplicationRegistrationOptions,
+  ): Promise<SetupStartResult> {
+    await this.ensureAvailable();
+    const normalized = normalizeApplicationRegistrationOptions(options);
+    this.markStarted();
+    void this.runApplicationRegistration(normalized);
+    return {
+      status: "started",
+      phase: "control_panel_auth",
+      message: this.current.message ?? "Enable Banking application setup started",
+    };
+  }
+
   async start(options: SetupOptions): Promise<SetupStartResult> {
+    await this.ensureAvailable();
+    const normalized = normalizeSetupOptions(options);
+    this.markStarted();
+    void this.run(normalized);
+    return {
+      status: "started",
+      phase: "control_panel_auth",
+      message: this.current.message ?? "Enable Banking setup started",
+    };
+  }
+
+  private async ensureAvailable(): Promise<void> {
     if (this.current.pending) {
       throw new Error("Enable Banking setup is already in progress");
     }
@@ -165,49 +204,61 @@ export class ApplicationSetupFlow {
         "An Enable Banking session is already stored; clear it before starting setup",
       );
     }
+  }
 
-    const normalized = normalizeSetupOptions(options);
+  private markStarted(): void {
     this.current = {
       phase: "control_panel_auth",
       pending: true,
       message:
         "A Control Panel sign-in email was requested; complete it to continue setup",
     };
-    void this.run(normalized);
-    return {
-      status: "started",
-      phase: "control_panel_auth",
-      message: this.current.message ?? "Enable Banking setup started",
-    };
+  }
+
+  private async runApplicationRegistration(
+    options: NormalizedApplicationRegistrationOptions,
+  ): Promise<void> {
+    let application: StoredApplication | undefined;
+    try {
+      application = await this.createApplication(options);
+      await (this.dependencies.trustCertificate ?? trustCertificate)(
+        application.certificate,
+      );
+      if (options.environment === "PRODUCTION") {
+        this.update({
+          phase: "account_link",
+          pending: false,
+          appId: application.appId,
+          dashboardUrl: APPLICATIONS_URL,
+          message:
+            "Application registered; activate it in the dashboard, then call authorize_bank",
+        });
+        (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
+      } else {
+        this.update({
+          phase: "application_ready",
+          pending: false,
+          appId: application.appId,
+          message:
+            "Application registered; call authorize_bank to start bank consent",
+        });
+      }
+    } catch (error) {
+      this.update({
+        phase: "failed",
+        pending: false,
+        ...(application?.appId ? { appId: application.appId } : {}),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async run(options: NormalizedSetupOptions): Promise<void> {
     let application: StoredApplication | undefined;
     try {
-      const keyMaterial = await (this.dependencies.generateKeyMaterial ??
-        generateKeyMaterial)();
-      const controlPanelAuth = await this.dependencies.controlPanelAuth.authenticate(
-        options.controlPanelEmail,
-      );
-      await this.dependencies.controlPanelAuthStore?.set(controlPanelAuth);
-      this.update({
-        phase: "registering_application",
-        message: "Registering the Enable Banking application",
-      });
-      const registration = await this.dependencies.controlPanelClient.registerApplication(
-        controlPanelAuth,
-        createRegistrationRequest(options, keyMaterial.certificate),
-      );
-      application = {
-        appId: registration.app_id,
-        privateKey: keyMaterial.privateKey,
-        certificate: keyMaterial.certificate,
-        environment: options.environment,
-        redirectUrls: [options.redirectUrl],
-      };
-      await this.dependencies.applicationStore.set(application);
+      application = await this.createApplication(options);
       await (this.dependencies.trustCertificate ?? trustCertificate)(
-        keyMaterial.certificate,
+        application.certificate,
       );
 
       const client = (
@@ -271,23 +322,61 @@ export class ApplicationSetupFlow {
     }
   }
 
+  private async createApplication(
+    options: NormalizedApplicationRegistrationOptions,
+  ): Promise<StoredApplication> {
+    const keyMaterial = await (this.dependencies.generateKeyMaterial ??
+      generateKeyMaterial)();
+    const controlPanelAuth = await this.dependencies.controlPanelAuth.authenticate(
+      options.controlPanelEmail,
+    );
+    await this.dependencies.controlPanelAuthStore?.set(controlPanelAuth);
+    this.update({
+      phase: "registering_application",
+      message: "Registering the Enable Banking application",
+    });
+    const registration = await this.dependencies.controlPanelClient.registerApplication(
+      controlPanelAuth,
+      createRegistrationRequest(options, keyMaterial.certificate),
+    );
+    const application = {
+      appId: registration.app_id,
+      privateKey: keyMaterial.privateKey,
+      certificate: keyMaterial.certificate,
+      environment: options.environment,
+      redirectUrls: [options.redirectUrl],
+    };
+    await this.dependencies.applicationStore.set(application);
+    return application;
+  }
+
   private update(update: Partial<SetupStatus>): void {
     this.current = { ...this.current, ...update };
   }
 }
 
-export function normalizeSetupOptions(
-  options: SetupOptions,
-): NormalizedSetupOptions {
+function applicationStatus(application: StoredApplication): SetupStatus {
+  const production = application.environment === "PRODUCTION";
+  return {
+    phase: production ? "account_link" : "application_ready",
+    pending: false,
+    appId: application.appId,
+    ...(production ? { dashboardUrl: APPLICATIONS_URL } : {}),
+    message: production
+      ? "Application registered; activate it in the dashboard, then call authorize_bank"
+      : "Application registered; call authorize_bank to start bank consent",
+  };
+}
+
+export function normalizeApplicationRegistrationOptions(
+  options: ApplicationRegistrationOptions,
+): NormalizedApplicationRegistrationOptions {
   const controlPanelEmail = options.controlPanelEmail.trim();
   const appName = options.appName.trim();
-  const aspspName = options.aspspName.trim();
-  const country = options.country.trim().toUpperCase();
   const redirectUrl = options.redirectUrl.trim();
   const description = options.description?.trim();
   const privacyUrl = options.privacyUrl?.trim();
   const termsUrl = options.termsUrl?.trim();
-  const accessProfile = options.accessProfile ?? "balances";
 
   if (
     options.environment !== "PRODUCTION" &&
@@ -299,18 +388,7 @@ export function normalizeSetupOptions(
     throw new Error("control_panel_email must be a valid email address");
   }
   if (!appName) throw new Error("app_name is required");
-  if (!aspspName) throw new Error("aspsp_name is required");
-  if (!/^[A-Z]{2}$/.test(country)) {
-    throw new Error("country must be a two-letter ISO 3166-1 code");
-  }
-  if (
-    accessProfile !== "balances" &&
-    accessProfile !== "balances_and_transactions"
-  ) {
-    throw new Error("access_profile is invalid");
-  }
   parseLoopbackRedirect(redirectUrl);
-  const validUntil = parseValidUntil(options.validUntil);
 
   let normalizedDescription = description;
   let normalizedGdprEmail: string | undefined;
@@ -332,15 +410,39 @@ export function normalizeSetupOptions(
     ...options,
     controlPanelEmail,
     appName,
-    aspspName,
-    country,
     redirectUrl,
     ...(normalizedDescription ? { description: normalizedDescription } : {}),
     ...(normalizedGdprEmail ? { gdprEmail: normalizedGdprEmail } : {}),
     ...(normalizedPrivacyUrl ? { privacyUrl: normalizedPrivacyUrl } : {}),
     ...(normalizedTermsUrl ? { termsUrl: normalizedTermsUrl } : {}),
+  };
+}
+
+export function normalizeSetupOptions(
+  options: SetupOptions,
+): NormalizedSetupOptions {
+  const normalized = normalizeApplicationRegistrationOptions(options);
+  const aspspName = options.aspspName.trim();
+  const country = options.country.trim().toUpperCase();
+  const accessProfile = options.accessProfile ?? "balances";
+
+  if (!aspspName) throw new Error("aspsp_name is required");
+  if (!/^[A-Z]{2}$/.test(country)) {
+    throw new Error("country must be a two-letter ISO 3166-1 code");
+  }
+  if (
+    accessProfile !== "balances" &&
+    accessProfile !== "balances_and_transactions"
+  ) {
+    throw new Error("access_profile is invalid");
+  }
+
+  return {
+    ...normalized,
+    aspspName,
+    country,
     accessProfile,
-    validUntil,
+    validUntil: parseValidUntil(options.validUntil),
   };
 }
 
@@ -362,7 +464,7 @@ function validateProviderDocumentUrl(field: string, value: string): void {
 }
 
 function createRegistrationRequest(
-  options: NormalizedSetupOptions,
+  options: NormalizedApplicationRegistrationOptions,
   certificate: string,
 ): ApplicationRegistrationRequest {
   return {

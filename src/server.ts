@@ -31,6 +31,7 @@ import {
   DEFAULT_PRODUCTION_TERMS_URL,
   callbackTlsFromApplication,
   removeTrustedCertificate,
+  type ApplicationRegistrationOptions,
   type SetupOptions,
 } from "./setup.js";
 import { MacKeychainSessionStore } from "./session-store.js";
@@ -38,11 +39,11 @@ import { MacKeychainSessionStore } from "./session-store.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.1",
+    version: "0.3.0-beta.2",
   },
   {
     instructions:
-      "Use setup_enable_banking for first-time setup; its environment defaults to personal PRODUCTION using the local Control Panel email for the privacy contact and bundled policy URLs. Pass environment=SANDBOX explicitly for sandbox. Then authorize_bank for personal AIS consent before account tools. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account or transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
+      "Use register_application to register a personal application before choosing a bank; in Production activate it in the dashboard, then call authorize_bank. Use setup_enable_banking for the combined first-run flow when the target bank and country are already known; its environment defaults to personal PRODUCTION and it uses the local Control Panel email for the privacy contact and bundled policy URLs. Pass environment=SANDBOX explicitly for sandbox. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account and transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
   },
 );
 
@@ -138,7 +139,7 @@ async function resolveCredentials(): Promise<{ appId: string; privateKey: string
   const hasPrivateKey = Boolean(process.env.ENABLE_BANKING_PRIVATE_KEY?.trim());
   if (!hasApplicationId && !hasPrivateKey) {
     throw new Error(
-      "No Enable Banking application is configured; call setup_enable_banking first",
+      "No Enable Banking application is configured; call register_application or setup_enable_banking first",
     );
   }
   return loadCredentials();
@@ -182,6 +183,21 @@ function requiredLocalEmail(environmentName: string): string {
     );
   }
   return value;
+}
+function assertNoEnvironmentCredentials(): void {
+  const hasEnvironmentCredentials =
+    Boolean(
+      (
+        process.env.ENABLE_BANKING_APP_ID?.trim() ||
+        process.env.ENABLE_BANKING_ID?.trim()
+      ) &&
+        process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
+    );
+  if (hasEnvironmentCredentials) {
+    throw new Error(
+      "Existing Enable Banking environment credentials are configured; remove them before starting first-run setup",
+    );
+  }
 }
 
 
@@ -306,19 +322,7 @@ server.registerTool(
     access_profile,
   }) =>
     safely(async () => {
-      const hasEnvironmentCredentials =
-        Boolean(
-          (
-            process.env.ENABLE_BANKING_APP_ID?.trim() ||
-            process.env.ENABLE_BANKING_ID?.trim()
-          ) &&
-            process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
-        );
-      if (hasEnvironmentCredentials) {
-        throw new Error(
-          "Existing Enable Banking environment credentials are configured; remove them before starting first-run setup",
-        );
-      }
+      assertNoEnvironmentCredentials();
       const options: SetupOptions = {
         controlPanelEmail: requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
         appName: app_name,
@@ -333,6 +337,66 @@ server.registerTool(
         accessProfile: access_profile as AccessProfile,
       };
       return setupFlow.start(options);
+    }),
+);
+
+server.registerTool(
+  "register_application",
+  {
+    description:
+      "Register a personal, noncommercial Enable Banking AIS application using the local Control Panel email, store credentials in macOS Keychain, and wait for dashboard activation before bank authorization; never send email through MCP",
+    inputSchema: {
+      app_name: z
+        .string()
+        .min(1)
+        .default("Enable Banking MCP")
+        .describe("Application name shown in the Control Panel"),
+      environment: z
+        .enum(["PRODUCTION", "SANDBOX"])
+        .default("PRODUCTION")
+        .describe("Enable Banking application environment; personal PRODUCTION is the default"),
+      redirect_url: z
+        .string()
+        .url()
+        .default(DEFAULT_REDIRECT_URL)
+        .describe("Registered HTTPS loopback callback URL"),
+      description: z
+        .string()
+        .min(1)
+        .default(DEFAULT_PRODUCTION_DESCRIPTION)
+        .describe("Application description; defaults to read-only personal access"),
+      privacy_url: z
+        .string()
+        .url()
+        .default(DEFAULT_PRODUCTION_PRIVACY_URL)
+        .describe("Privacy policy URL; defaults to the project policy"),
+      terms_url: z
+        .string()
+        .url()
+        .default(DEFAULT_PRODUCTION_TERMS_URL)
+        .describe("Terms of service URL; defaults to the project terms"),
+    },
+  },
+  async ({
+    app_name,
+    environment,
+    redirect_url,
+    description,
+    privacy_url,
+    terms_url,
+  }) =>
+    safely(async () => {
+      assertNoEnvironmentCredentials();
+      const options: ApplicationRegistrationOptions = {
+        controlPanelEmail: requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
+        appName: app_name,
+        environment,
+        redirectUrl: redirect_url,
+        description,
+        privacyUrl: privacy_url,
+        termsUrl: terms_url,
+      };
+      return setupFlow.registerApplication(options);
     }),
 );
 

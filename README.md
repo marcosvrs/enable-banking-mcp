@@ -47,7 +47,7 @@ The bank-consent callback uses HTTPS and a generated or configured localhost cer
 The published package is the easiest route for clients that support npm:
 
 ```sh
-npx -y enable-banking-mcp@0.3.0-beta.1
+npx -y enable-banking-mcp@0.3.0-beta.2
 ```
 
 The release workflow publishes the unscoped `enable-banking-mcp` package to
@@ -63,7 +63,7 @@ For clients that accept an `mcpServers` JSON block, use the published package:
   "mcpServers": {
     "enable-banking-mcp": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.3.0-beta.1"],
+      "args": ["-y", "enable-banking-mcp@0.3.0-beta.2"],
       "env": {
         "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
       }
@@ -87,7 +87,7 @@ claude mcp add --scope user \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
   --transport stdio \
   enable-banking-mcp -- \
-  npx -y enable-banking-mcp@0.3.0-beta.1
+  npx -y enable-banking-mcp@0.3.0-beta.2
 ```
 
 Use `--scope local` instead of `--scope user` to limit the server to the
@@ -117,7 +117,7 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 ```sh
 codex mcp add enable-banking-mcp \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
-  -- npx -y enable-banking-mcp@0.3.0-beta.1
+  -- npx -y enable-banking-mcp@0.3.0-beta.2
 ```
 
 The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop
@@ -180,17 +180,18 @@ Configure an npm Trusted Publisher for this repository before tagging:
 - allowed action: `npm publish`.
 
 Trusted publishing cannot bootstrap a brand-new npm package because npm
-requires the package to exist before its publisher can be configured. Complete
-the one-time initial `0.3.0-beta.1` publish interactively with npm 2FA, then add the
-Trusted Publisher configuration above. After the package exists, tag the
-matching package version:
+requires the package to exist before its publisher can be configured. This
+package has been bootstrapped; configure the Trusted Publisher above before
+tagging a new, unpublished release. If an interactive beta publish is
+required, use:
 
 ```sh
 npm login --auth-type=web --registry=https://registry.npmjs.org
-npm publish --access public --registry=https://registry.npmjs.org
-git tag v0.3.0-beta.1
-git push origin v0.3.0-beta.1
+npm publish --access public --tag beta --registry=https://registry.npmjs.org
 ```
+
+Do not tag an already-published version with the publishing workflow; npm
+rejects duplicate versions.
 
 The workflow runs the build, tests, privacy scan, `npm pack --dry-run`, and
 provenance-enabled public npm publication through GitHub Actions OIDC. Do not
@@ -198,15 +199,41 @@ put npm tokens in this repository, an MCP configuration, or a prompt.
 
 ## First-run flow
 
-The setup tool reads the Control Panel email from the local
+The setup tools read the Control Panel email from the local
 `ENABLE_BANKING_CONTROL_PANEL_EMAIL` environment variable. This is the only
-environment value the user needs to configure.
+environment value required for first-run application registration. Application
+credentials and callback certificates are stored in the macOS login Keychain.
 
-The setup schema defaults to personal `PRODUCTION`. The setup tool uses the
-Control Panel email as the Production privacy contact and supplies the
-project's read-only description, privacy policy URL, and terms URL by default.
-Those values can be overridden in the setup arguments when needed. To use
-SANDBOX, pass `"environment": "SANDBOX"` explicitly.
+The setup schemas default to personal `PRODUCTION` and use the Control Panel
+email as the Production privacy contact. They also supply the project's
+read-only description, privacy policy URL, and terms URL by default. Those
+values can be overridden in the setup arguments. To use `SANDBOX`, pass
+`"environment": "SANDBOX"` explicitly.
+
+### Register the application before choosing a bank
+
+Call `register_application` with:
+
+- an application name; and
+- the HTTPS loopback redirect URL, defaulting to `https://localhost:8765/callback`.
+
+For example:
+
+```json
+{
+  "app_name": "Enable Banking MCP",
+  "redirect_url": "https://localhost:8765/callback"
+}
+```
+
+The tool authenticates the Control Panel, registers the application, stores
+its credentials locally, and returns. In Production it opens the application
+dashboard and reports `account_link`; activate the application there, then
+call `authorize_bank` with the target ASPSP name and two-letter country code.
+In SANDBOX, the application is ready for `authorize_bank` immediately.
+Use `setup_status` to inspect the registration state.
+
+### Register the application and authorize a bank in one flow
 
 Call `setup_enable_banking` with:
 
@@ -227,19 +254,26 @@ For example, the default Production call can contain:
 }
 ```
 
-Setup authenticates the Control Panel, registers the application, waits for
-Production account linking when required, starts the personal AIS consent
-flow, and stores the application and current session in macOS Keychain.
-Complete the browser and bank steps, then use `setup_status`.
+This combined flow authenticates the Control Panel, registers the
+application, waits for Production account linking when required, starts the
+personal AIS consent flow, and stores the application and current session in
+the macOS Keychain. Complete the browser and bank steps, then use
+`setup_status`.
 
 For an already configured application, `control_panel_authenticate` takes no
 arguments and reads the same local environment variable. `control_panel_status`
 reports only authentication state and expiry; it does not return the email or
 tokens.
 
-For an already configured application, use `authorize_bank` to start a new personal consent flow. `list_banks` is restricted to personal AIS institutions. Account tools use the current locally stored session only.
+For an application registered with `register_application`, or any other
+already configured application, use `authorize_bank` to start a new personal
+consent flow. `list_banks` is restricted to personal AIS institutions. Account
+tools use the current locally stored session only.
 
-The provider requires an application JWT for ASPSP discovery, so `list_banks` is available after application credentials exist. During first-run setup, provide the target ASPSP name and country directly.
+The provider requires an application JWT for ASPSP discovery, so `list_banks`
+is available after application credentials exist. The split first-run path
+creates those credentials before bank selection; the combined path accepts the
+target ASPSP name and country directly.
 
 ## Local cleanup
 
