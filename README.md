@@ -182,18 +182,30 @@ The npm lifecycle does not modify Git configuration automatically.
 
 ### Publish a release
 
-Repository maintainers must configure an `NPM_TOKEN` GitHub Actions secret
-with permission to publish the package. After the package contents pass the
-workflow checks, tag the matching package version:
+Configure an npm Trusted Publisher for this repository before tagging:
+
+- provider: GitHub Actions;
+- user or organization: `marcosvrs`;
+- repository: `enable-banking-mcp`;
+- workflow filename: `publish.yml`; and
+- allowed action: `npm publish`.
+
+Trusted publishing cannot bootstrap a brand-new npm package because npm
+requires the package to exist before its publisher can be configured. Complete
+the one-time initial `0.3.0` publish interactively with npm 2FA, then add the
+Trusted Publisher configuration above. After the package exists, tag the
+matching package version:
 
 ```sh
+npm login --auth-type=web --registry=https://registry.npmjs.org
+npm publish --access public --registry=https://registry.npmjs.org
 git tag v0.3.0
 git push origin v0.3.0
 ```
 
 The workflow runs the build, tests, privacy scan, `npm pack --dry-run`, and
-provenance-enabled public npm publication. Never put the npm token in this
-repository, an MCP configuration, or a prompt.
+provenance-enabled public npm publication through GitHub Actions OIDC. Do not
+put npm tokens in this repository, an MCP configuration, or a prompt.
 
 ## First-run flow
 
