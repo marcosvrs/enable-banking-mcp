@@ -1,0 +1,25 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "enable-banking-mcp",
+  "owner": {
+    "name": "enable-banking-mcp contributors",
+    "url": "https://github.com/marcosvrs/enable-banking-mcp"
+  },
+  "metadata": {
+    "description": "Read-only personal Enable Banking tools for Oh My Pi",
+    "version": "0.3.0-beta.4"
+  },
+  "plugins": [
+    {
+      "name": "enable-banking-mcp",
+      "description": "Read-only personal Enable Banking account-information tools for Oh My Pi",
+      "source": "./omp-plugin",
+      "version": "0.3.0-beta.4",
+      "homepage": "https://github.com/marcosvrs/enable-banking-mcp",
+      "repository": "https://github.com/marcosvrs/enable-banking-mcp",
+      "license": "MIT",
+      "category": "productivity",
+      "tags": ["banking", "finance", "mcp", "read-only"]
+    }
+  ]
+}

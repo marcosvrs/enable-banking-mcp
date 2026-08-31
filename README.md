@@ -147,6 +147,26 @@ export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
 Use the direct `codex mcp add --env` form when Codex is launched outside a
 shell that inherits these variables.
 
+### Oh My Pi (OMP)
+
+Oh My Pi can install the OMP-native marketplace entry from this repository:
+
+```sh
+omp plugin marketplace add marcosvrs/enable-banking-mcp
+omp plugin install --scope user enable-banking-mcp@enable-banking-mcp
+omp plugin list
+```
+
+Export the local Control Panel email before launching OMP. The plugin passes
+that environment variable only to the local MCP server process:
+
+```sh
+export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
+```
+
+Start a new OMP session after installation. After marketplace updates, run
+`/reload-plugins` to refresh the current session.
+
 ### Run from a checkout
 
 For development or before the first npm release:
