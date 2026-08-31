@@ -28,6 +28,12 @@ import type { EnableBankingCredentials } from "./config.js";
 import { EnableBankingClient } from "./enable-banking.js";
 
 const APPLICATIONS_URL = "https://enablebanking.com/cp/applications";
+export const DEFAULT_PRODUCTION_DESCRIPTION =
+  "Read-only personal account-information access";
+export const DEFAULT_PRODUCTION_PRIVACY_URL =
+  "https://marcosvrs.github.io/enable-banking-mcp/privacy-policy/";
+export const DEFAULT_PRODUCTION_TERMS_URL =
+  "https://marcosvrs.github.io/enable-banking-mcp/terms-of-use/";
 const OPENSSL_COMMAND = "openssl";
 const SECURITY_COMMAND = "/usr/bin/security";
 const CERTIFICATE_DAYS = "825";
@@ -44,15 +50,14 @@ export interface SetupOptions {
   aspspName: string;
   country: string;
   description?: string;
-  gdprEmail?: string;
   privacyUrl?: string;
   termsUrl?: string;
   validUntil?: string;
   accessProfile?: AccessProfile;
-  allowRestrictedProduction?: boolean;
 }
 
 export interface NormalizedSetupOptions extends SetupOptions {
+  gdprEmail?: string;
   redirectUrl: string;
   country: string;
   validUntil: string;
@@ -280,7 +285,6 @@ export function normalizeSetupOptions(
   const country = options.country.trim().toUpperCase();
   const redirectUrl = options.redirectUrl.trim();
   const description = options.description?.trim();
-  const gdprEmail = options.gdprEmail?.trim();
   const privacyUrl = options.privacyUrl?.trim();
   const termsUrl = options.termsUrl?.trim();
   const accessProfile = options.accessProfile ?? "balances";
@@ -308,20 +312,20 @@ export function normalizeSetupOptions(
   parseLoopbackRedirect(redirectUrl);
   const validUntil = parseValidUntil(options.validUntil);
 
+  let normalizedDescription = description;
+  let normalizedGdprEmail: string | undefined;
+  let normalizedPrivacyUrl = privacyUrl;
+  let normalizedTermsUrl = termsUrl;
+
   if (options.environment === "PRODUCTION") {
-    if (!options.allowRestrictedProduction) {
-      throw new Error(
-        "PRODUCTION is restricted to personal linked-account evaluation; set ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true to opt in",
-      );
-    }
-    if (!description) throw new Error("description is required for PRODUCTION");
-    if (!gdprEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gdprEmail)) {
-      throw new Error("gdpr_email is required for PRODUCTION");
-    }
-    if (!privacyUrl) throw new Error("privacy_url is required for PRODUCTION");
-    if (!termsUrl) throw new Error("terms_url is required for PRODUCTION");
-    validateProviderDocumentUrl("privacy_url", privacyUrl);
-    validateProviderDocumentUrl("terms_url", termsUrl);
+    normalizedDescription =
+      description ?? DEFAULT_PRODUCTION_DESCRIPTION;
+    normalizedGdprEmail = controlPanelEmail;
+    normalizedPrivacyUrl =
+      privacyUrl ?? DEFAULT_PRODUCTION_PRIVACY_URL;
+    normalizedTermsUrl = termsUrl ?? DEFAULT_PRODUCTION_TERMS_URL;
+    validateProviderDocumentUrl("privacy_url", normalizedPrivacyUrl);
+    validateProviderDocumentUrl("terms_url", normalizedTermsUrl);
   }
 
   return {
@@ -331,10 +335,10 @@ export function normalizeSetupOptions(
     aspspName,
     country,
     redirectUrl,
-    ...(description ? { description } : {}),
-    ...(gdprEmail ? { gdprEmail } : {}),
-    ...(privacyUrl ? { privacyUrl } : {}),
-    ...(termsUrl ? { termsUrl } : {}),
+    ...(normalizedDescription ? { description: normalizedDescription } : {}),
+    ...(normalizedGdprEmail ? { gdprEmail: normalizedGdprEmail } : {}),
+    ...(normalizedPrivacyUrl ? { privacyUrl: normalizedPrivacyUrl } : {}),
+    ...(normalizedTermsUrl ? { termsUrl: normalizedTermsUrl } : {}),
     accessProfile,
     validUntil,
   };

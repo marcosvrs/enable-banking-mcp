@@ -14,7 +14,6 @@ import { BankAuthorizationFlow } from "../dist/authorization.js";
 import { EnableBankingClient } from "../dist/enable-banking.js";
 import {
   ApplicationSetupFlow,
-  normalizeSetupOptions,
   removeTrustedCertificate,
 } from "../dist/setup.js";
 
@@ -321,21 +320,6 @@ test("completes a sandbox setup without shelling to another application", async 
 });
 
 
-test("requires production compliance fields before registration", () => {
-  assert.throws(
-    () =>
-      normalizeSetupOptions({
-        controlPanelEmail: "user@example.com",
-        appName: "Enable Banking MCP",
-        environment: "PRODUCTION",
-        redirectUrl: "https://localhost:8765/callback",
-        aspspName: "Example Bank",
-        country: "FI",
-        allowRestrictedProduction: true,
-      }),
-    /description is required for PRODUCTION/,
-  );
-});
 
 class MemoryApplicationStore {
   value;

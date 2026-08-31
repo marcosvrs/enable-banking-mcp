@@ -16,19 +16,6 @@
       "description": "Local email used only for Enable Banking Control Panel authentication.",
       "sensitive": true,
       "required": true
-    },
-    "gdpr_email": {
-      "type": "string",
-      "title": "Production privacy contact email",
-      "description": "Optional local email required only for restricted Production setup.",
-      "sensitive": true,
-      "default": ""
-    },
-    "allow_restricted_production": {
-      "type": "boolean",
-      "title": "Allow restricted Production setup",
-      "description": "Explicitly allow the server to attempt restricted Production setup.",
-      "default": false
     }
   }
 }

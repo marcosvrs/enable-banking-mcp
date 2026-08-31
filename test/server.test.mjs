@@ -23,7 +23,7 @@ const expectedTools = [
   "setup_status",
 ];
 
-test("exposes documented tools with local Production environment variables", async () => {
+test("exposes documented tools with the local Control Panel email", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["dist/server.js"],
@@ -31,8 +31,6 @@ test("exposes documented tools with local Production environment variables", asy
     env: {
       ...process.env,
       ENABLE_BANKING_CONTROL_PANEL_EMAIL: "user@example.com",
-      ENABLE_BANKING_GDPR_EMAIL: "privacy@example.com",
-      ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION: "true",
     },
   });
   const client = new Client({ name: "enable-banking-mcp-test", version: "0.1.0" });
@@ -41,14 +39,26 @@ test("exposes documented tools with local Production environment variables", asy
     await client.connect(transport);
     const instructions = client.getInstructions() ?? "";
     assert.match(instructions, /setup_enable_banking/);
-    assert.match(instructions, /defaults to restricted PRODUCTION/);
+    assert.match(instructions, /defaults to personal PRODUCTION/);
     assert.match(instructions, /never initiates payments/);
     const response = await client.listTools();
     const names = response.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, expectedTools);
-    assert.doesNotMatch(JSON.stringify(response), /user@example\.com|privacy@example\.com/);
+    assert.doesNotMatch(JSON.stringify(response), /user@example\.com/);
     const setupTool = response.tools.find((tool) => tool.name === "setup_enable_banking");
     assert.equal(setupTool?.inputSchema?.properties?.environment?.default, "PRODUCTION");
+    assert.equal(
+      setupTool?.inputSchema?.properties?.description?.default,
+      "Read-only personal account-information access",
+    );
+    assert.equal(
+      setupTool?.inputSchema?.properties?.privacy_url?.default,
+      "https://marcosvrs.github.io/enable-banking-mcp/privacy-policy/",
+    );
+    assert.equal(
+      setupTool?.inputSchema?.properties?.terms_url?.default,
+      "https://marcosvrs.github.io/enable-banking-mcp/terms-of-use/",
+    );
     assert.equal(
       setupTool?.inputSchema?.properties?.access_profile?.default,
       "balances",

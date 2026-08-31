@@ -26,6 +26,9 @@ import {
 } from "./control-panel-store.js";
 import {
   ApplicationSetupFlow,
+  DEFAULT_PRODUCTION_DESCRIPTION,
+  DEFAULT_PRODUCTION_PRIVACY_URL,
+  DEFAULT_PRODUCTION_TERMS_URL,
   callbackTlsFromApplication,
   removeTrustedCertificate,
   type SetupOptions,
@@ -39,7 +42,7 @@ const server = new McpServer(
   },
   {
     instructions:
-      "Use setup_enable_banking for first-time setup; its environment defaults to restricted PRODUCTION and requires local opt-in plus Production fields, so pass environment=SANDBOX explicitly for sandbox. Then authorize_bank for personal AIS consent before account tools. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account or transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
+      "Use setup_enable_banking for first-time setup; its environment defaults to personal PRODUCTION using the local Control Panel email for the privacy contact and bundled policy URLs. Pass environment=SANDBOX explicitly for sandbox. Then authorize_bank for personal AIS consent before account tools. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account or transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
   },
 );
 
@@ -115,10 +118,8 @@ function failure(error: unknown): ToolResult {
 
 function redactLocalEmails(value: string): string {
   let redacted = value;
-  for (const environmentName of [CONTROL_PANEL_EMAIL_ENV, GDPR_EMAIL_ENV]) {
-    const email = process.env[environmentName]?.trim();
-    if (email) redacted = redacted.split(email).join("[local email redacted]");
-  }
+  const email = process.env[CONTROL_PANEL_EMAIL_ENV]?.trim();
+  if (email) redacted = redacted.split(email).join("[local email redacted]");
   return redacted;
 }
 
@@ -171,7 +172,6 @@ async function sessionClient(): Promise<{
 }
 
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
-const GDPR_EMAIL_ENV = "ENABLE_BANKING_GDPR_EMAIL";
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function requiredLocalEmail(environmentName: string): string {
@@ -184,16 +184,6 @@ function requiredLocalEmail(environmentName: string): string {
   return value;
 }
 
-function optionalLocalEmail(environmentName: string): string | undefined {
-  const value = process.env[environmentName]?.trim();
-  if (!value) return undefined;
-  if (!EMAIL_PATTERN.test(value)) {
-    throw new Error(
-      `${environmentName} must be a valid email in the local MCP server environment`,
-    );
-  }
-  return value;
-}
 
 
 server.registerTool(
@@ -263,7 +253,7 @@ server.registerTool(
       environment: z
         .enum(["PRODUCTION", "SANDBOX"])
         .default("PRODUCTION")
-        .describe("Enable Banking application environment; PRODUCTION is the default and remains guarded by explicit local opt-in"),
+        .describe("Enable Banking application environment; personal PRODUCTION is the default"),
       redirect_url: z
         .string()
         .url()
@@ -280,18 +270,18 @@ server.registerTool(
       description: z
         .string()
         .min(1)
-        .optional()
-        .describe("Required for PRODUCTION applications"),
+        .default(DEFAULT_PRODUCTION_DESCRIPTION)
+        .describe("Application description; defaults to read-only personal access"),
       privacy_url: z
         .string()
         .url()
-        .optional()
-        .describe("Privacy policy URL required for PRODUCTION"),
+        .default(DEFAULT_PRODUCTION_PRIVACY_URL)
+        .describe("Privacy policy URL; defaults to the project policy"),
       terms_url: z
         .string()
         .url()
-        .optional()
-        .describe("Terms of service URL required for PRODUCTION"),
+        .default(DEFAULT_PRODUCTION_TERMS_URL)
+        .describe("Terms of service URL; defaults to the project terms"),
       valid_until: z
         .string()
         .min(1)
@@ -337,13 +327,10 @@ server.registerTool(
         aspspName: aspsp_name,
         country,
         description,
-        gdprEmail: optionalLocalEmail(GDPR_EMAIL_ENV),
         privacyUrl: privacy_url,
         termsUrl: terms_url,
         validUntil: valid_until,
         accessProfile: access_profile as AccessProfile,
-        allowRestrictedProduction:
-          process.env.ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION === "true",
       };
       return setupFlow.start(options);
     }),
