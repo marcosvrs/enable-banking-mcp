@@ -159,35 +159,55 @@ async function sessionClient(): Promise<{
   };
 }
 
+const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
+const GDPR_EMAIL_ENV = "ENABLE_BANKING_GDPR_EMAIL";
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function requiredLocalEmail(environmentName: string): string {
+  const value = process.env[environmentName]?.trim();
+  if (!value || !EMAIL_PATTERN.test(value)) {
+    throw new Error(
+      `${environmentName} must be set to a valid email in the local MCP server environment`,
+    );
+  }
+  return value;
+}
+
+function optionalLocalEmail(environmentName: string): string | undefined {
+  const value = process.env[environmentName]?.trim();
+  if (!value) return undefined;
+  if (!EMAIL_PATTERN.test(value)) {
+    throw new Error(
+      `${environmentName} must be a valid email in the local MCP server environment`,
+    );
+  }
+  return value;
+}
+
+
 server.registerTool(
   "control_panel_authenticate",
   {
     description:
-      "Authenticate to the Enable Banking Control Panel by email link and store the session in macOS Keychain",
-    inputSchema: {
-      email: z
-        .string()
-        .email()
-        .describe("Email used for Enable Banking Control Panel sign-in"),
-    },
+      "Authenticate with the local email configured in ENABLE_BANKING_CONTROL_PANEL_EMAIL and store the session in macOS Keychain; the email is never an MCP argument or result",
   },
-  async ({ email }) =>
+  async () =>
     safely(async () => {
-      const auth = await controlPanelAuth.authenticate(email);
+      const auth = await controlPanelAuth.authenticate(
+        requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
+      );
       await controlPanelAuthStore.set(auth);
       return {
         authenticated: true,
-        email: auth.email,
         ...(auth.expiresAt ? { expires_at: auth.expiresAt } : {}),
       };
     }),
 );
-
 server.registerTool(
   "control_panel_status",
   {
     description:
-      "Show Control Panel authentication state without exposing access or refresh tokens",
+      "Show Control Panel authentication state without exposing the email or access and refresh tokens",
   },
   async () =>
     safely(async () => {
@@ -195,7 +215,6 @@ server.registerTool(
       if (!auth) return { authenticated: false };
       return {
         authenticated: true,
-        email: auth.email,
         ...(auth.expiresAt
           ? {
               expires_at: auth.expiresAt,
@@ -205,6 +224,7 @@ server.registerTool(
       };
     }),
 );
+
 
 server.registerTool(
   "control_panel_logout",
@@ -222,12 +242,8 @@ server.registerTool(
   "setup_enable_banking",
   {
     description:
-      "Create a personal, noncommercial Enable Banking AIS application, guide linked-account setup, and store credentials in macOS Keychain",
+      "Create a personal, noncommercial Enable Banking AIS application using email configured in the local MCP server environment, guide linked-account setup, and store credentials in macOS Keychain; never send email through MCP",
     inputSchema: {
-      control_panel_email: z
-        .string()
-        .email()
-        .describe("Email used for Enable Banking Control Panel sign-in"),
       app_name: z
         .string()
         .min(1)
@@ -255,11 +271,6 @@ server.registerTool(
         .min(1)
         .optional()
         .describe("Required for PRODUCTION applications"),
-      gdpr_email: z
-        .string()
-        .email()
-        .optional()
-        .describe("Data protection contact required for PRODUCTION"),
       privacy_url: z
         .string()
         .url()
@@ -282,14 +293,12 @@ server.registerTool(
     },
   },
   async ({
-    control_panel_email,
     app_name,
     environment,
     redirect_url,
     aspsp_name,
     country,
     description,
-    gdpr_email,
     privacy_url,
     terms_url,
     valid_until,
@@ -310,14 +319,14 @@ server.registerTool(
         );
       }
       const options: SetupOptions = {
-        controlPanelEmail: control_panel_email,
+        controlPanelEmail: requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
         appName: app_name,
         environment,
         redirectUrl: redirect_url,
         aspspName: aspsp_name,
         country,
         description,
-        gdprEmail: gdpr_email,
+        gdprEmail: optionalLocalEmail(GDPR_EMAIL_ENV),
         privacyUrl: privacy_url,
         termsUrl: terms_url,
         validUntil: valid_until,

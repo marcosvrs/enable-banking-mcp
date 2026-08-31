@@ -24,6 +24,22 @@ The source code is open source under the [MIT License](LICENSE). MIT permits dow
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
 
+Set `ENABLE_BANKING_CONTROL_PANEL_EMAIL` in the local MCP server environment
+before authentication. The email is deliberately not an MCP tool argument or
+result. Do not put it in a prompt, tool call, issue, log, or committed
+configuration.
+
+For a shell-launched process, set it before starting the server:
+
+```sh
+export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
+```
+
+Use the equivalent local environment setting in an MCP client launch
+configuration. The server inherits the value locally; it is not loaded from a
+`.env` file. Keep the value out of cloud-managed prompts, tool arguments, logs,
+and configuration synchronization.
+
 The bank-consent callback uses HTTPS and a generated or configured localhost certificate. The Control Panel email-link callback is loopback-only and state-bound. Setup can add the generated bank-callback certificate to the macOS login Keychain. The browser may still require the normal local-certificate trust confirmation.
 
 ## Install and run
@@ -46,16 +62,44 @@ The npm lifecycle does not modify Git configuration automatically.
 
 ## First-run flow
 
-Call `setup_enable_banking` from the MCP client with:
+The setup tool reads the Control Panel email from the local
+`ENABLE_BANKING_CONTROL_PANEL_EMAIL` environment variable. Call
+`setup_enable_banking` with only non-email setup fields:
 
-- the Control Panel email;
 - an application name;
 - `SANDBOX` or explicitly permitted restricted `PRODUCTION`;
 - the HTTPS loopback redirect URL, defaulting to `https://localhost:8765/callback`;
 - the target ASPSP name and two-letter country code; and
 - `access_profile` set to `balances` (default) or `balances_and_transactions`.
 
+For example, the MCP arguments can contain:
+
+```json
+{
+  "app_name": "Enable Banking MCP",
+  "environment": "SANDBOX",
+  "redirect_url": "https://localhost:8765/callback",
+  "aspsp_name": "Example Bank",
+  "country": "IE",
+  "access_profile": "balances"
+}
+```
+
 Setup authenticates the Control Panel, registers the application, starts the personal AIS consent flow, and stores the application and current session in macOS Keychain. Complete the browser and bank steps, then use `setup_status`.
+
+For an already configured application, `control_panel_authenticate` takes no
+arguments and reads the same local environment variable. `control_panel_status`
+reports only authentication state and expiry; it does not return the email or
+tokens.
+
+For restricted Production, also set `ENABLE_BANKING_GDPR_EMAIL` in the local
+MCP server environment. Do not pass either email through MCP.
+
+Example Production-only local setting:
+
+```sh
+export ENABLE_BANKING_GDPR_EMAIL='privacy-contact@example.com'
+```
 
 Production setup is deliberately blocked unless the operator sets:
 

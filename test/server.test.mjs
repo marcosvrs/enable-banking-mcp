@@ -43,6 +43,15 @@ test("exposes documented banking and Control Panel tools over stdio", async () =
       setupTool?.inputSchema?.properties?.access_profile?.default,
       "balances",
     );
+    const authTool = response.tools.find(
+      (tool) => tool.name === "control_panel_authenticate",
+    );
+    assert.equal(authTool?.inputSchema?.properties?.email, undefined);
+    assert.equal(
+      setupTool?.inputSchema?.properties?.control_panel_email,
+      undefined,
+    );
+    assert.equal(setupTool?.inputSchema?.properties?.gdpr_email, undefined);
     const authorizeBankTool = response.tools.find((tool) => tool.name === "authorize_bank");
     assert.equal(
       authorizeBankTool?.inputSchema?.properties?.access_profile?.default,
