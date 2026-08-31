@@ -78,10 +78,10 @@ Local cleanup does not revoke bank consent, unlink accounts, delete provider-sid
 
 ## Privacy and terms
 
-The [privacy policy](privacy-policy.md) and [terms of use](terms-of-use.md) provide general personal-use information for self-hosted deployments. This repository does not appoint an operator or controller and does not assume responsibility for any deployment or user's actions. The pages are published on the public GitHub branch below; a deployment's operator must provide any separate contact and legal information required by the provider:
+The [privacy policy](docs/privacy-policy.md) and [terms of use](docs/terms-of-use.md) provide general personal-use information for self-hosted deployments. This repository does not appoint an operator or controller and does not assume responsibility for any deployment or user's actions. The documents are stored under `docs/` as the source for the GitHub Pages site:
 
-- Privacy: https://github.com/marcosvrs/enable-banking-mcp/blob/personal-production-notices/privacy-policy.md
-- Terms: https://github.com/marcosvrs/enable-banking-mcp/blob/personal-production-notices/terms-of-use.md
+- Privacy: https://marcosvrs.github.io/enable-banking-mcp/privacy-policy/
+- Terms: https://marcosvrs.github.io/enable-banking-mcp/terms-of-use/
 
 Review the current provider materials directly:
 

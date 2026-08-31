@@ -1,3 +1,8 @@
+---
+title: Terms of Use
+permalink: /terms-of-use/
+---
+
 # Terms of Use
 
 **Status:** General personal-use terms for self-hosted deployments
@@ -12,7 +17,7 @@ maintainer and a user, do not make the maintainer responsible for a deployment
 or a user's actions, and do not create terms for a hosted service or other
 users.
 
-The repository's [MIT License](LICENSE) governs the software itself. These
+The repository's [MIT License](../LICENSE) governs the software itself. These
 terms do not replace that license or the separate terms of Enable Banking, a
 bank, an ASPSP, an MCP client, an AI host, or any other provider.
 
@@ -139,7 +144,7 @@ is promised.
 ## 8. Intellectual property
 
 Original repository code and documentation are licensed under the [MIT
-License](LICENSE). Enable Banking names, marks, APIs, Control Panel, bank
+License](../LICENSE). Enable Banking names, marks, APIs, Control Panel, bank
 services, bank data, and third-party materials remain the property of their
 respective rights holders. These terms grant no right to use a third-party
 service or brand.

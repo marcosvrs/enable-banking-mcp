@@ -1,3 +1,8 @@
+---
+title: Privacy Policy
+permalink: /privacy-policy/
+---
+
 # Privacy Policy
 
 **Status:** General personal-use notice for self-hosted deployments
