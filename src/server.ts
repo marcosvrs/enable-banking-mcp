@@ -9,22 +9,17 @@ import {
   DEFAULT_REDIRECT_URL,
   launchBrowser,
   loadCallbackTlsOptions,
+  type AccessProfile,
 } from "./authorization.js";
 import {
   EnableBankingApiError,
   EnableBankingClient,
   getHealth,
 } from "./enable-banking.js";
+import { MacKeychainApplicationStore } from "./application-store.js";
 import {
-  MacKeychainApplicationStore,
-} from "./application-store.js";
-import {
-  ControlPanelApiError,
   ControlPanelAuthFlow,
   ControlPanelClient,
-  isControlPanelRouteAllowed,
-  type ControlPanelHttpMethod,
-  type ControlPanelRequestOptions,
 } from "./control-panel.js";
 import {
   MacKeychainControlPanelAuthStore,
@@ -32,12 +27,14 @@ import {
 import {
   ApplicationSetupFlow,
   callbackTlsFromApplication,
+  removeTrustedCertificate,
   type SetupOptions,
 } from "./setup.js";
 import { MacKeychainSessionStore } from "./session-store.js";
+
 const server = new McpServer({
   name: "enable-banking",
-  version: "0.2.0",
+  version: "0.3.0",
 });
 
 const applicationStore = new MacKeychainApplicationStore();
@@ -97,6 +94,7 @@ function failure(error: unknown): ToolResult {
               status: error.status,
               message: error.message,
               ...error.details,
+              ...(error.retryAfter ? { retry_after: error.retryAfter } : {}),
             },
             null,
             2,
@@ -161,71 +159,6 @@ async function sessionClient(): Promise<{
   };
 }
 
-const headerSchema = z.record(z.string(), z.string());
-const controlPanelQuerySchema = z.record(
-  z.string(),
-  z.union([z.string(), z.number(), z.boolean()]),
-);
-const controlPanelBodySchema = z.unknown();
-const aspspSchema = z.object({
-  name: z.string().min(1),
-  country: z.string().length(2),
-});
-const paymentRequestSchema = z
-  .object({
-    payment_type: z.string().min(1),
-    payment_request: z.record(z.string(), z.unknown()),
-    aspsp: aspspSchema,
-    state: z.string(),
-    redirect_url: z.string().url(),
-    psu_type: z.enum(["personal", "business"]),
-    webhook_url: z.string().url().optional(),
-    psu_id: z.string().optional(),
-    defer_submission: z.boolean().optional(),
-  })
-  .passthrough()
-  .describe("Complete CreatePaymentRequest envelope");
-
-async function controlPanelRequest<T>(
-  method: ControlPanelHttpMethod,
-  path: string,
-  options: Omit<ControlPanelRequestOptions, "method"> = {},
-): Promise<T> {
-  if (!isControlPanelRouteAllowed(method, path)) {
-    throw new Error(`Control Panel route is not allowlisted: ${method} ${path}`);
-  }
-  const requestOptions = { ...options, method };
-  const auth = await controlPanelAuthStore.get();
-  if (!auth) {
-    return controlPanelClient.request<T>(path, requestOptions);
-  }
-  try {
-    return await controlPanelClient.requestAuthenticated<T>(
-      auth,
-      path,
-      requestOptions,
-    );
-  } catch (error) {
-    if (!(error instanceof ControlPanelApiError) || error.status !== 401) {
-      throw error;
-    }
-    let refreshed;
-    try {
-      refreshed = await controlPanelClient.refreshAuth(auth);
-    } catch {
-      throw new Error(
-        "Control Panel session expired; call control_panel_authenticate again",
-      );
-    }
-    await controlPanelAuthStore.set(refreshed);
-    return controlPanelClient.requestAuthenticated<T>(
-      refreshed,
-      path,
-      requestOptions,
-    );
-  }
-}
-
 server.registerTool(
   "control_panel_authenticate",
   {
@@ -286,45 +219,10 @@ server.registerTool(
 );
 
 server.registerTool(
-  "control_panel_request",
-  {
-    description:
-      "Call any allowlisted Enable Banking Control Panel endpoint. Mutating endpoints can change applications, consents, links, billing, or subscriptions.",
-    inputSchema: {
-      method: z
-        .enum(["GET", "POST", "PUT", "PATCH", "DELETE"])
-        .describe("HTTP method"),
-      path: z
-        .string()
-        .regex(/^\/api\//)
-        .describe("Allowlisted Control Panel path beginning with /api/"),
-      query: controlPanelQuerySchema
-        .optional()
-        .describe("Query parameters"),
-      body: controlPanelBodySchema
-        .optional()
-        .describe("JSON or form fields for the request body"),
-      body_encoding: z
-        .enum(["json", "form"])
-        .default("json")
-        .describe("How to encode body fields"),
-    },
-  },
-  async ({ method, path, query, body, body_encoding }) =>
-    safely(async () =>
-      controlPanelRequest(method, path, {
-        query,
-        body,
-        bodyEncoding: body_encoding,
-      }),
-    ),
-);
-
-server.registerTool(
   "setup_enable_banking",
   {
     description:
-      "Create a new Enable Banking application, guide account linking, and store the session in macOS Keychain",
+      "Create a personal, noncommercial Enable Banking AIS application, guide linked-account setup, and store credentials in macOS Keychain",
     inputSchema: {
       control_panel_email: z
         .string()
@@ -343,7 +241,7 @@ server.registerTool(
         .string()
         .url()
         .default(DEFAULT_REDIRECT_URL)
-        .describe("Registered loopback callback URL; PRODUCTION requires HTTPS"),
+        .describe("Registered HTTPS loopback callback URL"),
       aspsp_name: z
         .string()
         .min(1)
@@ -377,6 +275,10 @@ server.registerTool(
         .min(1)
         .optional()
         .describe("Future RFC3339 consent expiry; defaults to 30 days"),
+      access_profile: z
+        .enum(["balances", "balances_and_transactions"])
+        .default("balances")
+        .describe("Whether the consent may include transaction history"),
     },
   },
   async ({
@@ -391,6 +293,7 @@ server.registerTool(
     privacy_url,
     terms_url,
     valid_until,
+    access_profile,
   }) =>
     safely(async () => {
       const hasEnvironmentCredentials =
@@ -418,6 +321,9 @@ server.registerTool(
         privacyUrl: privacy_url,
         termsUrl: terms_url,
         validUntil: valid_until,
+        accessProfile: access_profile as AccessProfile,
+        allowRestrictedProduction:
+          process.env.ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION === "true",
       };
       return setupFlow.start(options);
     }),
@@ -436,7 +342,7 @@ server.registerTool(
   "authorize_bank",
   {
     description:
-      "Start an explicit browser-based bank account consent flow; the MCP stores the resulting session in macOS Keychain",
+      "Start a personal, noncommercial AIS consent flow for the user's own account; the MCP stores the resulting session in macOS Keychain",
     inputSchema: {
       aspsp_name: z.string().min(1).describe("Exact ASPSP name from list_banks"),
       country: z
@@ -448,35 +354,16 @@ server.registerTool(
         .string()
         .url()
         .default(DEFAULT_REDIRECT_URL)
-        .describe("Registered loopback callback URL; PRODUCTION requires HTTPS"),
+        .describe("Registered HTTPS loopback callback URL"),
       valid_until: z
         .string()
         .min(1)
         .optional()
         .describe("Future RFC3339 consent expiry; defaults to 30 days"),
-      psu_type: z
-        .enum(["personal", "business"])
-        .optional()
-        .describe("Optional PSU type; omit to use the connector default"),
-      auth_method: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Optional ASPSP authentication method"),
-      credentials: z
-        .record(z.string(), z.string())
-        .optional()
-        .describe("Optional ASPSP credentials; use only with auth_method"),
-      credentials_autosubmit: z
-        .boolean()
-        .optional()
-        .describe("Whether supplied ASPSP credentials may be auto-submitted"),
-      language: z
-        .string()
-        .regex(/^[a-z]{2}$/)
-        .optional()
-        .describe("Optional two-letter lowercase ASPSP language"),
-      psu_id: z.string().min(1).optional().describe("Optional PSU identifier"),
+      access_profile: z
+        .enum(["balances", "balances_and_transactions"])
+        .default("balances")
+        .describe("Whether the consent may include transaction history"),
     },
   },
   async ({
@@ -484,12 +371,7 @@ server.registerTool(
     country,
     redirect_url,
     valid_until,
-    psu_type,
-    auth_method,
-    credentials,
-    credentials_autosubmit,
-    language,
-    psu_id,
+    access_profile,
   }) =>
     safely(async () =>
       authorizationFlow.start(new EnableBankingClient(await resolveCredentials()), {
@@ -497,76 +379,9 @@ server.registerTool(
         country,
         redirectUrl: redirect_url,
         validUntil: valid_until,
-        psuType: psu_type,
-        authMethod: auth_method,
-        credentials,
-        credentialsAutosubmit: credentials_autosubmit,
-        language,
-        psuId: psu_id,
+        accessProfile: access_profile as AccessProfile,
       }),
     ),
-);
-
-server.registerTool(
-  "start_authorization",
-  {
-    description:
-      "Call the documented Enable Banking POST /auth operation and return its authorization response without starting a local callback listener",
-    inputSchema: {
-      request: z
-        .object({
-          aspsp: aspspSchema,
-          access: z.object({
-            accounts: z
-              .array(
-                z.object({
-                  iban: z.string().min(1).optional(),
-                  other: z.record(z.string(), z.unknown()).optional(),
-                }),
-              )
-              .nullable()
-              .optional(),
-            balances: z.boolean().default(true),
-            transactions: z.boolean().default(true),
-            valid_until: z.string().datetime({ offset: true }),
-          }),
-          state: z.string().min(1),
-          redirect_url: z.string().url(),
-          psu_type: z.enum(["personal", "business"]).optional(),
-          auth_method: z.string().min(1).optional(),
-          credentials: z.record(z.string(), z.string()).optional(),
-          credentials_autosubmit: z.boolean().optional(),
-          language: z.string().regex(/^[a-z]{2}$/).optional(),
-          psu_id: z.string().min(1).optional(),
-        })
-        .describe("Complete StartAuthorizationRequest"),
-    },
-  },
-  async ({ request }) =>
-    safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).startAuthorization(
-        request,
-      ),
-    ),
-);
-
-server.registerTool(
-  "create_session",
-  {
-    description:
-      "Exchange an Enable Banking authorization code for a session and store that session as the current MCP session",
-    inputSchema: {
-      authorization_code: z.string().min(1).describe("Authorization callback code"),
-    },
-  },
-  async ({ authorization_code }) =>
-    safely(async () => {
-      const session = await new EnableBankingClient(
-        await resolveCredentials(),
-      ).createSession(authorization_code);
-      await sessionStore.set(session.session_id);
-      return session;
-    }),
 );
 
 server.registerTool(
@@ -591,63 +406,31 @@ server.registerTool(
 server.registerTool(
   "list_banks",
   {
-    description: "List Enable Banking institutions with optional capability filters",
+    description:
+      "List Enable Banking institutions available for personal AIS account-information access",
     inputSchema: {
       country: z
         .string()
         .length(2)
         .optional()
         .describe("Optional two-letter ISO 3166-1 country code"),
-      psu_type: z
-        .enum(["personal", "business"])
-        .optional()
-        .describe("Optional PSU type filter"),
-      service: z
-        .enum(["AIS", "PIS"])
-        .optional()
-        .describe("Optional service filter"),
-      payment_type: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Optional payment type filter"),
     },
   },
-  async ({ country, psu_type, service, payment_type }) =>
+  async ({ country }) =>
     safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).listBanks(country, {
-        psuType: psu_type,
-        service,
-        paymentType: payment_type,
-      }),
+      new EnableBankingClient(await resolveCredentials()).listBanks(country),
     ),
 );
 
 server.registerTool(
   "get_session",
   {
-    description: "Get an Enable Banking session by ID or the current stored session",
-    inputSchema: {
-      session_id: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Optional session ID; defaults to the stored current session"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
+    description: "Get the current stored Enable Banking session",
   },
-  async ({ session_id, psu_headers }) =>
+  async () =>
     safely(async () => {
-      if (!session_id) {
-        const { client, sessionId } = await sessionClient();
-        return client.getSession(sessionId, psu_headers);
-      }
-      return new EnableBankingClient(await resolveCredentials()).getSession(
-        session_id,
-        psu_headers,
-      );
+      const { client, sessionId } = await sessionClient();
+      return client.getSession(sessionId);
     }),
 );
 
@@ -655,39 +438,28 @@ server.registerTool(
   "delete_session",
   {
     description:
-      "Delete an Enable Banking session. This is destructive and removes the session from the provider.",
-    inputSchema: {
-      session_id: z.string().min(1).describe("Enable Banking session ID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
+      "Delete the current Enable Banking session from the provider and local Keychain",
   },
-  async ({ session_id, psu_headers }) =>
+  async () =>
     safely(async () => {
-      const result = await new EnableBankingClient(
-        await resolveCredentials(),
-      ).deleteSession(session_id, psu_headers);
-      if ((await sessionStore.get()) === session_id) {
+      const { client, sessionId } = await sessionClient();
+      const result = await client.deleteSession(sessionId);
+      if ((await sessionStore.get()) === sessionId) {
         await sessionStore.clear();
       }
       return result;
     }),
 );
+
 server.registerTool(
   "list_accounts",
   {
-    description: "List accounts authorized in the current session",
-    inputSchema: {
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
+    description: "List accounts authorized in the current personal AIS session",
   },
-  async ({ psu_headers }) =>
+  async () =>
     safely(async () => {
       const { client, sessionId } = await sessionClient();
-      const session = await client.getSession(sessionId, psu_headers);
+      const session = await client.getSession(sessionId);
       return {
         aspsp: session.aspsp,
         accounts: session.accounts,
@@ -703,16 +475,12 @@ server.registerTool(
     description: "Get details for one authorized account",
     inputSchema: {
       account_id: z.string().min(1).describe("Enable Banking account UID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
     },
   },
-  async ({ account_id, psu_headers }) =>
+  async ({ account_id }) =>
     safely(async () =>
       new EnableBankingClient(await resolveCredentials()).getAccountDetails(
         account_id,
-        psu_headers,
       ),
     ),
 );
@@ -723,16 +491,12 @@ server.registerTool(
     description: "Get balances for one authorized account",
     inputSchema: {
       account_id: z.string().min(1).describe("Enable Banking account UID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
     },
   },
-  async ({ account_id, psu_headers }) =>
+  async ({ account_id }) =>
     safely(async () =>
       new EnableBankingClient(await resolveCredentials()).getAccountBalances(
         account_id,
-        psu_headers,
       ),
     ),
 );
@@ -740,7 +504,7 @@ server.registerTool(
 server.registerTool(
   "get_account_transactions",
   {
-    description: "Get transactions for one authorized account",
+    description: "Get transaction history for one authorized personal account",
     inputSchema: {
       account_id: z.string().min(1).describe("Enable Banking account UID"),
       date_from: z
@@ -770,12 +534,9 @@ server.registerTool(
         .number()
         .int()
         .min(1)
-        .max(500)
-        .default(100)
+        .max(100)
+        .default(25)
         .describe("Maximum transactions to return"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
     },
   },
   async ({
@@ -786,7 +547,6 @@ server.registerTool(
     transaction_status,
     strategy,
     limit,
-    psu_headers,
   }) =>
     safely(async () =>
       new EnableBankingClient(
@@ -798,7 +558,6 @@ server.registerTool(
         transactionStatus: transaction_status,
         strategy,
         limit,
-        headers: psu_headers,
       }),
     ),
 );
@@ -810,123 +569,75 @@ server.registerTool(
     inputSchema: {
       account_id: z.string().min(1).describe("Enable Banking account UID"),
       transaction_id: z.string().min(1).describe("Enable Banking transaction ID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
     },
   },
-  async ({ account_id, transaction_id, psu_headers }) =>
+  async ({ account_id, transaction_id }) =>
     safely(async () =>
       new EnableBankingClient(
         await resolveCredentials(),
-      ).getTransactionDetails(account_id, transaction_id, psu_headers),
+      ).getTransactionDetails(account_id, transaction_id),
     ),
 );
 
 server.registerTool(
-  "create_payment",
+  "clear_local_credentials",
   {
     description:
-      "Create an Enable Banking payment from the documented CreatePaymentRequest. This may initiate a payment consent flow; it does not submit the payment unless defer_submission is false.",
-    inputSchema: {
-      request: paymentRequestSchema,
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
+      "Clear locally stored Enable Banking credentials, session state, Control Panel authentication, and localhost certificate trust",
   },
-  async ({ request, psu_headers }) =>
-    safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).createPayment(
-        request,
-        psu_headers,
-      ),
-    ),
-);
+  async () =>
+    safely(async () => {
+      const setupStatus = await setupFlow.getStatus();
+      if (setupStatus.pending || authorizationFlow.status.pending) {
+        throw new Error("Cannot clear credentials while setup or authorization is pending");
+      }
 
-server.registerTool(
-  "get_payment",
-  {
-    description: "Get the current status and details of an Enable Banking payment",
-    inputSchema: {
-      payment_id: z.string().min(1).describe("Enable Banking payment ID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
-  },
-  async ({ payment_id, psu_headers }) =>
-    safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).getPayment(
-        payment_id,
-        psu_headers,
-      ),
-    ),
-);
+      const failures: string[] = [];
+      let trustedCertificateRemoved = false;
+      let applicationCanBeCleared = true;
+      const application = await applicationStore.get();
+      if (application?.certificate) {
+        try {
+          await removeTrustedCertificate(application.certificate);
+          trustedCertificateRemoved = true;
+        } catch {
+          failures.push("trusted_certificate");
+          applicationCanBeCleared = false;
+        }
+      }
 
-server.registerTool(
-  "delete_payment",
-  {
-    description:
-      "Cancel/delete an Enable Banking payment. This is destructive and may not be reversible.",
-    inputSchema: {
-      payment_id: z.string().min(1).describe("Enable Banking payment ID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
-  },
-  async ({ payment_id, psu_headers }) =>
-    safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).deletePayment(
-        payment_id,
-        psu_headers,
-      ),
-    ),
-);
+      const clearStore = async (
+        name: string,
+        clear: () => Promise<void>,
+      ): Promise<void> => {
+        try {
+          await clear();
+        } catch {
+          failures.push(name);
+        }
+      };
+      await clearStore("session", () => sessionStore.clear());
+      if (applicationCanBeCleared) {
+        await clearStore("application", () => applicationStore.clear());
+      } else {
+        failures.push("application");
+      }
+      await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
-server.registerTool(
-  "submit_payment",
-  {
-    description:
-      "Submit an Enable Banking payment after consent. This is a financial side effect.",
-    inputSchema: {
-      payment_id: z.string().min(1).describe("Enable Banking payment ID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
-  },
-  async ({ payment_id, psu_headers }) =>
-    safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).submitPayment(
-        payment_id,
-        psu_headers,
-      ),
-    ),
-);
-
-server.registerTool(
-  "get_payment_transaction",
-  {
-    description: "Get one transaction created by an Enable Banking payment",
-    inputSchema: {
-      payment_id: z.string().min(1).describe("Enable Banking payment ID"),
-      transaction_id: z
-        .string()
-        .min(1)
-        .describe("Enable Banking payment transaction ID"),
-      psu_headers: headerSchema
-        .optional()
-        .describe("Optional PSD2 PSU headers forwarded to Enable Banking"),
-    },
-  },
-  async ({ payment_id, transaction_id, psu_headers }) =>
-    safely(async () =>
-      new EnableBankingClient(
-        await resolveCredentials(),
-      ).getPaymentTransaction(payment_id, transaction_id, psu_headers),
-    ),
+      const environmentCredentialsPresent = Boolean(
+        (
+          process.env.ENABLE_BANKING_APP_ID?.trim() ||
+          process.env.ENABLE_BANKING_ID?.trim()
+        ) &&
+          process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
+      );
+      return {
+        cleared: failures.length === 0,
+        trusted_certificate_removed: trustedCertificateRemoved,
+        environment_credentials_present: environmentCredentialsPresent,
+        ...(failures.length > 0 ? { failed_items: failures } : {}),
+      };
+    }),
 );
 
 async function main(): Promise<void> {

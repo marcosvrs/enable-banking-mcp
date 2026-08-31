@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import type { ApplicationEnvironment } from "./application-store.js";
 
@@ -22,84 +23,14 @@ const ApplicationRegistrationResponse = z.object({
   app_id: z.string().min(1),
 });
 
-export type ControlPanelHttpMethod =
-  | "GET"
-  | "POST"
-  | "PUT"
-  | "PATCH"
-  | "DELETE";
+type ControlPanelPath =
+  | "/api/relyingparty/getOobConfirmationCode"
+  | "/api/relyingparty/emailLinkSignin"
+  | "/api/applications";
 
-export interface ControlPanelRequestOptions {
-  method?: ControlPanelHttpMethod;
+interface ControlPanelRequestOptions {
   body?: unknown;
-  bodyEncoding?: "json" | "form";
   headers?: Record<string, string>;
-  query?: Record<string, string | number | boolean>;
-}
-
-export interface ControlPanelRoute {
-  methods: readonly ControlPanelHttpMethod[];
-  pattern: RegExp;
-}
-
-export const CONTROL_PANEL_ROUTES: readonly ControlPanelRoute[] = [
-  {
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-    pattern: /^\/api\/applications\/?$/,
-  },
-  {
-    methods: ["GET"],
-    pattern: /^\/api\/application\/[^/]+\/?$/,
-  },
-  { methods: ["GET"], pattern: /^\/api\/aspsps\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/link_accounts\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/unlink_accounts\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/auth_redirect\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/link_payment_accounts\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/link_sandbox_payment_accounts\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/payment_accounts\/?$/ },
-  { methods: ["DELETE"], pattern: /^\/api\/payment_accounts\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/payment_auth_redirect\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/get_consents\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/consent_revocation_redirect\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/revoke_consent\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/requests\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/requestLogs\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/app_statistics\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/get_today_stats\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/get_past_stats\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/get_traffic_stats\/?$/ },
-  {
-    methods: ["GET"],
-    pattern: /^\/api\/v2\/cp\/monitoring\/disruptions\/?$/,
-  },
-  { methods: ["GET"], pattern: /^\/api\/getBrokers\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/get_sso_jwt\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/shareApplication\/?$/ },
-  { methods: ["GET", "POST", "DELETE"], pattern: /^\/api\/subscriptions\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/billing\/accounts\/?$/ },
-  {
-    methods: ["GET"],
-    pattern: /^\/api\/billing\/accounts\/[^/]+\/details\/?$/,
-  },
-  { methods: ["GET"], pattern: /^\/api\/billing\/invoices\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/billing\/quote-requests\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/onboarding\/plans\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/onboarding\/tasks\/?$/ },
-  { methods: ["GET"], pattern: /^\/api\/onboarding\/integrations\/?$/ },
-  { methods: ["GET", "POST"], pattern: /^\/api\/packages\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/connectors\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/users\/?$/ },
-  { methods: ["POST"], pattern: /^\/api\/data-insights\/?$/ },
-];
-
-export function isControlPanelRouteAllowed(
-  method: ControlPanelHttpMethod,
-  path: string,
-): boolean {
-  return CONTROL_PANEL_ROUTES.some(
-    (route) => route.methods.includes(method) && route.pattern.test(path),
-  );
 }
 
 export interface ControlPanelAuth {
@@ -155,12 +86,12 @@ export class ControlPanelClient {
     ) {
       throw new Error("Control Panel callback port is invalid");
     }
+    const callbackUrl = validateCallbackPath(callbackPath);
     await this.request("/api/relyingparty/getOobConfirmationCode", {
-      method: "POST",
       body: {
         requestType: "EMAIL_SIGNIN",
         email: normalizedEmail,
-        continueUrl: `http://localhost:${callbackPort}${callbackPath}`,
+        continueUrl: `http://localhost:${callbackPort}${callbackUrl}`,
         canHandleCodeInApp: true,
       },
     });
@@ -173,7 +104,6 @@ export class ControlPanelClient {
     const result = await this.request<unknown>(
       "/api/relyingparty/emailLinkSignin",
       {
-        method: "POST",
         body: {
           oobCode: confirmationCode,
           email: email.trim(),
@@ -263,7 +193,6 @@ export class ControlPanelClient {
       auth,
       "/api/applications",
       {
-        method: "POST",
         body: request,
       },
     );
@@ -276,9 +205,9 @@ export class ControlPanelClient {
     return parsed.data;
   }
 
-  async requestAuthenticated<T = unknown>(
+  private async requestAuthenticated<T = unknown>(
     auth: ControlPanelAuth,
-    path: string,
+    path: ControlPanelPath,
     options: ControlPanelRequestOptions = {},
   ): Promise<T> {
     return this.request<T>(path, {
@@ -290,59 +219,24 @@ export class ControlPanelClient {
     });
   }
 
-  async request<T = unknown>(
-    path: string,
+  private async request<T = unknown>(
+    path: ControlPanelPath,
     options: ControlPanelRequestOptions = {},
   ): Promise<T> {
-    if (!path.startsWith("/")) {
-      throw new Error("Control Panel paths must start with /");
-    }
     const baseUrl = this.baseUrl.replace(/\/+$/, "");
     const url = new URL(`${baseUrl}${path}`);
-    for (const [key, value] of Object.entries(options.query ?? {})) {
-      url.searchParams.set(key, String(value));
-    }
-
     const headers: Record<string, string> = {
       Accept: "application/json",
       ...options.headers,
     };
     const init: RequestInit = {
-      method: options.method ?? "GET",
+      method: "POST",
       headers,
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     };
     if (options.body !== undefined) {
-      if (options.bodyEncoding === "form") {
-        headers["Content-Type"] = "application/x-www-form-urlencoded";
-        if (typeof options.body === "string") {
-          init.body = options.body;
-        } else {
-          const form = new URLSearchParams();
-          if (
-            typeof options.body !== "object" ||
-            options.body === null ||
-            Array.isArray(options.body)
-          ) {
-            throw new Error("form request bodies must be objects or strings");
-          }
-          for (const [key, value] of Object.entries(
-            options.body as Record<string, unknown>,
-          )) {
-            if (value === undefined) continue;
-            form.set(
-              key,
-              typeof value === "object" && value !== null
-                ? JSON.stringify(value)
-                : String(value),
-            );
-          }
-          init.body = form.toString();
-        }
-      } else {
-        headers["Content-Type"] = "application/json";
-        init.body = JSON.stringify(options.body);
-      }
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(options.body);
     }
 
     const response = await this.fetchFn(url, init);
@@ -387,9 +281,12 @@ export class ControlPanelAuthFlow {
 }
 
 export async function createControlPanelCallbackListener(): Promise<ControlPanelCallbackListener> {
-  const callbackPath = "/";
+  const callbackPath = "/callback";
+  const expectedState = randomBytes(32).toString("base64url");
+  const callbackUrl = `${callbackPath}?state=${encodeURIComponent(expectedState)}`;
   const { promise: codePromise, resolve, reject } =
     Promise.withResolvers<string>();
+  let settled = false;
   const server = createServer((request, response) => {
     let requestUrl: URL;
     try {
@@ -405,11 +302,20 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
       return;
     }
 
-    const error = requestUrl.searchParams.get("error");
-    if (error) {
+    const receivedState = requestUrl.searchParams.get("state");
+    if (!receivedState || !sameSecret(expectedState, receivedState)) {
+      response.writeHead(400, { "content-type": "text/plain" });
+      response.end("Invalid Enable Banking sign-in state.");
+      return;
+    }
+
+    if (requestUrl.searchParams.has("error")) {
       response.writeHead(400, { "content-type": "text/plain" });
       response.end("Enable Banking sign-in was denied.");
-      reject(new Error("Enable Banking Control Panel sign-in was denied"));
+      if (!settled) {
+        settled = true;
+        reject(new Error("Enable Banking Control Panel sign-in was denied"));
+      }
       return;
     }
 
@@ -422,7 +328,10 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
 
     response.writeHead(200, { "content-type": "text/plain" });
     response.end("Enable Banking sign-in complete. You may close this window.");
-    resolve(confirmationCode);
+    if (!settled) {
+      settled = true;
+      resolve(confirmationCode);
+    }
   });
 
   const { promise: listening, resolve: markListening, reject: failListening } =
@@ -446,7 +355,10 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
   }
 
   const timeout = setTimeout(() => {
-    reject(new Error("Enable Banking Control Panel sign-in timed out"));
+    if (!settled) {
+      settled = true;
+      reject(new Error("Enable Banking Control Panel sign-in timed out"));
+    }
   }, CALLBACK_TIMEOUT_MS);
   timeout.unref();
 
@@ -465,9 +377,38 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
     await closedPromise;
   };
 
-  return { port, path: callbackPath, wait: codePromise, close };
+  return { port, path: callbackUrl, wait: codePromise, close };
 }
 
+function validateCallbackPath(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value, "http://localhost");
+  } catch {
+    throw new Error("Control Panel callback path is invalid");
+  }
+  if (
+    url.protocol !== "http:" ||
+    url.hostname !== "localhost" ||
+    url.pathname !== "/callback" ||
+    url.hash ||
+    url.searchParams.size !== 1 ||
+    !url.searchParams.has("state") ||
+    !/^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("state") ?? "")
+  ) {
+    throw new Error("Control Panel callback path must contain a valid state");
+  }
+  return `${url.pathname}?${url.searchParams.toString()}`;
+}
+
+function sameSecret(expected: string, received: string): boolean {
+  const expectedBytes = Buffer.from(expected);
+  const receivedBytes = Buffer.from(received);
+  return (
+    expectedBytes.length === receivedBytes.length &&
+    timingSafeEqual(expectedBytes, receivedBytes)
+  );
+}
 function parseJson(raw: string): unknown {
   if (!raw) return {};
   try {
@@ -476,7 +417,6 @@ function parseJson(raw: string): unknown {
     return { message: raw };
   }
 }
-
 
 function extractErrorMessage(body: unknown): string | undefined {
   if (typeof body !== "object" || body === null) return undefined;

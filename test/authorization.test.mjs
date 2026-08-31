@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BankAuthorizationFlow } from "../dist/authorization.js";
+import { BankAuthorizationFlow, parseValidUntil } from "../dist/authorization.js";
 
 class MemorySessionStore {
   sessionId;
@@ -66,6 +66,7 @@ test("opens browser authorization and stores the callback session", async () => 
     country: "ie",
     redirectUrl: "https://localhost:8765/callback",
     validUntil: "2099-12-01T00:00:00.000Z",
+    accessProfile: "balances_and_transactions",
   });
 
   assert.deepEqual(result, {
@@ -77,7 +78,7 @@ test("opens browser authorization and stores the callback session", async () => 
   assert.equal(authorizationRequest.redirect_url, "https://localhost:8765/callback");
   assert.equal(authorizationRequest.access.balances, true);
   assert.equal(authorizationRequest.access.transactions, true);
-  assert.equal("psu_type" in authorizationRequest, false);
+  assert.equal(authorizationRequest.psu_type, "personal");
   assert.match(callbackState, /^[A-Za-z0-9_-]{43}$/);
 
   completion.resolve("callback-code");
@@ -85,20 +86,17 @@ test("opens browser authorization and stores the callback session", async () => 
   assert.equal(flow.status.pending, false);
 });
 
-test("accepts HTTP loopback callback URLs", async () => {
+test("requests balances without transactions by default", async () => {
   const store = new MemorySessionStore();
-  let callbackRedirect;
+  const completion = Promise.withResolvers();
   let authorizationRequest;
   const flow = new BankAuthorizationFlow(
     store,
     () => {},
-    async (redirect) => {
-      callbackRedirect = redirect;
-      return {
-        wait: Promise.resolve("callback-code"),
-        close: async () => {},
-      };
-    },
+    async () => ({
+      wait: completion.promise,
+      close: async () => {},
+    }),
   );
   const client = {
     async startAuthorization(request) {
@@ -109,8 +107,7 @@ test("accepts HTTP loopback callback URLs", async () => {
         psu_id_hash: "psu-hash",
       };
     },
-    async createSession(code) {
-      assert.equal(code, "callback-code");
+    async createSession() {
       return { session_id: "stored-session-id" };
     },
   };
@@ -118,14 +115,30 @@ test("accepts HTTP loopback callback URLs", async () => {
   await flow.start(client, {
     aspspName: "Example Bank",
     country: "IE",
-    redirectUrl: "http://localhost:8765/callback",
+    redirectUrl: "https://localhost:8765/callback",
     validUntil: "2099-12-01T00:00:00.000Z",
   });
 
-  assert.equal(callbackRedirect.protocol, "http:");
-  assert.equal(callbackRedirect.hostname, "localhost");
-  assert.equal(authorizationRequest.redirect_url, "http://localhost:8765/callback");
+  assert.equal(authorizationRequest.access.balances, true);
+  assert.equal(authorizationRequest.access.transactions, false);
+  completion.resolve("callback-code");
   assert.equal(await waitForSession(store), "stored-session-id");
+});
+
+test("rejects HTTP loopback callback URLs", async () => {
+  const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => {});
+  await assert.rejects(
+    flow.start(
+      {},
+      {
+        aspspName: "Example Bank",
+        country: "IE",
+        redirectUrl: "http://localhost:8765/callback",
+        validUntil: "2099-12-01T00:00:00.000Z",
+      },
+    ),
+    /redirect_url must be an https:\/\/ localhost or 127\.0\.0\.1 URL/,
+  );
 });
 
 test("rejects non-loopback callback URLs", async () => {
@@ -136,10 +149,17 @@ test("rejects non-loopback callback URLs", async () => {
       {
         aspspName: "Example Bank",
         country: "IE",
-        redirectUrl: "http://example.com/callback",
+        redirectUrl: "https://constructor:8765/callback",
         validUntil: "2099-12-01T00:00:00.000Z",
       },
     ),
-    /redirect_url must be an http:\/\/ or https:\/\/ localhost or 127\.0\.0\.1 URL/,
+    /redirect_url must be an https:\/\/ localhost or 127\.0\.0\.1 URL/,
+  );
+});
+
+test("requires RFC3339 date-times for consent expiry", () => {
+  assert.throws(
+    () => parseValidUntil("2099-12-01"),
+    /valid_until must be a future RFC3339 date-time/,
   );
 });

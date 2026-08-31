@@ -41,7 +41,7 @@ test("waits for production account linking before bank consent", async () => {
     controlPanelClient,
     async () => ({
       port: 4321,
-      path: "/",
+      path: `/callback?state=${"A".repeat(43)}`,
       wait: Promise.resolve("oob-code"),
       close: async () => {},
     }),
@@ -54,7 +54,11 @@ test("waits for production account linking before bank consent", async () => {
   let activationChecks = 0;
   const bankClientFactory = (credentials) =>
     new EnableBankingClient(credentials, async (url) => {
-      if (String(url).endsWith("/aspsps?country=FI")) {
+      if (new URL(String(url)).pathname === "/aspsps") {
+        const requestUrl = new URL(String(url));
+        assert.equal(requestUrl.searchParams.get("psu_type"), "personal");
+        assert.equal(requestUrl.searchParams.get("service"), "AIS");
+        assert.equal(requestUrl.searchParams.get("country"), "FI");
         return new Response(
           JSON.stringify({
             aspsps: [{ name: "Example Bank", country: "FI" }],
@@ -119,6 +123,7 @@ test("waits for production account linking before bank consent", async () => {
     privacyUrl: "https://example.com/privacy",
     termsUrl: "https://example.com/terms",
     validUntil: "2099-01-01T00:00:00Z",
+    allowRestrictedProduction: true,
   });
 
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -135,7 +140,7 @@ test("waits for production account linking before bank consent", async () => {
   assert.equal(await sessionStore.get(), "session-id");
 });
 
-test("requires HTTPS loopback callbacks for production", () => {
+test("requires HTTPS loopback callbacks for every environment", () => {
   assert.throws(
     () =>
       normalizeSetupOptions({
@@ -150,6 +155,45 @@ test("requires HTTPS loopback callbacks for production", () => {
         privacyUrl: "https://example.com/privacy",
         termsUrl: "https://example.com/terms",
       }),
-    /redirect_url must use HTTPS for PRODUCTION/,
+    /redirect_url must be an https:\/\/ localhost or 127\.0\.0\.1 URL/,
+  );
+});
+
+test("requires explicit opt-in before restricted Production setup", () => {
+  assert.throws(
+    () =>
+      normalizeSetupOptions({
+        controlPanelEmail: "user@example.com",
+        appName: "Enable Banking MCP",
+        environment: "PRODUCTION",
+        redirectUrl: "https://localhost:8765/callback",
+        aspspName: "Example Bank",
+        country: "FI",
+        description: "A read-only local banking client",
+        gdprEmail: "privacy@example.com",
+        privacyUrl: "https://example.com/privacy",
+        termsUrl: "https://example.com/terms",
+      }),
+    /PRODUCTION is restricted.*ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true/,
+  );
+});
+
+test("requires HTTPS policy URLs for Production setup", () => {
+  assert.throws(
+    () =>
+      normalizeSetupOptions({
+        controlPanelEmail: "user@example.com",
+        appName: "Enable Banking MCP",
+        environment: "PRODUCTION",
+        redirectUrl: "https://localhost:8765/callback",
+        aspspName: "Example Bank",
+        country: "FI",
+        description: "A read-only local banking client",
+        gdprEmail: "privacy@example.com",
+        privacyUrl: "http://example.com/privacy",
+        termsUrl: "https://example.com/terms",
+        allowRestrictedProduction: true,
+      }),
+    /privacy_url must be a valid HTTPS URL/,
   );
 });

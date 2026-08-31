@@ -124,11 +124,16 @@ The retention schedule for this personal deployment is:
 
 | Data | Retention |
 | --- | --- |
-| Control Panel authentication | Until logout, expiry, or `clear_local_credentials` |
-| Application private key and certificate | Until application teardown or `clear_local_credentials` |
-| Current session ID | Until `delete_session`, expiry, or `clear_local_credentials` |
+| Control Panel authentication | Until explicit logout, `clear_local_credentials`, or replacement; expiry alone does not clear the record |
+| Application private key and certificate | Until `clear_local_credentials`, replacement, or manual teardown |
+| Current session ID | Until `delete_session`, `clear_local_credentials`, replacement, or manual teardown; no local expiry metadata is stored |
 | API responses and callback data | Process memory only unless the MCP client, AI host, logs, or backups retain them |
 | Operational logs and diagnostics | Only as retained by the operator's operating system and tools |
+
+The Control Panel record includes the sign-in email and authentication tokens. An
+expired Control Panel record may remain in Keychain until explicit cleanup or
+replacement. The local session store retains an opaque provider session ID and
+does not know when the provider considers it expired.
 
 `clear_local_credentials` clears local Keychain records and attempts to remove
 the locally trusted certificate. It does not delete provider-side records,
@@ -141,8 +146,9 @@ and `delete_session` where appropriate.
 The deployment uses HTTPS for remote API requests and the bank-consent
 callback, binds callback responses to a one-time state value, restricts
 callbacks to an explicit loopback host and port, and avoids returning
-credentials in status tools. The Control Panel email-link callback is also
-loopback-only and state-bound.
+credentials in status tools. The Control Panel email-link callback uses a
+separate loopback HTTP listener with a state-bound one-time sign-in code; it
+is not exposed as a public endpoint.
 
 The person running a deployment controls the macOS account and Keychain,
 environment variables, certificate trust, browser, MCP client, AI host,

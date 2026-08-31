@@ -3,10 +3,6 @@ export interface EnableBankingCredentials {
   privateKey: string;
 }
 
-export interface EnableBankingConfig extends EnableBankingCredentials {
-  sessionId?: string;
-}
-
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
   if (!value) {
@@ -28,14 +24,5 @@ export function loadCredentials(
   return {
     appId,
     privateKey: required(env, "ENABLE_BANKING_PRIVATE_KEY"),
-  };
-}
-
-export function loadConfig(
-  env: NodeJS.ProcessEnv = process.env,
-): EnableBankingConfig {
-  return {
-    ...loadCredentials(env),
-    sessionId: env.ENABLE_BANKING_SESSION_ID?.trim(),
   };
 }

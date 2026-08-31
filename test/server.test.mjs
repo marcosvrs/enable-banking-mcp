@@ -5,29 +5,22 @@ import test from "node:test";
 
 const expectedTools = [
   "authorize_bank",
+  "clear_local_credentials",
   "control_panel_authenticate",
   "control_panel_logout",
-  "control_panel_request",
   "control_panel_status",
-  "create_payment",
-  "create_session",
-  "delete_payment",
   "delete_session",
   "get_account_balances",
   "get_account_details",
   "get_account_transactions",
   "get_application",
   "get_health",
-  "get_payment",
-  "get_payment_transaction",
   "get_session",
   "get_transaction_details",
   "list_accounts",
   "list_banks",
   "setup_enable_banking",
   "setup_status",
-  "start_authorization",
-  "submit_payment",
 ];
 
 test("exposes documented banking and Control Panel tools over stdio", async () => {
@@ -46,27 +39,27 @@ test("exposes documented banking and Control Panel tools over stdio", async () =
     assert.deepEqual(names, expectedTools);
     const setupTool = response.tools.find((tool) => tool.name === "setup_enable_banking");
     assert.equal(setupTool?.inputSchema?.properties?.environment?.default, "SANDBOX");
-    const authorizeBankTool = response.tools.find((tool) => tool.name === "authorize_bank");
-    const authorizeBankPsuType =
-      authorizeBankTool?.inputSchema?.properties?.psu_type;
-    assert.equal(authorizeBankPsuType?.default, undefined);
-    assert.ok(!authorizeBankTool?.inputSchema?.required?.includes("psu_type"));
-    const startTool = response.tools.find((tool) => tool.name === "start_authorization");
-    const accessSchema =
-      startTool?.inputSchema?.properties?.request?.properties?.access;
-    assert.equal(accessSchema?.properties?.balances?.default, true);
-    assert.equal(accessSchema?.properties?.transactions?.default, true);
-    assert.equal(accessSchema?.properties?.valid_until?.format, "date-time");
-    assert.ok(!accessSchema?.required?.includes("balances"));
-    assert.ok(!accessSchema?.required?.includes("transactions"));
-    const listBanksTool = response.tools.find((tool) => tool.name === "list_banks");
-    assert.equal(listBanksTool?.inputSchema?.properties?.country?.default, undefined);
-    assert.ok(!listBanksTool?.inputSchema?.required?.includes("country"));
-    const paymentTool = response.tools.find((tool) => tool.name === "create_payment");
-    assert.deepEqual(
-      paymentTool?.inputSchema?.properties?.request?.required?.sort(),
-      ["aspsp", "payment_request", "payment_type", "psu_type", "redirect_url", "state"],
+    assert.equal(
+      setupTool?.inputSchema?.properties?.access_profile?.default,
+      "balances",
     );
+    const authorizeBankTool = response.tools.find((tool) => tool.name === "authorize_bank");
+    assert.equal(
+      authorizeBankTool?.inputSchema?.properties?.access_profile?.default,
+      "balances",
+    );
+    assert.equal(
+      authorizeBankTool?.inputSchema?.properties?.psu_type,
+      undefined,
+    );
+    const listBanksTool = response.tools.find((tool) => tool.name === "list_banks");
+    assert.equal(listBanksTool?.inputSchema?.properties?.service, undefined);
+    assert.equal(listBanksTool?.inputSchema?.properties?.psu_type, undefined);
+    assert.equal(listBanksTool?.inputSchema?.properties?.payment_type, undefined);
+    const sessionTool = response.tools.find((tool) => tool.name === "get_session");
+    assert.equal(sessionTool?.inputSchema?.properties?.session_id, undefined);
+    const paymentTool = response.tools.find((tool) => tool.name === "create_payment");
+    assert.equal(paymentTool, undefined);
   } finally {
     await client.close();
   }

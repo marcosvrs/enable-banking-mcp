@@ -1,6 +1,6 @@
 # Enable Banking MCP
 
-A local, read-only MCP server for personal Enable Banking account-information access on macOS.
+A local MCP server for read-only personal Enable Banking account-information access on macOS, with explicit setup and credential/session cleanup tools.
 
 This repository is not operated by Enable Banking and is not an Enable Banking partner or approved application. Provider access is subject to the current provider terms, eligibility decision, bank consent flow, and technical requirements.
 

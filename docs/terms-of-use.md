@@ -17,7 +17,7 @@ maintainer and a user, do not make the maintainer responsible for a deployment
 or a user's actions, and do not create terms for a hosted service or other
 users.
 
-The repository's [MIT License](../LICENSE) governs the software itself. These
+The repository's [MIT License](https://github.com/marcosvrs/enable-banking-mcp/blob/main/LICENSE) governs the software itself. These
 terms do not replace that license or the separate terms of Enable Banking, a
 bank, an ASPSP, an MCP client, an AI host, or any other provider.
 
@@ -124,7 +124,7 @@ The individual operator must not:
 
 ## 6. Data and privacy
 
-Processing is described in the [Privacy Policy](privacy-policy.md). A person
+Processing is described in the [Privacy Policy](https://marcosvrs.github.io/enable-banking-mcp/privacy-policy/). A person
 running a deployment should review that policy and the provider notices before
 using a Production application. The repository maintainer distributes source
 code and does not operate deployments or receive their tool results.
@@ -144,7 +144,7 @@ is promised.
 ## 8. Intellectual property
 
 Original repository code and documentation are licensed under the [MIT
-License](../LICENSE). Enable Banking names, marks, APIs, Control Panel, bank
+License](https://github.com/marcosvrs/enable-banking-mcp/blob/main/LICENSE). Enable Banking names, marks, APIs, Control Panel, bank
 services, bank data, and third-party materials remain the property of their
 respective rights holders. These terms grant no right to use a third-party
 service or brand.

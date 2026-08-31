@@ -1,8 +1,17 @@
 {
   "name": "enable-banking-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "MCP server for the Enable Banking API and Control Panel",
+  "description": "Personal, noncommercial read-only MCP server for Enable Banking AIS",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcosvrs/enable-banking-mcp.git"
+  },
+  "homepage": "https://github.com/marcosvrs/enable-banking-mcp",
+  "bugs": {
+    "url": "https://github.com/marcosvrs/enable-banking-mcp/issues"
+  },
   "type": "module",
   "bin": {
     "enable-banking-mcp": "dist/server.js"
@@ -14,8 +23,7 @@
     "privacy:scan": "node scripts/privacy-scan.mjs --all",
     "privacy:staged": "node scripts/privacy-scan.mjs --staged",
     "privacy:history": "node scripts/privacy-scan.mjs --history",
-    "privacy:install-hooks": "node scripts/install-hooks.mjs",
-    "prepare": "node scripts/install-hooks.mjs"
+    "privacy:install-hooks": "node scripts/install-hooks.mjs"
   },
   "engines": {
     "node": ">=22"

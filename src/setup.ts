@@ -2,14 +2,16 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { X509Certificate } from "node:crypto";
 import {
   BankAuthorizationFlow,
   launchBrowser,
-  parseLoopbackRedirect,
   parseValidUntil,
+  type AccessProfile,
   type BrowserOpener,
   type CallbackTlsOptions,
 } from "./authorization.js";
+import { parseLoopbackRedirect } from "./redirect.js";
 import {
   ControlPanelAuthFlow,
   ControlPanelClient,
@@ -46,6 +48,8 @@ export interface SetupOptions {
   privacyUrl?: string;
   termsUrl?: string;
   validUntil?: string;
+  accessProfile?: AccessProfile;
+  allowRestrictedProduction?: boolean;
 }
 
 export interface NormalizedSetupOptions extends SetupOptions {
@@ -114,6 +118,7 @@ export class ApplicationSetupFlow {
   }
 
   async getStatus(): Promise<SetupStatus> {
+    if (this.current.pending) return this.status;
     const [application, session] = await Promise.all([
       this.dependencies.applicationStore.get(),
       this.dependencies.sessionStore.get(),
@@ -126,6 +131,17 @@ export class ApplicationSetupFlow {
         sessionStored: true,
         message: "Enable Banking setup is complete",
       };
+    }
+    if (this.current.phase === "complete") {
+      return application || session
+        ? {
+            phase: "idle",
+            pending: false,
+            ...(application?.appId ? { appId: application.appId } : {}),
+            ...(session ? { sessionStored: true } : {}),
+            message: "Enable Banking setup is incomplete",
+          }
+        : { phase: "idle", pending: false };
     }
     return this.status;
   }
@@ -163,7 +179,6 @@ export class ApplicationSetupFlow {
   private async run(options: NormalizedSetupOptions): Promise<void> {
     let application: StoredApplication | undefined;
     try {
-      const redirect = parseLoopbackRedirect(options.redirectUrl);
       const keyMaterial = await (this.dependencies.generateKeyMaterial ??
         generateKeyMaterial)();
       const controlPanelAuth = await this.dependencies.controlPanelAuth.authenticate(
@@ -186,11 +201,9 @@ export class ApplicationSetupFlow {
         redirectUrls: [options.redirectUrl],
       };
       await this.dependencies.applicationStore.set(application);
-      if (redirect.protocol === "https:") {
-        await (this.dependencies.trustCertificate ?? trustCertificate)(
-          keyMaterial.certificate,
-        );
-      }
+      await (this.dependencies.trustCertificate ?? trustCertificate)(
+        keyMaterial.certificate,
+      );
 
       const client = (
         this.dependencies.createBankClient ??
@@ -222,6 +235,7 @@ export class ApplicationSetupFlow {
         country: options.country,
         redirectUrl: options.redirectUrl,
         validUntil: options.validUntil,
+        accessProfile: options.accessProfile,
       });
       this.update({
         phase: "bank_authorization",
@@ -264,10 +278,12 @@ export function normalizeSetupOptions(
   const appName = options.appName.trim();
   const aspspName = options.aspspName.trim();
   const country = options.country.trim().toUpperCase();
+  const redirectUrl = options.redirectUrl.trim();
   const description = options.description?.trim();
   const gdprEmail = options.gdprEmail?.trim();
   const privacyUrl = options.privacyUrl?.trim();
   const termsUrl = options.termsUrl?.trim();
+  const accessProfile = options.accessProfile ?? "balances";
 
   if (
     options.environment !== "PRODUCTION" &&
@@ -283,27 +299,29 @@ export function normalizeSetupOptions(
   if (!/^[A-Z]{2}$/.test(country)) {
     throw new Error("country must be a two-letter ISO 3166-1 code");
   }
-  const redirect = parseLoopbackRedirect(options.redirectUrl);
+  if (
+    accessProfile !== "balances" &&
+    accessProfile !== "balances_and_transactions"
+  ) {
+    throw new Error("access_profile is invalid");
+  }
+  parseLoopbackRedirect(redirectUrl);
   const validUntil = parseValidUntil(options.validUntil);
 
   if (options.environment === "PRODUCTION") {
-    if (redirect.protocol === "http:") {
+    if (!options.allowRestrictedProduction) {
       throw new Error(
-        "redirect_url must use HTTPS for PRODUCTION; HTTP loopback callbacks are supported only in SANDBOX",
+        "PRODUCTION is restricted to personal linked-account evaluation; set ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true to opt in",
       );
     }
     if (!description) throw new Error("description is required for PRODUCTION");
-    if (!gdprEmail || !gdprEmail.includes("@")) {
+    if (!gdprEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gdprEmail)) {
       throw new Error("gdpr_email is required for PRODUCTION");
     }
     if (!privacyUrl) throw new Error("privacy_url is required for PRODUCTION");
     if (!termsUrl) throw new Error("terms_url is required for PRODUCTION");
-    try {
-      new URL(privacyUrl);
-      new URL(termsUrl);
-    } catch {
-      throw new Error("privacy_url and terms_url must be valid URLs");
-    }
+    validateProviderDocumentUrl("privacy_url", privacyUrl);
+    validateProviderDocumentUrl("terms_url", termsUrl);
   }
 
   return {
@@ -312,13 +330,31 @@ export function normalizeSetupOptions(
     appName,
     aspspName,
     country,
-    redirectUrl: options.redirectUrl.trim(),
+    redirectUrl,
     ...(description ? { description } : {}),
     ...(gdprEmail ? { gdprEmail } : {}),
     ...(privacyUrl ? { privacyUrl } : {}),
     ...(termsUrl ? { termsUrl } : {}),
+    accessProfile,
     validUntil,
   };
+}
+
+function validateProviderDocumentUrl(field: string, value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${field} must be a valid HTTPS URL`);
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
+    throw new Error(`${field} must be a valid HTTPS URL`);
+  }
 }
 
 function createRegistrationRequest(
@@ -463,6 +499,39 @@ export async function trustCertificate(certificate: string): Promise<void> {
   }
 }
 
+export async function removeTrustedCertificate(
+  certificate: string,
+): Promise<void> {
+  let fingerprint: string;
+  try {
+    fingerprint = new X509Certificate(certificate).fingerprint256.replaceAll(
+      ":",
+      "",
+    );
+  } catch {
+    throw new Error("Stored localhost certificate is invalid");
+  }
+  const keychainPath = join(
+    homedir(),
+    "Library",
+    "Keychains",
+    "login.keychain-db",
+  );
+  const result = await runCommand(SECURITY_COMMAND, [
+    "delete-certificate",
+    "-Z",
+    fingerprint,
+    "-t",
+    keychainPath,
+  ]);
+  if (
+    result.code !== 0 &&
+    !/unable to delete certificate matching/i.test(result.stderr)
+  ) {
+    throw new Error("Unable to remove the localhost certificate trust");
+  }
+}
+
 export function callbackTlsFromApplication(
   application: StoredApplication,
 ): CallbackTlsOptions {
@@ -478,13 +547,25 @@ function sleep(milliseconds: number): Promise<void> {
   return promise;
 }
 
-function runCommand(command: string, args: string[]): Promise<void> {
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const child = spawn(command, args, { stdio: ["ignore", "ignore", "ignore"] });
+type CommandResult = {
+  code: number;
+  stderr: string;
+};
+
+function runCommand(
+  command: string,
+  args: string[],
+): Promise<CommandResult> {
+  const { promise, resolve, reject } = Promise.withResolvers<CommandResult>();
+  const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
   child.once("error", () => reject(new Error("Required local setup command is unavailable")));
   child.once("close", (code) => {
-    if (code === 0) resolve();
-    else reject(new Error("Required local setup command failed"));
+    resolve({ code: code ?? 1, stderr });
   });
   return promise;
 }
