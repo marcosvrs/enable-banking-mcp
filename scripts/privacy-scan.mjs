@@ -64,7 +64,7 @@ const contentRules = [
     pattern:
       /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])/gi,
     accept: (value) => {
-      const domain = value.slice(value.lastIndexOf("@")).slice(1).toLowerCase();
+      const domain = value.slice(value.lastIndexOf("@") + 1).toLowerCase();
       return ![...safeEmailDomains].some(
         (safeDomain) =>
           domain === safeDomain || domain.endsWith(`.${safeDomain}`),

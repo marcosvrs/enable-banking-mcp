@@ -1,110 +1,192 @@
 # Privacy Policy
 
-**Status:** Draft template — complete the bracketed fields and obtain any legal review required for your use before relying on this policy in a Production application.
+**Status:** General personal-use notice for self-hosted deployments
+**Effective date:** 2026-08-31
+**Controller:** Each deployment's controller, if any, is the person running that deployment; this repository appoints none.
+**Contact:** This repository publishes no deployment contact address.
 
-**Last updated:** [INSERT DATE]
-
-**Data controller:** [YOUR FULL LEGAL NAME OR COMPANY]
-
-**Privacy contact:** [YOUR PRIVACY CONTACT EMAIL]
-
-This Privacy Policy explains how the operator of an Enable Banking MCP deployment handles personal data when the deployment is used to connect to the Enable Banking Control Panel, the Enable Banking API, and participating banks.
+This notice describes the personal-data processing that may occur when a
+person runs a local installation of **Enable Banking MCP**. It is not the
+privacy policy of Enable Banking, a bank, an ASPSP, an MCP client, an AI host,
+or the repository maintainer. It does not identify, appoint, or make the
+repository maintainer responsible for any deployment or user's actions.
 
 ## 1. Scope and roles
 
-The Enable Banking MCP is local software. It runs on the computer where it is installed and sends requests to third-party services only when the user or an authorized MCP client invokes a function.
+Enable Banking MCP runs on the computer where the individual operator installs
+it. It is used only for the operator's own personal, noncommercial
+account-information access:
 
-For a self-hosted deployment, the person or organization operating and configuring the deployment is normally responsible for determining the purposes and means of processing. That operator is referred to as **the operator**, **we**, or **us** in this policy.
+- Control Panel email-link authentication and application registration;
+- personal AIS authorization for the operator's own linked account;
+- retrieval of account details, balances, and transaction history; and
+- local storage and deletion of application, session, and Control Panel
+  credentials.
 
-Enable Banking and each participating bank operate their own services and may act as independent controllers or processors depending on the relevant transaction and legal arrangement. Their own privacy notices, terms, and data-processing arrangements also apply. This policy does not replace them.
+This deployment is not a hosted service and is not intended for another
+person's data, business accounts, professional use, payment initiation, or
+commercial use.
 
-### Self-hosted deployment responsibility
+The person running each deployment determines the purposes and means of that
+deployment's local processing. This repository does not operate deployments,
+receive their tool results, or assume responsibility for their users. Enable
+Banking and each participating bank or ASPSP process data under their own
+terms and privacy notices and may have their own controller or processor role:
 
-Unless the repository maintainer has separately agreed in writing to operate a specific deployment, the repository maintainer does not operate the user's Enable Banking application and is not the data controller for data processed by that deployment. The person or organization that configures and uses a deployment is responsible for identifying itself as the operator, selecting the lawful purposes and retention periods, providing the required notices and contact details, and complying with applicable data-protection law.
+- [Enable Banking Privacy Notice](https://enablebanking.com/privacy/)
+- [Enable Banking Terms](https://enablebanking.com/terms/)
+- [Enable Banking API End User Terms](https://tilisy.enablebanking.com/terms)
 
-## 2. Personal data we process
+## 2. Data processed
 
-Depending on which functions are used, the deployment may process the following categories:
+Depending on the functions used, the local deployment may handle:
 
-- **Control Panel identity data:** the email address used for Enable Banking Control Panel sign-in and authentication identifiers returned by the Control Panel.
-- **Application and security data:** the Enable Banking application ID, certificate, locally generated private key, Control Panel access and refresh tokens, session IDs, consent IDs, authorization codes, and expiry information.
-- **Banking data:** account identifiers and details, account names, balances, transaction records, account metadata, consent status, and related bank or ASPSP information returned after authorization.
-- **Payment data:** payment instructions, beneficiary details, amounts, currencies, payment IDs, payment status, and payment transactions if payment functions are used.
-- **Configuration data:** application name, redirect URL, selected country and bank, application description, data-protection contact, privacy-policy URL, terms URL, and consent-expiry settings.
-- **Technical data:** request and response metadata, timestamps, error information, network information, and operating-system information processed by Enable Banking, the bank, the operating system, or the MCP client as part of providing their services.
+- **Control Panel data:** the sign-in email, one-time-link callback data, and
+  authentication tokens returned by the Control Panel;
+- **application security data:** the application ID, RSA private key,
+  certificate, authorization state, session ID, and expiry values;
+- **banking data:** account identifiers and details, balances, transaction
+  records, account metadata, consent status, and ASPSP information returned by
+  Enable Banking;
+- **configuration data:** application name, environment, redirect URL, country,
+  selected ASPSP, description, data-protection email, privacy URL, terms URL,
+  and consent access profile; and
+- **technical data:** timestamps, request outcomes, error information, network
+  metadata, and operating-system or MCP-client data created while the operator
+  uses the deployment.
 
-The deployment does not intentionally collect advertising identifiers, sell personal data, or include independent advertising or analytics tracking. The operating system, MCP client, AI host, Enable Banking, and the bank may nevertheless create their own logs.
+The deployment does not intentionally add advertising identifiers, analytics,
+profiling, or a central database.
 
-## 3. How data is used
+## 3. Sources and purposes
 
-Personal data is used only as necessary to:
+Data comes from the individual operator, the Enable Banking Control Panel, the
+operator's selected bank or ASPSP, the local operating system, and the MCP
+client or AI host.
 
-1. authenticate the operator to the Enable Banking Control Panel;
-2. register and maintain an Enable Banking application;
-3. generate and use application authentication credentials;
-4. start and complete bank authorization and consent flows;
-5. retrieve authorized account, balance, transaction, and payment information;
-6. create, monitor, or submit payments when explicitly requested and authorized;
-7. maintain security, prevent misuse, troubleshoot failures, and comply with legal obligations; and
-8. provide support when the operator contacts us.
+The operator uses it to:
 
-The operator must define and document the lawful basis for each processing activity. Depending on the deployment, this may include consent, performance of a contract, compliance with a legal obligation, or a legitimate interest that does not override the data subject's rights.
+1. authenticate to the Control Panel;
+2. register and maintain the operator's Enable Banking application;
+3. sign API requests with the application's private key;
+4. start and complete a personal bank consent flow;
+5. retrieve the account information the operator authorized;
+6. maintain local security, troubleshoot failures, and delete local
+   credentials; and
+7. meet applicable provider and legal obligations.
 
-## 4. Where data is sent and who receives it
+The applicable legal basis depends on the operator's jurisdiction and facts,
+and may include the operator's consent or a contract with the relevant
+provider. This notice does not claim a legal basis for Enable Banking or a
+bank.
 
-The deployment may send data to or receive data from:
+## 4. Disclosures and data flows
 
-- **Enable Banking**, to authenticate the Control Panel user, register the application, manage authorization, and provide API connectivity;
-- **the selected bank or ASPSP**, when the user completes a bank authorization or payment-consent flow;
-- **the local MCP client or AI host**, because data returned by an MCP function is made available to the client that requested it; and
-- **service providers or authorities**, only where necessary to operate the deployment, comply with law, protect rights, or investigate misuse.
+The deployment sends or exposes data as follows:
 
-We do not sell personal data or share it for targeted advertising. The operator must not use the MCP with an untrusted MCP client or AI host, because that client may receive sensitive financial data returned by the API.
+- **Enable Banking Control Panel:** the operator's email and
+  application-registration fields during setup;
+- **Enable Banking API:** signed requests and the account, balance, and
+  transaction data returned for the current session;
+- **selected bank or ASPSP:** information exchanged during authorization and
+  consent;
+- **local browser:** the authorization URL and the local HTTPS loopback
+  callback;
+- **MCP client or AI host:** every result returned by an invoked tool,
+  including sensitive financial data; and
+- **operator-controlled systems:** backups, logs, endpoint protection, or
+  diagnostics if they capture process or filesystem data.
+
+The repository maintainer does not receive tool results from a self-hosted
+deployment.
 
 ## 5. Local storage and retention
 
-The current macOS implementation stores application credentials, Control Panel authentication, and the current Enable Banking session in macOS Keychain. The application private key is generated locally and is not sent to Enable Banking; the corresponding certificate is used when registering the application.
+The current macOS implementation stores the following in macOS Keychain:
 
-The MCP does not operate a central database for the operator's banking data. API responses may exist temporarily in process memory and may be retained by the MCP client, AI host, operating system, backups, diagnostic tools, or third-party providers according to their own settings and policies.
+- the application ID, private key, and certificate;
+- the current Enable Banking session ID; and
+- the Control Panel authentication record.
 
-The operator should retain data only for as long as necessary for the stated purpose. The operator can clear locally stored credentials using the available logout or cleanup functions, revoke or delete sessions where supported, unlink accounts through the relevant Control Panel or bank flow, and remove operating-system backups or logs under their control. Deleting local data does not automatically delete data held by Enable Banking or a bank.
+Large credential records may be stored across multiple related Keychain
+records. The private key is generated or supplied by the operator and is used
+to sign API requests. The certificate is registered with Enable Banking and
+may be trusted locally for the HTTPS loopback callback. API responses and
+callback codes are held in process memory while used; the MCP does not
+intentionally persist banking responses.
+
+The retention schedule for this personal deployment is:
+
+| Data | Retention |
+| --- | --- |
+| Control Panel authentication | Until logout, expiry, or `clear_local_credentials` |
+| Application private key and certificate | Until application teardown or `clear_local_credentials` |
+| Current session ID | Until `delete_session`, expiry, or `clear_local_credentials` |
+| API responses and callback data | Process memory only unless the MCP client, AI host, logs, or backups retain them |
+| Operational logs and diagnostics | Only as retained by the operator's operating system and tools |
+
+`clear_local_credentials` clears local Keychain records and attempts to remove
+the locally trusted certificate. It does not delete provider-side records,
+revoke bank consent, erase environment variables, erase MCP-client or AI-host
+history, or erase backups. The operator must use the relevant provider controls
+and `delete_session` where appropriate.
 
 ## 6. Security
 
-The deployment is designed to keep application credentials in macOS Keychain, use TLS for remote requests, use a local loopback callback for browser authorization, and avoid exposing access or refresh tokens in normal status responses. No security measure is perfect.
+The deployment uses HTTPS for remote API requests and the bank-consent
+callback, binds callback responses to a one-time state value, restricts
+callbacks to an explicit loopback host and port, and avoids returning
+credentials in status tools. The Control Panel email-link callback is also
+loopback-only and state-bound.
 
-The operator is responsible for securing the computer, macOS user account, Keychain, MCP client, AI host, backups, environment variables, redirect configuration, and any logs. Private keys, tokens, session IDs, bank data, and payment data must not be placed in source control, issue reports, prompts, or other untrusted locations.
+The person running a deployment controls the macOS account and Keychain,
+environment variables, certificate trust, browser, MCP client, AI host,
+network, backups, logs, and access to the computer. This repository does not
+control those systems. Private keys, tokens, authorization codes, session IDs,
+account data, and transactions should not be placed in source control,
+prompts, public issues, or untrusted tools.
 
-If you believe credentials or personal data have been exposed, immediately revoke or rotate the affected credentials, contact Enable Banking or the relevant bank where appropriate, and contact the privacy address above.
+If data or credentials may have been exposed, the person running the affected
+deployment should stop use, clear or rotate local credentials, delete or revoke
+the relevant provider session or consent, and contact Enable Banking or the
+bank as appropriate.
 
-## 7. Data subject rights
+## 7. Rights and requests
 
-Subject to applicable law, data subjects may have rights to request access, correction, deletion, restriction, portability, or objection, and to withdraw consent. Requests should be sent to:
+Subject to applicable law, data subjects may have rights of access,
+correction, deletion, restriction, portability, objection, and withdrawal of
+consent. Requests about a deployment should be sent to the controller or
+operator of that deployment, or to the relevant provider. This repository
+does not operate the deployment and does not provide a data-subject contact
+channel.
 
-**Privacy contact:** [YOUR PRIVACY CONTACT EMAIL]
+Do not send passwords, private keys, tokens, full account numbers, or
+unnecessary transaction data with a request. Enable Banking and a bank may
+independently control their data, so a request may also need to be directed to
+the relevant provider. A complaint may be made to the applicable supervisory
+authority.
 
-Please provide enough information for us to identify the relevant deployment without sending passwords, private keys, tokens, full account numbers, or unnecessary transaction data. Because Enable Banking and banks may independently control some data, a request may also need to be sent to the relevant provider.
+## 8. International transfers and providers
 
-A complaint may be made to the data-protection supervisory authority applicable to the data subject or the operator.
-
-## 8. International transfers
-
-Enable Banking, participating banks, MCP clients, AI hosts, and infrastructure providers may process data in countries different from the data subject's country. The operator must review the applicable provider terms and ensure that any required transfer mechanism, notice, and safeguards are in place.
+The person running a deployment does not control the locations, subprocessors,
+or transfer mechanisms used by Enable Banking, banks, MCP clients, AI hosts,
+operating systems, or infrastructure. Their current terms and privacy notices
+govern those services. The person running a deployment should review those
+materials and applicable law.
 
 ## 9. Children
 
-The deployment is not intended for children. Do not use it to process a child's personal or financial data unless the operator has a lawful basis and all required safeguards and consents.
+This deployment is intended for the individual operator's own personal
+financial information and is not designed for children's data.
 
-## 10. Changes
+## 10. Changes and contact
 
-We may update this policy when the deployment, providers, or legal requirements change. The current version should be made available at the policy URL used for the Enable Banking application.
+This notice is reference information for personal self-hosted use. The person
+running a deployment must publish and maintain any deployment-specific notice,
+contact channel, retention schedule, and legal information required for that
+deployment.
 
-## 11. Contact
+This repository publishes no personal or corporate contact address.
 
-For privacy questions or requests, contact:
-
-**[YOUR FULL LEGAL NAME OR COMPANY]**  
-**[YOUR PRIVACY CONTACT EMAIL]**  
-**[YOUR BUSINESS OR POSTAL ADDRESS, IF REQUIRED]**
-
-This template is not legal advice. Replace the bracketed fields and adapt the policy to the actual operator, jurisdiction, deployment, data flows, retention periods, and legal obligations.
+This notice is not legal advice. It does not replace the separate notices and
+terms of Enable Banking or any bank.
