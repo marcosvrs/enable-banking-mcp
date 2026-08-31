@@ -38,7 +38,7 @@ import { MacKeychainSessionStore } from "./session-store.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0",
+    version: "0.3.0-beta.1",
   },
   {
     instructions:
