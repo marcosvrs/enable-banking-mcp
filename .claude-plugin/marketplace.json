@@ -1,0 +1,21 @@
+{
+  "name": "enable-banking-mcp",
+  "description": "Local read-only personal Enable Banking tools for Claude Code",
+  "owner": {
+    "name": "enable-banking-mcp contributors",
+    "url": "https://github.com/marcosvrs/enable-banking-mcp"
+  },
+  "plugins": [
+    {
+      "name": "enable-banking-mcp",
+      "source": "./claude-code-plugin",
+      "description": "Read-only personal Enable Banking account-information tools for Claude Code",
+      "version": "0.3.0",
+      "homepage": "https://github.com/marcosvrs/enable-banking-mcp",
+      "repository": "https://github.com/marcosvrs/enable-banking-mcp",
+      "license": "MIT",
+      "category": "Productivity",
+      "tags": ["banking", "finance", "mcp", "read-only"]
+    }
+  ]
+}

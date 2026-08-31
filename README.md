@@ -44,13 +44,124 @@ The bank-consent callback uses HTTPS and a generated or configured localhost cer
 
 ## Install and run
 
+The published package is the easiest route for clients that support npm:
+
+```sh
+npx -y enable-banking-mcp@0.3.0
+```
+
+The release workflow publishes the unscoped `enable-banking-mcp` package to
+the public npm registry from a matching `vX.Y.Z` tag. Until a release is
+published, use the checkout instructions below.
+
+### MCP client JSON configuration
+
+For clients that accept an `mcpServers` JSON block, use the published package:
+
+```json
+{
+  "mcpServers": {
+    "enable-banking-mcp": {
+      "command": "npx",
+      "args": ["-y", "enable-banking-mcp@0.3.0"],
+      "env": {
+        "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
+      }
+    }
+  }
+}
+```
+
+Keep this configuration local. Do not commit it, synchronize it to a
+cloud-managed host, or put the email in a prompt or tool call. For restricted
+Production, add the local `ENABLE_BANKING_GDPR_EMAIL` and
+`ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true` environment values described
+below.
+
+### Claude Code
+
+Claude Code can write the local MCP entry without manual JSON editing:
+
+```sh
+claude mcp add --scope user \
+  --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
+  --transport stdio \
+  enable-banking-mcp -- \
+  npx -y enable-banking-mcp@0.3.0
+```
+
+Use `--scope local` instead of `--scope user` to limit the server to the
+current project. Verify the entry with:
+
+```sh
+claude mcp get enable-banking-mcp
+```
+
+Claude Code also has a plugin distribution. Add this repository as a
+marketplace and install the plugin:
+
+```text
+/plugin marketplace add marcosvrs/enable-banking-mcp
+/plugin install enable-banking-mcp@enable-banking-mcp
+```
+
+The plugin prompts for the Control Panel email through its sensitive
+configuration field and supplies it only to the local server process. It also
+supports the optional Production configuration fields. If Claude Code asks
+for a reload, run `/reload-plugins`.
+
+### Codex
+
+Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
+
+```sh
+codex mcp add enable-banking-mcp \
+  --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
+  -- npx -y enable-banking-mcp@0.3.0
+```
+
+The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop
+Codex, and the Codex IDE extension. Check it with:
+
+```sh
+codex mcp list
+```
+
+Codex also supports the bundled plugin marketplace in this repository:
+
+```sh
+codex plugin marketplace add marcosvrs/enable-banking-mcp
+codex plugin add enable-banking-mcp@enable-banking-mcp
+codex plugin list
+```
+
+Alternatively, open the Codex plugin browser with `codex`, then `/plugins`,
+install **Enable Banking MCP**, and start a new session. The Codex plugin
+forwards the local
+`ENABLE_BANKING_CONTROL_PANEL_EMAIL`, `ENABLE_BANKING_GDPR_EMAIL`, and
+`ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION` environment variables. Export
+them before launching Codex when using the plugin:
+
+```sh
+export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
+```
+
+Use the direct `codex mcp add --env` form when Codex is launched outside a
+shell that inherits these variables.
+
+### Run from a checkout
+
+For development or before the first npm release:
+
 ```sh
 npm install
 npm run build
 npm start
 ```
 
-The server uses MCP stdio transport. Configure your MCP client to launch `node dist/server.js` from this repository.
+The server uses MCP stdio transport. Configure a client to launch
+`node /absolute/path/to/enable-banking-mcp/dist/server.js` and pass the local
+environment values.
 
 To install the repository's optional privacy pre-push hook explicitly:
 
@@ -59,6 +170,21 @@ npm run privacy:install-hooks
 ```
 
 The npm lifecycle does not modify Git configuration automatically.
+
+### Publish a release
+
+Repository maintainers must configure an `NPM_TOKEN` GitHub Actions secret
+with permission to publish the package. After the package contents pass the
+workflow checks, tag the matching package version:
+
+```sh
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+The workflow runs the build, tests, privacy scan, `npm pack --dry-run`, and
+provenance-enabled public npm publication. Never put the npm token in this
+repository, an MCP configuration, or a prompt.
 
 ## First-run flow
 

@@ -1,0 +1,34 @@
+{
+  "name": "enable-banking-mcp",
+  "version": "0.3.0",
+  "description": "Read-only personal Enable Banking account-information tools for Claude Code",
+  "author": {
+    "name": "enable-banking-mcp contributors"
+  },
+  "homepage": "https://github.com/marcosvrs/enable-banking-mcp",
+  "repository": "https://github.com/marcosvrs/enable-banking-mcp",
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "control_panel_email": {
+      "type": "string",
+      "title": "Control Panel email",
+      "description": "Local email used only for Enable Banking Control Panel authentication.",
+      "sensitive": true,
+      "required": true
+    },
+    "gdpr_email": {
+      "type": "string",
+      "title": "Production privacy contact email",
+      "description": "Optional local email required only for restricted Production setup.",
+      "sensitive": true,
+      "default": ""
+    },
+    "allow_restricted_production": {
+      "type": "boolean",
+      "title": "Allow restricted Production setup",
+      "description": "Explicitly allow the server to attempt restricted Production setup.",
+      "default": false
+    }
+  }
+}

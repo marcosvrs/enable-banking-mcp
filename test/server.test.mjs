@@ -34,6 +34,8 @@ test("exposes documented banking and Control Panel tools over stdio", async () =
 
   try {
     await client.connect(transport);
+    assert.match(client.getInstructions() ?? "", /setup_enable_banking/);
+    assert.match(client.getInstructions() ?? "", /never initiates payments/);
     const response = await client.listTools();
     const names = response.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, expectedTools);

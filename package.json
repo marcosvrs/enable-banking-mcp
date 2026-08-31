@@ -1,7 +1,6 @@
 {
   "name": "enable-banking-mcp",
   "version": "0.3.0",
-  "private": true,
   "description": "Personal, noncommercial read-only MCP server for Enable Banking AIS",
   "license": "MIT",
   "repository": {
@@ -16,14 +15,25 @@
   "bin": {
     "enable-banking-mcp": "dist/server.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.txt"
+  ],
   "scripts": {
     "build": "tsc",
+  "prepack": "npm run build",
     "start": "node dist/server.js",
     "test": "npm run build && node --test test/*.test.mjs",
     "privacy:scan": "node scripts/privacy-scan.mjs --all",
     "privacy:staged": "node scripts/privacy-scan.mjs --staged",
     "privacy:history": "node scripts/privacy-scan.mjs --history",
     "privacy:install-hooks": "node scripts/install-hooks.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=22"

@@ -32,10 +32,16 @@ import {
 } from "./setup.js";
 import { MacKeychainSessionStore } from "./session-store.js";
 
-const server = new McpServer({
-  name: "enable-banking",
-  version: "0.3.0",
-});
+const server = new McpServer(
+  {
+    name: "enable-banking",
+    version: "0.3.0",
+  },
+  {
+    instructions:
+      "Use setup_enable_banking for first-time setup, then authorize_bank for personal AIS consent before account tools. This server is read-only for personal account information; it never initiates payments. Never pass email addresses, tokens, private keys, or session IDs as tool arguments. Pass only documented account or transaction identifiers to their corresponding read-only tools. Control Panel email is supplied only through the local MCP process environment.",
+  },
+);
 
 const applicationStore = new MacKeychainApplicationStore();
 const sessionStore = new MacKeychainSessionStore();
