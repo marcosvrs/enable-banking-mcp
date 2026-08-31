@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+node scripts/privacy-scan.mjs --staged
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  printf '%s\n' 'pre-commit blocked: install Gitleaks and retry (https://github.com/gitleaks/gitleaks).' >&2
+  exit 1
+fi
+
+gitleaks protect --staged --redact --no-banner --no-color
