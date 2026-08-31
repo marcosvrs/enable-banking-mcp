@@ -79,36 +79,41 @@ async function safely<T>(operation: () => Promise<T>): Promise<ToolResult> {
 function success(value: unknown): ToolResult {
   const text = JSON.stringify(value, null, 2);
   return {
-    content: [{ type: "text", text: text ?? "null" }],
+    content: [{ type: "text", text: redactLocalEmails(text ?? "null") }],
   };
 }
 
 function failure(error: unknown): ToolResult {
   if (error instanceof EnableBankingApiError) {
+    const text = JSON.stringify(
+      {
+        status: error.status,
+        message: error.message,
+        ...error.details,
+        ...(error.retryAfter ? { retry_after: error.retryAfter } : {}),
+      },
+      null,
+      2,
+    );
     return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              status: error.status,
-              message: error.message,
-              ...error.details,
-              ...(error.retryAfter ? { retry_after: error.retryAfter } : {}),
-            },
-            null,
-            2,
-          ),
-        },
-      ],
+      content: [{ type: "text", text: redactLocalEmails(text ?? "null") }],
       isError: true,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
   return {
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text: redactLocalEmails(message) }],
     isError: true,
   };
+}
+
+function redactLocalEmails(value: string): string {
+  let redacted = value;
+  for (const environmentName of [CONTROL_PANEL_EMAIL_ENV, GDPR_EMAIL_ENV]) {
+    const email = process.env[environmentName]?.trim();
+    if (email) redacted = redacted.split(email).join("[local email redacted]");
+  }
+  return redacted;
 }
 
 async function resolveCredentials(): Promise<{ appId: string; privateKey: string }> {
