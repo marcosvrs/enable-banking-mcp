@@ -167,52 +167,64 @@ export class ApplicationSetupFlow {
   async registerApplication(
     options: ApplicationRegistrationOptions,
   ): Promise<SetupStartResult> {
-    await this.ensureAvailable();
-    const normalized = normalizeApplicationRegistrationOptions(options);
-    this.markStarted();
-    void this.runApplicationRegistration(normalized);
-    return {
-      status: "started",
-      phase: "control_panel_auth",
-      message: this.current.message ?? "Enable Banking application setup started",
-    };
+    const previous = this.reserve();
+    try {
+      const normalized = normalizeApplicationRegistrationOptions(options);
+      await this.ensureStoresAvailable();
+      void this.runApplicationRegistration(normalized);
+      return {
+        status: "started",
+        phase: "control_panel_auth",
+        message: this.current.message ?? "Enable Banking application setup started",
+      };
+    } catch (error) {
+      this.current = previous;
+      throw error;
+    }
   }
 
   async start(options: SetupOptions): Promise<SetupStartResult> {
-    await this.ensureAvailable();
-    const normalized = normalizeSetupOptions(options);
-    this.markStarted();
-    void this.run(normalized);
-    return {
-      status: "started",
-      phase: "control_panel_auth",
-      message: this.current.message ?? "Enable Banking setup started",
-    };
+    const previous = this.reserve();
+    try {
+      const normalized = normalizeSetupOptions(options);
+      await this.ensureStoresAvailable();
+      void this.run(normalized);
+      return {
+        status: "started",
+        phase: "control_panel_auth",
+        message: this.current.message ?? "Enable Banking setup started",
+      };
+    } catch (error) {
+      this.current = previous;
+      throw error;
+    }
   }
 
-  private async ensureAvailable(): Promise<void> {
-    if (this.current.pending) {
-      throw new Error("Enable Banking setup is already in progress");
-    }
+  private async ensureStoresAvailable(): Promise<void> {
     if (await this.dependencies.applicationStore.get()) {
       throw new Error(
-        "An Enable Banking application is already stored; call authorize_bank instead",
+        "An Enable Banking application is already stored; call connect_bank or authorize_bank instead",
       );
     }
     if (await this.dependencies.sessionStore.get()) {
       throw new Error(
-        "An Enable Banking session is already stored; clear it before starting setup",
+        "An Enable Banking session is already stored; call connect_bank or clear it before starting setup",
       );
     }
   }
 
-  private markStarted(): void {
+  private reserve(): SetupStatus {
+    if (this.current.pending) {
+      throw new Error("Enable Banking setup is already in progress");
+    }
+    const previous = this.status;
     this.current = {
       phase: "control_panel_auth",
       pending: true,
       message:
         "A Control Panel sign-in email was requested; complete it to continue setup",
     };
+    return previous;
   }
 
   private async runApplicationRegistration(

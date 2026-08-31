@@ -440,3 +440,64 @@ class MemoryApplicationStore {
     this.value = undefined;
   }
 }
+
+test("reserves the setup slot before asynchronous store checks", async () => {
+  let releaseStoreReads;
+  const storeReads = new Promise((resolve) => {
+    releaseStoreReads = resolve;
+  });
+  const gatedStore = {
+    async get() {
+      await storeReads;
+      return undefined;
+    },
+    async set() {},
+    async clear() {},
+  };
+  const setup = new ApplicationSetupFlow({
+    applicationStore: gatedStore,
+    sessionStore: gatedStore,
+    generateKeyMaterial: async () => ({
+      privateKey: "private-key",
+      certificate: "certificate",
+    }),
+  });
+  const options = {
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "SANDBOX",
+    redirectUrl: "https://localhost:8765/callback",
+  };
+
+  const first = setup.registerApplication(options);
+  assert.equal(setup.status.pending, true);
+  await assert.rejects(
+    setup.registerApplication(options),
+    /Enable Banking setup is already in progress/,
+  );
+
+  releaseStoreReads();
+  const started = await first;
+  assert.equal(started.status, "started");
+});
+
+test("rolls back the setup reservation after validation fails", async () => {
+  const setup = new ApplicationSetupFlow({
+    applicationStore: new MemoryApplicationStore(),
+    sessionStore: new MemorySessionStore(),
+  });
+
+  await assert.rejects(
+    setup.registerApplication({
+      controlPanelEmail: "user@example.com",
+      appName: "",
+      environment: "SANDBOX",
+      redirectUrl: "https://localhost:8765/callback",
+    }),
+    /app_name is required/,
+  );
+  assert.deepEqual(setup.status, {
+    phase: "idle",
+    pending: false,
+  });
+});

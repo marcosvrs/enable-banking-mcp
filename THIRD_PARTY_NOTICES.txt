@@ -1,7 +1,7 @@
 Third-Party Notices
 ====================
 
-Enable Banking MCP 0.3.0-beta.3
+Enable Banking MCP 0.3.0-beta.4
 
 This repository's original code is distributed under the MIT License in
 LICENSE. It does not include Enable Banking, bank, ASPSP, or other provider

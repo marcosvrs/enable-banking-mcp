@@ -47,7 +47,7 @@ The bank-consent callback uses HTTPS and a generated or configured localhost cer
 The published package is the easiest route for clients that support npm:
 
 ```sh
-npx -y enable-banking-mcp@0.3.0-beta.3
+npx -y enable-banking-mcp@0.3.0-beta.4
 ```
 
 The release workflow publishes the unscoped `enable-banking-mcp` package to
@@ -63,7 +63,7 @@ For clients that accept an `mcpServers` JSON block, use the published package:
   "mcpServers": {
     "enable-banking-mcp": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.3.0-beta.3"],
+      "args": ["-y", "enable-banking-mcp@0.3.0-beta.4"],
       "env": {
         "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
       }
@@ -87,7 +87,7 @@ claude mcp add --scope user \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
   --transport stdio \
   enable-banking-mcp -- \
-  npx -y enable-banking-mcp@0.3.0-beta.3
+  npx -y enable-banking-mcp@0.3.0-beta.4
 ```
 
 Use `--scope local` instead of `--scope user` to limit the server to the
@@ -117,7 +117,7 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 ```sh
 codex mcp add enable-banking-mcp \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
-  -- npx -y enable-banking-mcp@0.3.0-beta.3
+  -- npx -y enable-banking-mcp@0.3.0-beta.4
 ```
 
 The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop

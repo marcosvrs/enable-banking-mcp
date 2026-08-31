@@ -39,7 +39,7 @@ import { MacKeychainSessionStore } from "./session-store.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.3",
+    version: "0.3.0-beta.4",
   },
   {
     instructions:
@@ -196,10 +196,20 @@ async function connectBank(options: ConnectBankOptions): Promise<unknown> {
     applicationStore.get(),
   ]);
   if (storedSession || process.env.ENABLE_BANKING_SESSION_ID?.trim()) {
-    return {
-      status: "connected",
-      ...(await authorizedAccounts()),
-    };
+    try {
+      return {
+        status: "connected",
+        ...(await authorizedAccounts()),
+      };
+    } catch (error) {
+      if (!isTerminalSessionError(error)) throw error;
+      if (storedSession) {
+        await sessionStore.clear();
+      }
+      if (process.env.ENABLE_BANKING_SESSION_ID?.trim()) {
+        delete process.env.ENABLE_BANKING_SESSION_ID;
+      }
+    }
   }
 
   const setupStatus = setupFlow.status;
@@ -315,11 +325,12 @@ async function connectBank(options: ConnectBankOptions): Promise<unknown> {
       `Bank "${options.aspspName}" is not available in ${country}.${available}`,
     );
   }
+  const redirectUrl = application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL;
 
   const authorization = await authorizationFlow.start(client, {
     aspspName: selectedBank.name,
     country,
-    redirectUrl: DEFAULT_REDIRECT_URL,
+    redirectUrl,
     accessProfile: options.accessProfile,
   });
   return {
@@ -350,6 +361,15 @@ function extractBankChoices(
         : fallbackCountry;
     return [{ name, country }];
   });
+}
+function isTerminalSessionError(error: unknown): boolean {
+  return (
+    error instanceof EnableBankingApiError &&
+    (error.status === 400 ||
+      error.status === 401 ||
+      error.status === 403 ||
+      error.status === 404)
+  );
 }
 
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
