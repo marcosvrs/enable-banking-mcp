@@ -23,24 +23,32 @@ const expectedTools = [
   "setup_status",
 ];
 
-test("exposes documented banking and Control Panel tools over stdio", async () => {
+test("exposes documented tools with local Production environment variables", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["dist/server.js"],
     cwd: process.cwd(),
-    env: process.env,
+    env: {
+      ...process.env,
+      ENABLE_BANKING_CONTROL_PANEL_EMAIL: "user@example.com",
+      ENABLE_BANKING_GDPR_EMAIL: "privacy@example.com",
+      ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION: "true",
+    },
   });
   const client = new Client({ name: "enable-banking-mcp-test", version: "0.1.0" });
 
   try {
     await client.connect(transport);
-    assert.match(client.getInstructions() ?? "", /setup_enable_banking/);
-    assert.match(client.getInstructions() ?? "", /never initiates payments/);
+    const instructions = client.getInstructions() ?? "";
+    assert.match(instructions, /setup_enable_banking/);
+    assert.match(instructions, /defaults to restricted PRODUCTION/);
+    assert.match(instructions, /never initiates payments/);
     const response = await client.listTools();
     const names = response.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, expectedTools);
+    assert.doesNotMatch(JSON.stringify(response), /user@example\.com|privacy@example\.com/);
     const setupTool = response.tools.find((tool) => tool.name === "setup_enable_banking");
-    assert.equal(setupTool?.inputSchema?.properties?.environment?.default, "SANDBOX");
+    assert.equal(setupTool?.inputSchema?.properties?.environment?.default, "PRODUCTION");
     assert.equal(
       setupTool?.inputSchema?.properties?.access_profile?.default,
       "balances",

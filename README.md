@@ -65,18 +65,20 @@ For clients that accept an `mcpServers` JSON block, use the published package:
       "command": "npx",
       "args": ["-y", "enable-banking-mcp@0.3.0"],
       "env": {
-        "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
+        "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com",
+        "ENABLE_BANKING_GDPR_EMAIL": "privacy-contact@example.com",
+        "ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION": "true"
       }
     }
   }
 }
 ```
 
-Keep this configuration local. Do not commit it, synchronize it to a
-cloud-managed host, or put the email in a prompt or tool call. For restricted
-Production, add the local `ENABLE_BANKING_GDPR_EMAIL` and
-`ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true` environment values described
-below.
+Keep this configuration local. This example opts into the restricted
+Production path through a local environment value. Do not commit it,
+synchronize it to a cloud-managed host, or put either email in a prompt or
+tool call. To use SANDBOX instead, pass `"environment": "SANDBOX"` and omit
+the Production-only fields.
 
 ### Claude Code
 
@@ -85,6 +87,8 @@ Claude Code can write the local MCP entry without manual JSON editing:
 ```sh
 claude mcp add --scope user \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
+  --env 'ENABLE_BANKING_GDPR_EMAIL=privacy-contact@example.com' \
+  --env 'ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true' \
   --transport stdio \
   enable-banking-mcp -- \
   npx -y enable-banking-mcp@0.3.0
@@ -107,8 +111,9 @@ marketplace and install the plugin:
 
 The plugin prompts for the Control Panel email through its sensitive
 configuration field and supplies it only to the local server process. It also
-supports the optional Production configuration fields. If Claude Code asks
-for a reload, run `/reload-plugins`.
+supports the Production configuration fields; the restricted Production
+opt-in is off by default and must be enabled intentionally. If Claude Code
+asks for a reload, run `/reload-plugins`.
 
 ### Codex
 
@@ -117,6 +122,8 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 ```sh
 codex mcp add enable-banking-mcp \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
+  --env 'ENABLE_BANKING_GDPR_EMAIL=privacy-contact@example.com' \
+  --env 'ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true' \
   -- npx -y enable-banking-mcp@0.3.0
 ```
 
@@ -144,6 +151,8 @@ them before launching Codex when using the plugin:
 
 ```sh
 export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
+export ENABLE_BANKING_GDPR_EMAIL='privacy-contact@example.com'
+export ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true
 ```
 
 Use the direct `codex mcp add --env` form when Codex is launched outside a
@@ -189,51 +198,62 @@ repository, an MCP configuration, or a prompt.
 ## First-run flow
 
 The setup tool reads the Control Panel email from the local
-`ENABLE_BANKING_CONTROL_PANEL_EMAIL` environment variable. Call
-`setup_enable_banking` with only non-email setup fields:
+`ENABLE_BANKING_CONTROL_PANEL_EMAIL` environment variable. Its schema defaults
+to `PRODUCTION`; that default does not bypass the explicit restricted
+Production guard.
+
+For the default Production path, set all three local environment values:
+
+```sh
+export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
+export ENABLE_BANKING_GDPR_EMAIL='privacy-contact@example.com'
+export ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true
+```
+
+The `true` value is an explicit operator opt-in. It is not provider approval
+and does not bypass restricted linked-account eligibility, review, KYC, privacy
+URL, terms URL, or any provider agreement. To use SANDBOX, pass
+`"environment": "SANDBOX"` explicitly and omit the Production-only fields.
+
+Call `setup_enable_banking` with only non-email setup fields:
 
 - an application name;
-- `SANDBOX` or explicitly permitted restricted `PRODUCTION`;
+- `PRODUCTION` by default, or explicit `SANDBOX`;
 - the HTTPS loopback redirect URL, defaulting to `https://localhost:8765/callback`;
-- the target ASPSP name and two-letter country code; and
-- `access_profile` set to `balances` (default) or `balances_and_transactions`.
+- the target ASPSP name and two-letter country code;
+- `access_profile` set to `balances` (default) or `balances_and_transactions`;
+- for Production, a description; and
+- for Production, completed HTTPS `privacy_url` and `terms_url` values.
 
-For example, the MCP arguments can contain:
+For example, the default Production call can contain:
 
 ```json
 {
   "app_name": "Enable Banking MCP",
-  "environment": "SANDBOX",
   "redirect_url": "https://localhost:8765/callback",
   "aspsp_name": "Example Bank",
   "country": "IE",
+  "description": "Read-only personal account-information access",
+  "privacy_url": "https://example.com/privacy",
+  "terms_url": "https://example.com/terms",
   "access_profile": "balances"
 }
 ```
 
-Setup authenticates the Control Panel, registers the application, starts the personal AIS consent flow, and stores the application and current session in macOS Keychain. Complete the browser and bank steps, then use `setup_status`.
+Setup authenticates the Control Panel, registers the application, waits for
+Production account linking when required, starts the personal AIS consent
+flow, and stores the application and current session in macOS Keychain.
+Complete the browser and bank steps, then use `setup_status`.
 
 For an already configured application, `control_panel_authenticate` takes no
 arguments and reads the same local environment variable. `control_panel_status`
 reports only authentication state and expiry; it does not return the email or
 tokens.
 
-For restricted Production, also set `ENABLE_BANKING_GDPR_EMAIL` in the local
-MCP server environment. Do not pass either email through MCP.
-
-Example Production-only local setting:
-
-```sh
-export ENABLE_BANKING_GDPR_EMAIL='privacy-contact@example.com'
-```
-
-Production setup is deliberately blocked unless the operator sets:
-
-```sh
-export ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true
-```
-
-That flag is only an explicit operator opt-in. It is not provider approval and does not bypass restricted linked-account eligibility, review, KYC, privacy URL, terms URL, or any provider agreement. Production also requires completed HTTPS `privacy_url` and `terms_url` values and the other provider-required application fields.
+Do not pass either email through MCP. Production requires
+`ENABLE_BANKING_GDPR_EMAIL` in the local MCP server environment. Production
+setup also requires the explicit `ENABLE_BANKING_ALLOW_RESTRICTED_PRODUCTION=true`
+value and the completed HTTPS policy URLs above.
 
 For an already configured application, use `authorize_bank` to start a new personal consent flow. `list_banks` is restricted to personal AIS institutions. Account tools use the current locally stored session only.
 

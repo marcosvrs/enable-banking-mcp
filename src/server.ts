@@ -39,7 +39,7 @@ const server = new McpServer(
   },
   {
     instructions:
-      "Use setup_enable_banking for first-time setup, then authorize_bank for personal AIS consent before account tools. This server is read-only for personal account information; it never initiates payments. Never pass email addresses, tokens, private keys, or session IDs as tool arguments. Pass only documented account or transaction identifiers to their corresponding read-only tools. Control Panel email is supplied only through the local MCP process environment.",
+      "Use setup_enable_banking for first-time setup; its environment defaults to restricted PRODUCTION and requires local opt-in plus Production fields, so pass environment=SANDBOX explicitly for sandbox. Then authorize_bank for personal AIS consent before account tools. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account or transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
   },
 );
 
@@ -262,8 +262,8 @@ server.registerTool(
         .describe("Name shown during bank consent"),
       environment: z
         .enum(["PRODUCTION", "SANDBOX"])
-        .default("SANDBOX")
-        .describe("Enable Banking application environment"),
+        .default("PRODUCTION")
+        .describe("Enable Banking application environment; PRODUCTION is the default and remains guarded by explicit local opt-in"),
       redirect_url: z
         .string()
         .url()
