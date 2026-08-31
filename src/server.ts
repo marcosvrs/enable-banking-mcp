@@ -39,11 +39,11 @@ import { MacKeychainSessionStore } from "./session-store.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.2",
+    version: "0.3.0-beta.3",
   },
   {
     instructions:
-      "Use register_application to register a personal application before choosing a bank; in Production activate it in the dashboard, then call authorize_bank. Use setup_enable_banking for the combined first-run flow when the target bank and country are already known; its environment defaults to personal PRODUCTION and it uses the local Control Panel email for the privacy contact and bundled policy URLs. Pass environment=SANDBOX explicitly for sandbox. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account and transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
+      "Start with connect_bank for guided personal AIS setup and reconnection. It resumes stored state, opens required browser steps, lists available banks after a country is provided, starts read-only consent after a bank is selected, and returns authorized accounts. connect_bank defaults to personal PRODUCTION. Use register_application, setup_enable_banking, authorize_bank, and the other tools for advanced or explicit control. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account and transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
   },
 );
 
@@ -139,7 +139,7 @@ async function resolveCredentials(): Promise<{ appId: string; privateKey: string
   const hasPrivateKey = Boolean(process.env.ENABLE_BANKING_PRIVATE_KEY?.trim());
   if (!hasApplicationId && !hasPrivateKey) {
     throw new Error(
-      "No Enable Banking application is configured; call register_application or setup_enable_banking first",
+      "No Enable Banking application is configured; call connect_bank first",
     );
   }
   return loadCredentials();
@@ -163,13 +163,193 @@ async function sessionClient(): Promise<{
       throw new Error(`Bank authorization failed: ${status.lastError}`);
     }
     throw new Error(
-      "No Enable Banking session is stored; call authorize_bank first",
+      "No Enable Banking session is stored; call connect_bank first",
     );
   }
   return {
     client: new EnableBankingClient(credentials),
     sessionId,
   };
+}
+async function authorizedAccounts(): Promise<Record<string, unknown>> {
+  const { client, sessionId } = await sessionClient();
+  const session = await client.getSession(sessionId);
+  return {
+    aspsp: session.aspsp,
+    accounts: session.accounts,
+    accounts_data: session.accounts_data,
+    access: session.access,
+  };
+}
+
+type ConnectBankOptions = {
+  appName: string;
+  environment: "PRODUCTION" | "SANDBOX";
+  country?: string;
+  aspspName?: string;
+  accessProfile: AccessProfile;
+};
+
+async function connectBank(options: ConnectBankOptions): Promise<unknown> {
+  const [storedSession, application] = await Promise.all([
+    sessionStore.get(),
+    applicationStore.get(),
+  ]);
+  if (storedSession || process.env.ENABLE_BANKING_SESSION_ID?.trim()) {
+    return {
+      status: "connected",
+      ...(await authorizedAccounts()),
+    };
+  }
+
+  const setupStatus = setupFlow.status;
+  if (setupStatus.pending) {
+    return {
+      status: "awaiting_user",
+      phase: setupStatus.phase,
+      ...(setupStatus.message ? { message: setupStatus.message } : {}),
+      next_action: "Complete the browser step, then call connect_bank again",
+    };
+  }
+
+  if (!application) {
+    assertNoEnvironmentCredentials();
+    const controlPanelEmail = requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV);
+    if (!options.country || !options.aspspName) {
+      const started = await setupFlow.registerApplication({
+        controlPanelEmail,
+        appName: options.appName,
+        environment: options.environment,
+        redirectUrl: DEFAULT_REDIRECT_URL,
+        description: DEFAULT_PRODUCTION_DESCRIPTION,
+        privacyUrl: DEFAULT_PRODUCTION_PRIVACY_URL,
+        termsUrl: DEFAULT_PRODUCTION_TERMS_URL,
+      });
+      return {
+        status: "setup_started",
+        phase: started.phase,
+        message: started.message,
+        next_action:
+          "Complete the Control Panel email and dashboard steps, then call connect_bank again",
+      };
+    }
+
+    const started = await setupFlow.start({
+      controlPanelEmail,
+      appName: options.appName,
+      environment: options.environment,
+      redirectUrl: DEFAULT_REDIRECT_URL,
+      aspspName: options.aspspName,
+      country: options.country,
+      description: DEFAULT_PRODUCTION_DESCRIPTION,
+      privacyUrl: DEFAULT_PRODUCTION_PRIVACY_URL,
+      termsUrl: DEFAULT_PRODUCTION_TERMS_URL,
+      accessProfile: options.accessProfile,
+    });
+    return {
+      status: "setup_started",
+      phase: started.phase,
+      message: started.message,
+      next_action: "Complete the browser steps, then call connect_bank again",
+    };
+  }
+
+  if (authorizationFlow.status.pending) {
+    return {
+      status: "awaiting_user",
+      phase: "bank_authorization",
+      message: "Complete bank consent in the browser, then call connect_bank again",
+    };
+  }
+
+  const client = new EnableBankingClient(await resolveCredentials());
+  const applicationInfo = await client.getApplication();
+  if (!applicationInfo.active) {
+    launchBrowser(APPLICATIONS_URL);
+    return {
+      status: "dashboard_action_required",
+      phase: "account_link",
+      dashboard_url: APPLICATIONS_URL,
+      message:
+        "Link your own bank account in the dashboard, then call connect_bank again",
+    };
+  }
+
+  const country = options.country?.trim().toUpperCase();
+  if (!country) {
+    return {
+      status: "needs_country",
+      supported_countries: applicationInfo.countries,
+      message:
+        "Provide the two-letter country code; connect_bank will list the available banks",
+    };
+  }
+  if (!/^[A-Z]{2}$/.test(country)) {
+    throw new Error("country must be a two-letter ISO 3166-1 code");
+  }
+
+  const banks = extractBankChoices(await client.listBanks(country), country);
+  if (!options.aspspName) {
+    return banks.length > 0
+      ? {
+          status: "needs_bank_selection",
+          country,
+          banks,
+          message: "Choose one bank name and call connect_bank again",
+        }
+      : {
+          status: "no_banks",
+          country,
+          message: "No personal AIS banks were returned for this country",
+        };
+  }
+
+  const requestedName = options.aspspName.trim().toLowerCase();
+  const selectedBank = banks.find(
+    (bank) => bank.name.toLowerCase() === requestedName,
+  );
+  if (!selectedBank) {
+    const available =
+      banks.length > 0 ? ` Available banks: ${banks.map((bank) => bank.name).join(", ")}.` : "";
+    throw new Error(
+      `Bank "${options.aspspName}" is not available in ${country}.${available}`,
+    );
+  }
+
+  const authorization = await authorizationFlow.start(client, {
+    aspspName: selectedBank.name,
+    country,
+    redirectUrl: DEFAULT_REDIRECT_URL,
+    accessProfile: options.accessProfile,
+  });
+  return {
+    ...authorization,
+    status: "awaiting_user",
+    phase: "bank_authorization",
+    aspsp: selectedBank,
+    message: "Complete bank consent in the browser, then call connect_bank again",
+  };
+}
+
+const APPLICATIONS_URL = "https://enablebanking.com/cp/applications";
+function extractBankChoices(
+  response: unknown,
+  fallbackCountry: string,
+): Array<{ name: string; country: string }> {
+  if (typeof response !== "object" || response === null) return [];
+  const values = (response as Record<string, unknown>).aspsps;
+  if (!Array.isArray(values)) return [];
+  return values.flatMap((value) => {
+    if (typeof value !== "object" || value === null) return [];
+    const record = value as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    if (!name) return [];
+    const country =
+      typeof record.country === "string" && record.country.trim()
+        ? record.country.trim().toUpperCase()
+        : fallbackCountry;
+    return [{ name, country }];
+  });
 }
 
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
@@ -253,6 +433,49 @@ server.registerTool(
       await controlPanelAuthStore.clear();
       return { authenticated: false };
     }),
+);
+
+server.registerTool(
+  "connect_bank",
+  {
+    description:
+      "Primary guided personal AIS connection flow; call with no arguments first to resume setup, open required browser steps, discover banks after a country is supplied, start read-only consent after a bank is selected, or return connected accounts",
+    inputSchema: {
+      app_name: z
+        .string()
+        .min(1)
+        .default("Enable Banking MCP")
+        .describe("Application name used when first-run registration is needed"),
+      environment: z
+        .enum(["PRODUCTION", "SANDBOX"])
+        .default("PRODUCTION")
+        .describe("Application environment used when first-run registration is needed"),
+      country: z
+        .string()
+        .length(2)
+        .optional()
+        .describe("Two-letter country code used to list available banks"),
+      aspsp_name: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Exact bank name selected from connect_bank choices"),
+      access_profile: z
+        .enum(["balances", "balances_and_transactions"])
+        .default("balances")
+        .describe("Whether the consent may include transaction history"),
+    },
+  },
+  async ({ app_name, environment, country, aspsp_name, access_profile }) =>
+    safely(async () =>
+      connectBank({
+        appName: app_name,
+        environment,
+        country,
+        aspspName: aspsp_name,
+        accessProfile: access_profile as AccessProfile,
+      }),
+    ),
 );
 
 server.registerTool(
@@ -527,17 +750,7 @@ server.registerTool(
   {
     description: "List accounts authorized in the current personal AIS session",
   },
-  async () =>
-    safely(async () => {
-      const { client, sessionId } = await sessionClient();
-      const session = await client.getSession(sessionId);
-      return {
-        aspsp: session.aspsp,
-        accounts: session.accounts,
-        accounts_data: session.accounts_data,
-        access: session.access,
-      };
-    }),
+  async () => safely(async () => authorizedAccounts()),
 );
 
 server.registerTool(

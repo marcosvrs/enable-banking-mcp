@@ -6,6 +6,7 @@ import test from "node:test";
 const expectedTools = [
   "authorize_bank",
   "clear_local_credentials",
+  "connect_bank",
   "control_panel_authenticate",
   "control_panel_logout",
   "control_panel_status",
@@ -43,6 +44,7 @@ test("exposes documented tools with the local Control Panel email", async () => 
     assert.match(instructions, /register_application/);
     assert.match(instructions, /defaults to personal PRODUCTION/);
     assert.match(instructions, /never initiates payments/);
+    assert.match(instructions, /connect_bank/);
     const response = await client.listTools();
     const names = response.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, expectedTools);
@@ -88,6 +90,13 @@ test("exposes documented tools with the local Control Panel email", async () => 
     assert.equal(registerTool?.inputSchema?.properties?.aspsp_name, undefined);
     assert.equal(registerTool?.inputSchema?.properties?.country, undefined);
     assert.equal(registerTool?.inputSchema?.properties?.access_profile, undefined);
+    const connectTool = response.tools.find((tool) => tool.name === "connect_bank");
+    assert.equal(
+      connectTool?.inputSchema?.properties?.access_profile?.default,
+      "balances",
+    );
+    assert.equal(connectTool?.inputSchema?.properties?.country?.default, undefined);
+    assert.equal(connectTool?.inputSchema?.properties?.aspsp_name?.default, undefined);
     const authorizeBankTool = response.tools.find((tool) => tool.name === "authorize_bank");
     assert.equal(
       authorizeBankTool?.inputSchema?.properties?.access_profile?.default,

@@ -47,7 +47,7 @@ The bank-consent callback uses HTTPS and a generated or configured localhost cer
 The published package is the easiest route for clients that support npm:
 
 ```sh
-npx -y enable-banking-mcp@0.3.0-beta.2
+npx -y enable-banking-mcp@0.3.0-beta.3
 ```
 
 The release workflow publishes the unscoped `enable-banking-mcp` package to
@@ -63,7 +63,7 @@ For clients that accept an `mcpServers` JSON block, use the published package:
   "mcpServers": {
     "enable-banking-mcp": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.3.0-beta.2"],
+      "args": ["-y", "enable-banking-mcp@0.3.0-beta.3"],
       "env": {
         "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
       }
@@ -87,7 +87,7 @@ claude mcp add --scope user \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
   --transport stdio \
   enable-banking-mcp -- \
-  npx -y enable-banking-mcp@0.3.0-beta.2
+  npx -y enable-banking-mcp@0.3.0-beta.3
 ```
 
 Use `--scope local` instead of `--scope user` to limit the server to the
@@ -117,7 +117,7 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 ```sh
 codex mcp add enable-banking-mcp \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
-  -- npx -y enable-banking-mcp@0.3.0-beta.2
+  -- npx -y enable-banking-mcp@0.3.0-beta.3
 ```
 
 The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop
@@ -210,7 +210,34 @@ read-only description, privacy policy URL, and terms URL by default. Those
 values can be overridden in the setup arguments. To use `SANDBOX`, pass
 `"environment": "SANDBOX"` explicitly.
 
-### Register the application before choosing a bank
+### Recommended: guided connection
+
+Call `connect_bank` with `{}`. It is the primary user-facing setup tool and
+resumes whatever step is already complete:
+
+1. With no application, it starts local Control Panel authentication and
+   application registration.
+2. In Production, complete the dashboard account-link step when the browser
+   opens, then call `connect_bank` again.
+3. Provide only the two-letter country code, for example
+   `{"country": "IE"}`. The tool returns the available personal AIS banks.
+4. Call it again with the selected bank name, for example
+   `{"country": "IE", "aspsp_name": "Bank of Ireland"}`. It opens bank consent.
+5. After consent, call `connect_bank` with `{}` again to receive the
+   authorized accounts.
+
+`balances` is the default access profile. Use
+`"access_profile": "balances_and_transactions"` only when transaction history
+is required. The provider still requires a country and ASPSP for API consent;
+the guided tool removes the need to know the lower-level setup tools or exact
+call sequence.
+
+The Control Panel's Production linked-account restriction limits which
+accounts can be accessed, but it does not create the API session. The bank
+consent step remains required.
+
+### Advanced: register the application before choosing a bank
+
 
 Call `register_application` with:
 
@@ -233,7 +260,7 @@ call `authorize_bank` with the target ASPSP name and two-letter country code.
 In SANDBOX, the application is ready for `authorize_bank` immediately.
 Use `setup_status` to inspect the registration state.
 
-### Register the application and authorize a bank in one flow
+### Advanced: register the application and authorize a bank in one flow
 
 Call `setup_enable_banking` with:
 
