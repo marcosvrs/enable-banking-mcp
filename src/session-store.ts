@@ -13,6 +13,10 @@ type SecurityResult = {
   stdout: string;
   stderr: string;
 };
+type SecurityRunner = (
+  args: string[],
+  password?: string,
+) => Promise<SecurityResult>;
 
 const SECURITY_COMMAND = "/usr/bin/security";
 const DEFAULT_ACCOUNT = process.env.USER?.trim() || "default";
@@ -97,10 +101,11 @@ export class MacKeychainSecretStore implements SecretStore {
     private readonly service: string,
     private readonly account = DEFAULT_ACCOUNT,
     private readonly label = "secret",
+    private readonly securityRunner: SecurityRunner = runSecurity,
   ) {}
 
   private async readRaw(service: string): Promise<string | undefined> {
-    const result = await runSecurity([
+    const result = await this.securityRunner([
       "find-generic-password",
       "-a",
       this.account,
@@ -121,7 +126,7 @@ export class MacKeychainSecretStore implements SecretStore {
   }
 
   private async writeRaw(service: string, value: string): Promise<void> {
-    const result = await runSecurity(
+    const result = await this.securityRunner(
       [
         "add-generic-password",
         "-a",
@@ -141,7 +146,7 @@ export class MacKeychainSecretStore implements SecretStore {
   }
 
   private async deleteRaw(service: string): Promise<void> {
-    const result = await runSecurity([
+    const result = await this.securityRunner([
       "delete-generic-password",
       "-a",
       this.account,
@@ -186,6 +191,59 @@ export class MacKeychainSecretStore implements SecretStore {
     return decodeStoredSecret(encoded, this.label);
   }
 
+  private async rollbackFailedSet(
+    previous: string | undefined,
+    previousChunkCount: number | undefined,
+    previousChunks: Array<string | undefined>,
+    newChunkCount: number,
+    originalError: unknown,
+  ): Promise<never> {
+    const rollbackOperations: Promise<void>[] = [];
+    if (previousChunkCount === undefined) {
+      rollbackOperations.push(
+        ...Array.from({ length: newChunkCount }, (_, index) =>
+          this.deleteRaw(chunkService(this.service, index)),
+        ),
+      );
+    } else {
+      rollbackOperations.push(
+        ...previousChunks.map((chunk, index) =>
+          chunk === undefined
+            ? this.deleteRaw(chunkService(this.service, index))
+            : this.writeRaw(chunkService(this.service, index), chunk),
+        ),
+      );
+      if (newChunkCount > previousChunkCount) {
+        rollbackOperations.push(
+          ...Array.from(
+            { length: newChunkCount - previousChunkCount },
+            (_, index) =>
+              this.deleteRaw(
+                chunkService(this.service, previousChunkCount + index),
+              ),
+          ),
+        );
+      }
+    }
+    rollbackOperations.push(
+      previous === undefined
+        ? this.deleteRaw(this.service)
+        : this.writeRaw(this.service, previous),
+    );
+
+    const rollbackResults = await Promise.allSettled(rollbackOperations);
+    const rollbackFailures = rollbackResults.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (rollbackFailures.length > 0) {
+      throw new AggregateError(
+        [originalError, ...rollbackFailures],
+        `Unable to roll back failed Enable Banking ${this.label} storage`,
+      );
+    }
+    throw originalError;
+  }
+
   async set(value: string): Promise<void> {
     const normalized = value.trim();
     if (!normalized) {
@@ -204,15 +262,38 @@ export class MacKeychainSecretStore implements SecretStore {
     const previous = await this.readRaw(this.service);
     const previousChunkCount =
       previous === undefined ? undefined : parseChunkCount(previous, this.label);
-    await Promise.all(
-      chunks.map((chunk, index) =>
-        this.writeRaw(chunkService(this.service, index), chunk),
-      ),
-    );
-    await this.writeRaw(
-      this.service,
-      `${CHUNK_INDEX_PREFIX}${chunks.length}`,
-    );
+    const previousChunks =
+      previousChunkCount === undefined
+        ? []
+        : await Promise.all(
+            Array.from({ length: previousChunkCount }, (_, index) =>
+              this.readRaw(chunkService(this.service, index)),
+            ),
+          );
+    try {
+      const chunkWriteResults = await Promise.allSettled(
+        chunks.map((chunk, index) =>
+          this.writeRaw(chunkService(this.service, index), chunk),
+        ),
+      );
+      const chunkWriteFailure = chunkWriteResults.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (chunkWriteFailure) throw chunkWriteFailure.reason;
+      // Commit the index last so readers never observe partial new values.
+      await this.writeRaw(
+        this.service,
+        `${CHUNK_INDEX_PREFIX}${chunks.length}`,
+      );
+    } catch (error) {
+      await this.rollbackFailedSet(
+        previous,
+        previousChunkCount,
+        previousChunks,
+        chunks.length,
+        error,
+      );
+    }
     if (previousChunkCount !== undefined && previousChunkCount > chunks.length) {
       await Promise.all(
         Array.from(

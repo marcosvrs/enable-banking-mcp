@@ -2,7 +2,7 @@
   "mcpServers": {
     "enable-banking": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.3.0-beta.8"],
+      "args": ["-y", "enable-banking-mcp@0.3.0-beta.9"],
       "env_vars": [
         "ENABLE_BANKING_CONTROL_PANEL_EMAIL"
       ],

@@ -40,7 +40,7 @@ import { recoverConfiguredSession } from "./session-recovery.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.8",
+    version: "0.3.0-beta.9",
   },
   {
     instructions:
@@ -685,6 +685,11 @@ server.registerTool(
     access_profile,
   }) =>
     safely(async () => {
+      if (setupFlow.status.pending) {
+        throw new Error(
+          "Enable Banking setup is already in progress; call setup_status or connect_bank instead",
+        );
+      }
       const application = await applicationStore.get();
       const credentials = application
         ? { appId: application.appId, privateKey: application.privateKey }
