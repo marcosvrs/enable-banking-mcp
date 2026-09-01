@@ -1,19 +1,13 @@
 import { createPrivateKey, createSign, type KeyObject } from "node:crypto";
-import type { EnableBankingConfig, EnableBankingCredentials } from "./config.js";
+import type { EnableBankingCredentials } from "./config.js";
+import { parseLoopbackRedirect } from "./redirect.js";
 
 export const API_BASE_URL = "https://api.enablebanking.com";
 const JWT_TTL_SECONDS = 300;
 const REQUEST_TIMEOUT_MS = 30_000;
 const RFC3339_DATE_TIME =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-export type ApiHeaders = Record<string, string>;
-
-export interface ListBanksOptions {
-  psuType?: "personal" | "business";
-  service?: "AIS" | "PIS";
-  paymentType?: string;
-}
+const TOKEN_REFRESH_LEEWAY_SECONDS = 30;
 
 export interface TransactionQuery {
   dateFrom?: string;
@@ -21,7 +15,6 @@ export interface TransactionQuery {
   continuationKey?: string;
   transactionStatus?: "BOOK" | "CNCL" | "HOLD" | "OTHR" | "PDNG" | "RJCT" | "SCHD";
   strategy?: "default" | "longest";
-  headers?: ApiHeaders;
   limit: number;
 }
 
@@ -31,30 +24,19 @@ export interface TransactionPage {
   [key: string]: unknown;
 }
 
-export interface AccountIdentification {
-  iban?: string;
-  other?: Record<string, unknown>;
-}
-
 export interface AuthorizationRequest {
   aspsp: {
     name: string;
     country: string;
   };
   access: {
-    accounts?: AccountIdentification[] | null;
-    balances?: boolean;
-    transactions?: boolean;
+    balances: boolean;
+    transactions: boolean;
     valid_until: string;
   };
   state: string;
   redirect_url: string;
-  psu_type?: "personal" | "business";
-  auth_method?: string;
-  credentials?: Record<string, string>;
-  credentials_autosubmit?: boolean;
-  language?: string;
-  psu_id?: string;
+  psu_type: "personal";
 }
 
 export interface AuthorizationResponse {
@@ -81,23 +63,6 @@ export interface ApplicationResponse {
   [key: string]: unknown;
 }
 
-export type PaymentRequest = Record<string, unknown>;
-
-export interface PaymentResponse {
-  payment_id: string;
-  status: string;
-  url?: string;
-  psu_id_hash?: string;
-  [key: string]: unknown;
-}
-
-export interface PaymentSubmissionResponse {
-  payment_id: string;
-  status: string;
-  final_status: boolean;
-  [key: string]: unknown;
-}
-
 export interface EnableBankingErrorDetails {
   code?: number;
   error?: string;
@@ -109,12 +74,27 @@ export class EnableBankingApiError extends Error {
     readonly status: number,
     message: string,
     readonly details: EnableBankingErrorDetails = {},
+    readonly retryAfter?: string,
   ) {
     super(`Enable Banking API ${status}: ${message}`);
     this.name = "EnableBankingApiError";
   }
 }
 
+const TERMINAL_SESSION_ERROR_CODES: Record<string, true> = {
+  CLOSED_SESSION: true,
+  EXPIRED_SESSION: true,
+  REVOKED_SESSION: true,
+  SESSION_DOES_NOT_EXIST: true,
+};
+
+export function isTerminalSessionError(error: unknown): boolean {
+  return (
+    error instanceof EnableBankingApiError &&
+    typeof error.details.error === "string" &&
+    TERMINAL_SESSION_ERROR_CODES[error.details.error] === true
+  );
+}
 
 export function privateKeyFromValue(value: string): KeyObject {
   const normalized = value.trim().replace(/\\n/g, "\n");
@@ -178,6 +158,7 @@ export async function getHealth(
       response.status,
       extractErrorMessage(body) || response.statusText || "request failed",
       extractErrorDetails(body),
+      response.headers.get("retry-after") ?? undefined,
     );
   }
   return body;
@@ -185,6 +166,10 @@ export async function getHealth(
 
 export class EnableBankingClient {
   private readonly key: KeyObject;
+  private cachedToken?: {
+    value: string;
+    expiresAt: number;
+  };
 
   constructor(
     private readonly credentials: EnableBankingCredentials,
@@ -193,11 +178,11 @@ export class EnableBankingClient {
     this.key = privateKeyFromValue(credentials.privateKey);
   }
 
-  async listBanks(
-    country?: string,
-    options: ListBanksOptions = {},
-  ): Promise<unknown> {
-    const params = new URLSearchParams();
+  async listBanks(country?: string): Promise<unknown> {
+    const params = new URLSearchParams({
+      psu_type: "personal",
+      service: "AIS",
+    });
     if (country !== undefined) {
       const code = country.trim().toUpperCase();
       if (!/^[A-Z]{2}$/.test(code)) {
@@ -205,11 +190,7 @@ export class EnableBankingClient {
       }
       params.set("country", code);
     }
-    if (options.psuType) params.set("psu_type", options.psuType);
-    if (options.service) params.set("service", options.service);
-    if (options.paymentType) params.set("payment_type", options.paymentType);
-    const query = params.toString();
-    return this.request(`/aspsps${query ? `?${query}` : ""}`);
+    return this.request(`/aspsps?${params.toString()}`);
   }
 
   async startAuthorization(
@@ -217,26 +198,25 @@ export class EnableBankingClient {
   ): Promise<AuthorizationResponse> {
     const country = request.aspsp.country.trim().toUpperCase();
     const name = request.aspsp.name.trim();
-    const authMethod = request.auth_method?.trim();
-    const language = request.language?.trim();
     if (!/^[A-Z]{2}$/.test(country)) {
       throw new Error("country must be a two-letter ISO 3166-1 code");
     }
     if (!name) {
       throw new Error("aspsp.name is required");
     }
-    if (!request.state.trim()) {
-      throw new Error("state is required");
+    if (!/^[A-Za-z0-9_-]{43}$/.test(request.state)) {
+      throw new Error("state must be a 256-bit base64url value");
     }
-    if (!request.redirect_url.trim()) {
-      throw new Error("redirect_url is required");
+    if (request.psu_type !== "personal") {
+      throw new Error("psu_type must be personal");
     }
-    if (request.credentials && !authMethod) {
-      throw new Error("credentials require auth_method");
+    if (
+      typeof request.access.balances !== "boolean" ||
+      typeof request.access.transactions !== "boolean"
+    ) {
+      throw new Error("access.balances and access.transactions must be boolean");
     }
-    if (language && !/^[a-z]{2}$/.test(language)) {
-      throw new Error("language must be a two-letter lowercase code");
-    }
+    parseLoopbackRedirect(request.redirect_url);
     const validUntilTimestamp = Date.parse(request.access.valid_until);
     if (
       !RFC3339_DATE_TIME.test(request.access.valid_until) ||
@@ -245,15 +225,15 @@ export class EnableBankingClient {
     ) {
       throw new Error("access.valid_until must be a future RFC3339 date-time");
     }
-    return this.request("/auth", {
+    const response = await this.request<AuthorizationResponse>("/auth", {
       method: "POST",
       body: {
         ...request,
         aspsp: { name, country },
-        ...(authMethod ? { auth_method: authMethod } : {}),
-        ...(language ? { language } : {}),
       },
     });
+    validateAuthorizationUrl(response.url);
+    return response;
   }
 
   async createSession(code: string): Promise<SessionResponse> {
@@ -275,41 +255,22 @@ export class EnableBankingClient {
     return getHealth(this.fetchFn);
   }
 
-  async getSession(
-    sessionId: string,
-    headers?: ApiHeaders,
-  ): Promise<Record<string, unknown>> {
-    return this.request(`/sessions/${encodeURIComponent(sessionId)}`, {
-      headers,
-    });
+  async getSession(sessionId: string): Promise<Record<string, unknown>> {
+    return this.request(`/sessions/${encodeURIComponent(sessionId)}`);
   }
 
-  async deleteSession(
-    sessionId: string,
-    headers?: ApiHeaders,
-  ): Promise<Record<string, unknown>> {
+  async deleteSession(sessionId: string): Promise<Record<string, unknown>> {
     return this.request(`/sessions/${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
-      headers,
     });
   }
 
-  async getAccountDetails(
-    accountId: string,
-    headers?: ApiHeaders,
-  ): Promise<unknown> {
-    return this.request(`/accounts/${encodeURIComponent(accountId)}/details`, {
-      headers,
-    });
+  async getAccountDetails(accountId: string): Promise<unknown> {
+    return this.request(`/accounts/${encodeURIComponent(accountId)}/details`);
   }
 
-  async getAccountBalances(
-    accountId: string,
-    headers?: ApiHeaders,
-  ): Promise<unknown> {
-    return this.request(`/accounts/${encodeURIComponent(accountId)}/balances`, {
-      headers,
-    });
+  async getAccountBalances(accountId: string): Promise<unknown> {
+    return this.request(`/accounts/${encodeURIComponent(accountId)}/balances`);
   }
 
   async getAccountTransactions(
@@ -324,8 +285,8 @@ export class EnableBankingClient {
     if (query.dateTo && !query.dateFrom) {
       throw new Error("date_to requires date_from");
     }
-    if (!Number.isInteger(query.limit) || query.limit < 1) {
-      throw new Error("limit must be a positive integer");
+    if (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > 100) {
+      throw new Error("limit must be an integer between 1 and 100");
     }
 
     const transactions: unknown[] = [];
@@ -343,21 +304,24 @@ export class EnableBankingClient {
       }
       if (query.strategy) params.set("strategy", query.strategy);
       if (continuationKey) params.set("continuation_key", continuationKey);
-
       const suffix = params.toString() ? `?${params.toString()}` : "";
+
       const page = await this.request<TransactionPage>(
         `/accounts/${encodeURIComponent(accountId)}/transactions${suffix}`,
-        { headers: query.headers },
       );
       pages += 1;
 
       const pageTransactions = page.transactions ?? [];
-      const available = Math.max(0, query.limit - transactions.length);
-      for (const transaction of pageTransactions.slice(0, available)) {
-        transactions.push(transaction);
+      const available = query.limit - transactions.length;
+      const count = Math.min(pageTransactions.length, available);
+      for (let index = 0; index < count; index += 1) {
+        transactions.push(pageTransactions[index]);
       }
 
       const providerContinuation = page.continuation_key ?? undefined;
+      if (providerContinuation && providerContinuation === continuationKey) {
+        throw new Error("provider returned a repeated continuation key");
+      }
       const pageHasUnreturnedTransactions =
         pageTransactions.length > available;
       hasMore = Boolean(providerContinuation) || pageHasUnreturnedTransactions;
@@ -369,7 +333,7 @@ export class EnableBankingClient {
     } while (continuationKey);
 
     return {
-      transactions: transactions.slice(0, query.limit),
+      transactions,
       pages,
       hasMore,
       ...(nextContinuationKey ? { continuationKey: nextContinuationKey } : {}),
@@ -379,63 +343,9 @@ export class EnableBankingClient {
   async getTransactionDetails(
     accountId: string,
     transactionId: string,
-    headers?: ApiHeaders,
   ): Promise<unknown> {
     return this.request(
       `/accounts/${encodeURIComponent(accountId)}/transactions/${encodeURIComponent(transactionId)}`,
-      { headers },
-    );
-  }
-
-  async createPayment(
-    request: PaymentRequest,
-    headers?: ApiHeaders,
-  ): Promise<PaymentResponse> {
-    return this.request("/payments", {
-      method: "POST",
-      body: request,
-      headers,
-    });
-  }
-
-  async getPayment(
-    paymentId: string,
-    headers?: ApiHeaders,
-  ): Promise<PaymentResponse> {
-    return this.request(`/payments/${encodeURIComponent(paymentId)}`, {
-      headers,
-    });
-  }
-
-  async deletePayment(
-    paymentId: string,
-    headers?: ApiHeaders,
-  ): Promise<Record<string, unknown>> {
-    return this.request(`/payments/${encodeURIComponent(paymentId)}`, {
-      method: "DELETE",
-      headers,
-    });
-  }
-
-  async submitPayment(
-    paymentId: string,
-    headers?: ApiHeaders,
-  ): Promise<PaymentSubmissionResponse> {
-    return this.request(`/payments/${encodeURIComponent(paymentId)}/submit`, {
-      method: "POST",
-      body: {},
-      headers,
-    });
-  }
-
-  async getPaymentTransaction(
-    paymentId: string,
-    transactionId: string,
-    headers?: ApiHeaders,
-  ): Promise<unknown> {
-    return this.request(
-      `/payments/${encodeURIComponent(paymentId)}/transactions/${encodeURIComponent(transactionId)}`,
-      { headers },
     );
   }
 
@@ -444,13 +354,10 @@ export class EnableBankingClient {
     options: {
       method?: "GET" | "POST" | "DELETE";
       body?: unknown;
-      headers?: ApiHeaders;
     } = {},
   ): Promise<T> {
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const token = signJwtWithKey(this.credentials.appId, this.key, nowSeconds);
+    const token = this.authorizationToken();
     const headers: Record<string, string> = {
-      ...options.headers,
       Accept: "application/json",
       Authorization: `Bearer ${token}`,
     };
@@ -472,10 +379,42 @@ export class EnableBankingClient {
         response.status,
         extractErrorMessage(body) || response.statusText || "request failed",
         extractErrorDetails(body),
+        response.headers.get("retry-after") ?? undefined,
       );
     }
 
     return body as T;
+  }
+
+  private authorizationToken(): string {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (
+      this.cachedToken &&
+      nowSeconds < this.cachedToken.expiresAt - TOKEN_REFRESH_LEEWAY_SECONDS
+    ) {
+      return this.cachedToken.value;
+    }
+    const value = signJwtWithKey(this.credentials.appId, this.key, nowSeconds);
+    this.cachedToken = {
+      value,
+      expiresAt: nowSeconds + JWT_TTL_SECONDS,
+    };
+    return value;
+  }
+}
+
+function validateAuthorizationUrl(value: unknown): asserts value is string {
+  if (typeof value !== "string") {
+    throw new Error("Enable Banking returned an invalid authorization URL");
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Enable Banking returned an invalid authorization URL");
+  }
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new Error("Enable Banking returned an invalid authorization URL");
   }
 }
 
@@ -534,11 +473,4 @@ function extractErrorDetails(body: unknown): EnableBankingErrorDetails {
       ? { detail: record.detail }
       : {}),
   };
-}
-
-export function createClient(
-  config: EnableBankingConfig,
-  fetchFn?: typeof fetch,
-): EnableBankingClient {
-  return new EnableBankingClient(config, fetchFn);
 }

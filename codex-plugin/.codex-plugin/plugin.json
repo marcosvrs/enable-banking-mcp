@@ -1,0 +1,27 @@
+{
+  "name": "enable-banking-mcp",
+  "version": "0.3.0-beta.10",
+  "description": "Read-only personal Enable Banking account-information tools for Codex",
+  "author": {
+    "name": "enable-banking-mcp contributors"
+  },
+  "homepage": "https://github.com/marcosvrs/enable-banking-mcp",
+  "repository": "https://github.com/marcosvrs/enable-banking-mcp",
+  "license": "MIT",
+  "keywords": ["banking", "finance", "mcp", "read-only"],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Enable Banking MCP",
+    "shortDescription": "Read-only personal Enable Banking tools",
+    "longDescription": "Connect Codex to locally authenticated personal Enable Banking account-information tools. The server never initiates payments and stores credentials locally on macOS.",
+    "developerName": "enable-banking-mcp contributors",
+    "category": "Productivity",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/marcosvrs/enable-banking-mcp",
+    "privacyPolicyURL": "https://marcosvrs.github.io/enable-banking-mcp/privacy-policy/",
+    "termsOfServiceURL": "https://marcosvrs.github.io/enable-banking-mcp/terms-of-use/",
+    "defaultPrompt": [
+      "Use Enable Banking MCP to review my locally authorized personal account data."
+    ]
+  }
+}

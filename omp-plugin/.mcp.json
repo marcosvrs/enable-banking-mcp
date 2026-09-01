@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "enable-banking": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "enable-banking-mcp@0.3.0-beta.10"],
+      "env": {
+        "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "ENABLE_BANKING_CONTROL_PANEL_EMAIL"
+      }
+    }
+  }
+}
