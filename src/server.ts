@@ -40,7 +40,7 @@ import { recoverConfiguredSession } from "./session-recovery.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.7",
+    version: "0.3.0-beta.8",
   },
   {
     instructions:

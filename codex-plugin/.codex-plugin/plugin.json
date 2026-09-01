@@ -1,6 +1,6 @@
 {
   "name": "enable-banking-mcp",
-  "version": "0.3.0-beta.7",
+  "version": "0.3.0-beta.8",
   "description": "Read-only personal Enable Banking account-information tools for Codex",
   "author": {
     "name": "enable-banking-mcp contributors"
