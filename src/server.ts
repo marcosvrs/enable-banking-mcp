@@ -15,6 +15,7 @@ import {
   EnableBankingApiError,
   EnableBankingClient,
   getHealth,
+  isTerminalSessionError,
 } from "./enable-banking.js";
 import { MacKeychainApplicationStore } from "./application-store.js";
 import {
@@ -39,7 +40,7 @@ import { MacKeychainSessionStore } from "./session-store.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.5",
+    version: "0.3.0-beta.6",
   },
   {
     instructions:
@@ -362,15 +363,6 @@ function extractBankChoices(
     return [{ name, country }];
   });
 }
-function isTerminalSessionError(error: unknown): boolean {
-  return (
-    error instanceof EnableBankingApiError &&
-    (error.status === 400 ||
-      error.status === 401 ||
-      error.status === 403 ||
-      error.status === 404)
-  );
-}
 
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -667,8 +659,10 @@ server.registerTool(
       redirect_url: z
         .string()
         .url()
-        .default(DEFAULT_REDIRECT_URL)
-        .describe("Registered HTTPS loopback callback URL"),
+        .optional()
+        .describe(
+          "Registered HTTPS loopback callback URL; defaults to the stored application's first redirect",
+        ),
       valid_until: z
         .string()
         .min(1)
@@ -687,15 +681,21 @@ server.registerTool(
     valid_until,
     access_profile,
   }) =>
-    safely(async () =>
-      authorizationFlow.start(new EnableBankingClient(await resolveCredentials()), {
+    safely(async () => {
+      const application = await applicationStore.get();
+      const credentials = application
+        ? { appId: application.appId, privateKey: application.privateKey }
+        : await resolveCredentials();
+      const resolvedRedirectUrl =
+        redirect_url ?? application?.redirectUrls[0] ?? DEFAULT_REDIRECT_URL;
+      return authorizationFlow.start(new EnableBankingClient(credentials), {
         aspspName: aspsp_name,
         country,
-        redirectUrl: redirect_url,
+        redirectUrl: resolvedRedirectUrl,
         validUntil: valid_until,
         accessProfile: access_profile as AccessProfile,
-      }),
-    ),
+      });
+    }),
 );
 
 server.registerTool(

@@ -81,6 +81,21 @@ export class EnableBankingApiError extends Error {
   }
 }
 
+const TERMINAL_SESSION_ERROR_CODES: Record<string, true> = {
+  CLOSED_SESSION: true,
+  EXPIRED_SESSION: true,
+  REVOKED_SESSION: true,
+  SESSION_DOES_NOT_EXIST: true,
+};
+
+export function isTerminalSessionError(error: unknown): boolean {
+  return (
+    error instanceof EnableBankingApiError &&
+    typeof error.details.error === "string" &&
+    TERMINAL_SESSION_ERROR_CODES[error.details.error] === true
+  );
+}
+
 export function privateKeyFromValue(value: string): KeyObject {
   const normalized = value.trim().replace(/\\n/g, "\n");
 

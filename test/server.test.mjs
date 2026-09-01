@@ -103,6 +103,10 @@ test("exposes documented tools with the local Control Panel email", async () => 
       "balances",
     );
     assert.equal(
+      authorizeBankTool?.inputSchema?.properties?.redirect_url?.default,
+      undefined,
+    );
+    assert.equal(
       authorizeBankTool?.inputSchema?.properties?.psu_type,
       undefined,
     );

@@ -7,14 +7,14 @@
   },
   "metadata": {
     "description": "Read-only personal Enable Banking tools for Oh My Pi",
-    "version": "0.3.0-beta.5"
+    "version": "0.3.0-beta.6"
   },
   "plugins": [
     {
       "name": "enable-banking-mcp",
       "description": "Read-only personal Enable Banking account-information tools for Oh My Pi",
       "source": "./omp-plugin",
-      "version": "0.3.0-beta.5",
+      "version": "0.3.0-beta.6",
       "homepage": "https://github.com/marcosvrs/enable-banking-mcp",
       "repository": "https://github.com/marcosvrs/enable-banking-mcp",
       "license": "MIT",

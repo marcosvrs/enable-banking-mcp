@@ -6,6 +6,7 @@ import {
   EnableBankingClient,
   createJwt,
   getHealth,
+  isTerminalSessionError,
   privateKeyFromValue,
 } from "../dist/enable-banking.js";
 import { loadCredentials } from "../dist/config.js";
@@ -354,6 +355,34 @@ test("retains structured API error details", async () => {
       error.details.code === 401 &&
       error.details.error === "EXPIRED_SESSION" &&
       error.details.detail === "The session is no longer valid",
+  );
+});
+
+test("clears only explicitly terminal provider sessions", () => {
+  for (const errorCode of [
+    "CLOSED_SESSION",
+    "EXPIRED_SESSION",
+    "REVOKED_SESSION",
+    "SESSION_DOES_NOT_EXIST",
+  ]) {
+    assert.equal(
+      isTerminalSessionError(
+        new EnableBankingApiError(401, "session error", { error: errorCode }),
+      ),
+      true,
+    );
+  }
+  assert.equal(
+    isTerminalSessionError(
+      new EnableBankingApiError(401, "unauthorized", {
+        error: "UNAUTHORIZED_ACCESS",
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    isTerminalSessionError(new EnableBankingApiError(403, "forbidden")),
+    false,
   );
 });
 test("preserves provider retry-after metadata", async () => {

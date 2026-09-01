@@ -47,7 +47,7 @@ The bank-consent callback uses HTTPS and a generated or configured localhost cer
 The published package is the easiest route for clients that support npm:
 
 ```sh
-npx -y enable-banking-mcp@0.3.0-beta.5
+npx -y enable-banking-mcp@0.3.0-beta.6
 ```
 
 The release workflow publishes the unscoped `enable-banking-mcp` package to
@@ -63,7 +63,7 @@ For clients that accept an `mcpServers` JSON block, use the published package:
   "mcpServers": {
     "enable-banking-mcp": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.3.0-beta.5"],
+      "args": ["-y", "enable-banking-mcp@0.3.0-beta.6"],
       "env": {
         "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
       }
@@ -87,7 +87,7 @@ claude mcp add --scope user \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
   --transport stdio \
   enable-banking-mcp -- \
-  npx -y enable-banking-mcp@0.3.0-beta.5
+  npx -y enable-banking-mcp@0.3.0-beta.6
 ```
 
 Use `--scope local` instead of `--scope user` to limit the server to the
@@ -117,7 +117,7 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 ```sh
 codex mcp add enable-banking-mcp \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
-  -- npx -y enable-banking-mcp@0.3.0-beta.5
+  -- npx -y enable-banking-mcp@0.3.0-beta.6
 ```
 
 The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop
@@ -316,6 +316,8 @@ For an application registered with `register_application`, or any other
 already configured application, use `authorize_bank` to start a new personal
 consent flow. `list_banks` is restricted to personal AIS institutions. Account
 tools use the current locally stored session only.
+If `authorize_bank.redirect_url` is omitted, the first redirect URL registered
+on the stored application is used.
 
 The provider requires an application JWT for ASPSP discovery, so `list_banks`
 is available after application credentials exist. The split first-run path
