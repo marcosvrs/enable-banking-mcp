@@ -15,7 +15,6 @@ import {
   EnableBankingApiError,
   EnableBankingClient,
   getHealth,
-  isTerminalSessionError,
 } from "./enable-banking.js";
 import { MacKeychainApplicationStore } from "./application-store.js";
 import {
@@ -36,11 +35,12 @@ import {
   type SetupOptions,
 } from "./setup.js";
 import { MacKeychainSessionStore } from "./session-store.js";
+import { recoverConfiguredSession } from "./session-recovery.js";
 
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.6",
+    version: "0.3.0-beta.7",
   },
   {
     instructions:
@@ -196,22 +196,25 @@ async function connectBank(options: ConnectBankOptions): Promise<unknown> {
     sessionStore.get(),
     applicationStore.get(),
   ]);
-  if (storedSession || process.env.ENABLE_BANKING_SESSION_ID?.trim()) {
-    try {
-      return {
-        status: "connected",
-        ...(await authorizedAccounts()),
-      };
-    } catch (error) {
-      if (!isTerminalSessionError(error)) throw error;
-      if (storedSession) {
-        await sessionStore.clear();
-      }
-      if (process.env.ENABLE_BANKING_SESSION_ID?.trim()) {
+  const environmentSessionId = process.env.ENABLE_BANKING_SESSION_ID?.trim();
+  const connected = await recoverConfiguredSession({
+    storedSession,
+    environmentSessionId,
+    read: async () => ({
+      status: "connected",
+      ...(await authorizedAccounts()),
+    }),
+    clearStoredSession: () => sessionStore.clear(),
+    clearEnvironmentSession: () => {
+      if (
+        environmentSessionId &&
+        process.env.ENABLE_BANKING_SESSION_ID?.trim() === environmentSessionId
+      ) {
         delete process.env.ENABLE_BANKING_SESSION_ID;
       }
-    }
-  }
+    },
+  });
+  if (connected) return connected;
 
   const setupStatus = setupFlow.status;
   if (setupStatus.pending) {
