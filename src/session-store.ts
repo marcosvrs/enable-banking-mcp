@@ -19,17 +19,17 @@ const DEFAULT_ACCOUNT = process.env.USER?.trim() || "default";
 export const DEFAULT_SESSION_SERVICE = "enable-banking-mcp";
 export const DEFAULT_APPLICATION_SERVICE = "enable-banking-mcp.application";
 
-function runSecurity(args: string[], stdin?: string): Promise<SecurityResult> {
+// Passing the value after `-w` avoids the interactive prompt used when `-w` is last.
+function runSecurity(args: string[], password?: string): Promise<SecurityResult> {
+  const commandArgs =
+    password === undefined ? args : [...args, password];
   const { promise, resolve, reject } = Promise.withResolvers<SecurityResult>();
-  const child = spawn(SECURITY_COMMAND, args, {
-    stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+  const child = spawn(SECURITY_COMMAND, commandArgs, {
+    stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
   let stderr = "";
 
-  if (stdin !== undefined && child.stdin) {
-    child.stdin.end(`${stdin}\n${stdin}\n`);
-  }
   if (!child.stdout || !child.stderr) {
     child.kill();
     reject(new Error("Required local credential command failed"));
@@ -53,7 +53,7 @@ function runSecurity(args: string[], stdin?: string): Promise<SecurityResult> {
 const ENCODED_SECRET_PREFIX = "enable-banking-mcp:v1:";
 const CHUNK_INDEX_PREFIX = "enable-banking-mcp:chunks:v1:";
 const CHUNK_SERVICE_SUFFIX = ".part.";
-// `security`'s interactive password input truncates values at 128 bytes.
+// Keep individual Keychain values short for compatibility with existing records.
 const KEYCHAIN_CHUNK_SIZE = 80;
 const MAX_KEYCHAIN_CHUNKS = 256;
 
