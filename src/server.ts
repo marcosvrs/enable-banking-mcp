@@ -40,7 +40,7 @@ import { recoverConfiguredSession } from "./session-recovery.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.9",
+    version: "0.3.0-beta.10",
   },
   {
     instructions:
@@ -278,7 +278,7 @@ async function connectBank(options: ConnectBankOptions): Promise<unknown> {
 
   const client = new EnableBankingClient(await resolveCredentials());
   const applicationInfo = await client.getApplication();
-  if (!applicationInfo.active) {
+  if (application.environment === "PRODUCTION" && !applicationInfo.active) {
     launchBrowser(APPLICATIONS_URL);
     return {
       status: "dashboard_action_required",
@@ -936,6 +936,9 @@ server.registerTool(
       }
       await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
+      const cleared = failures.length === 0;
+      if (cleared) setupFlow.reset();
+
       const environmentCredentialsPresent = Boolean(
         (
           process.env.ENABLE_BANKING_APP_ID?.trim() ||
@@ -944,7 +947,7 @@ server.registerTool(
           process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
       );
       return {
-        cleared: failures.length === 0,
+        cleared,
         trusted_certificate_removed: trustedCertificateRemoved,
         environment_credentials_present: environmentCredentialsPresent,
         ...(failures.length > 0 ? { failed_items: failures } : {}),

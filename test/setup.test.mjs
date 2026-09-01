@@ -423,6 +423,12 @@ test("registers an application before bank details are provided", async () => {
     message:
       "Application registered; activate it in the dashboard, then call authorize_bank",
   });
+  await applicationStore.clear();
+  setup.reset();
+  assert.deepEqual(await setup.getStatus(), {
+    phase: "idle",
+    pending: false,
+  });
 });
 
 class MemoryApplicationStore {

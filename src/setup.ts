@@ -132,6 +132,13 @@ export class ApplicationSetupFlow {
     return { ...this.current };
   }
 
+  reset(): void {
+    this.current = {
+      phase: "idle",
+      pending: false,
+    };
+  }
+
   async getStatus(): Promise<SetupStatus> {
     if (this.current.pending) return this.status;
     const [application, session] = await Promise.all([

@@ -1,6 +1,6 @@
 {
   "name": "enable-banking-mcp",
-  "version": "0.3.0-beta.9",
+  "version": "0.3.0-beta.10",
   "description": "Personal, noncommercial read-only MCP server for Enable Banking AIS",
   "license": "MIT",
   "repository": {
