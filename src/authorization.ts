@@ -71,6 +71,7 @@ export class BankAuthorizationFlow {
   private starting = false;
   private pending?: PendingAuthorization;
   private lastError?: string;
+  private credentialCleanupPending = false;
 
   constructor(
     private readonly sessionStore: SessionStore,
@@ -88,35 +89,59 @@ export class BankAuthorizationFlow {
     };
   }
 
-  resetError(): void {
-    this.lastError = undefined;
-  }
   reserve(): void {
+    if (this.credentialCleanupPending) {
+      throw new Error("Cannot start bank authorization while credential cleanup is pending");
+    }
     if (this.starting || this.pending) {
       throw new Error("Bank authorization is already in progress");
     }
     this.starting = true;
+    this.lastError = undefined;
   }
 
   release(): void {
     this.starting = false;
   }
 
+  async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.starting || this.pending || this.credentialCleanupPending) {
+      throw new Error(
+        "Cannot clear credentials while bank authorization or cleanup is pending",
+      );
+    }
+    this.credentialCleanupPending = true;
+    try {
+      return await operation();
+    } finally {
+      this.credentialCleanupPending = false;
+    }
+  }
+
   async start(
     client: EnableBankingClient,
     options: BankAuthorizationOptions,
-    reserved = false,
   ): Promise<AuthorizationStartResult> {
-    if (!reserved) {
-      this.reserve();
+    this.reserve();
+    return this.startReserved(client, options);
+  }
+
+  async startReserved(
+    client: EnableBankingClient,
+    options: BankAuthorizationOptions,
+  ): Promise<AuthorizationStartResult> {
+    if (!this.starting || this.pending) {
+      throw new Error("Bank authorization reservation is not active");
     }
 
-    const redirect = parseLoopbackRedirect(options.redirectUrl);
-    const validUntil = parseValidUntil(options.validUntil);
-    const state = randomBytes(32).toString("base64url");
-    this.starting = true;
+    let redirect: LoopbackRedirect;
+    let validUntil: string;
+    let state: string;
     let listener: CallbackListener;
     try {
+      redirect = parseLoopbackRedirect(options.redirectUrl);
+      validUntil = parseValidUntil(options.validUntil);
+      state = randomBytes(32).toString("base64url");
       listener = await this.listenerFactory(
         redirect,
         state,

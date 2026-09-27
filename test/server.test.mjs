@@ -706,6 +706,44 @@ test("blocks logout, authorization, and credential cleanup while registration is
   }
 });
 
+test("reserves authorization before loading stored credentials during cleanup", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_DELAY_APPLICATION_LOOKUP: "true",
+  });
+  try {
+    const authorization = callTool(server.client, "authorize_bank", {
+      aspsp_name: "Fixture Bank",
+      country: "FI",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const cleanupWhileLoading = await callTool(
+      server.client,
+      "clear_local_credentials",
+    );
+    assert.equal(cleanupWhileLoading.isError, true);
+    assert.match(
+      cleanupWhileLoading.content[0].text,
+      /Cannot clear credentials while setup or authorization is pending/,
+    );
+
+    const failedAuthorization = await authorization;
+    assert.equal(failedAuthorization.isError, true);
+    assert.match(
+      failedAuthorization.content[0].text,
+      /No Enable Banking application is configured/,
+    );
+
+    const cleanupAfterFailure = toolValue(
+      await callTool(server.client, "clear_local_credentials"),
+    );
+    assert.equal(cleanupAfterFailure.cleared, true);
+  } finally {
+    await server.close();
+  }
+});
+
+
 test("clears recoverable state when the persisted application record is malformed", async () => {
   const server = await startIsolatedServer({
     MCP_TEST_KEYCHAIN: JSON.stringify({
@@ -717,12 +755,13 @@ test("clears recoverable state when the persisted application record is malforme
       await callTool(server.client, "clear_local_credentials"),
     );
     assert.equal(cleanup.cleared, false);
-    assert.deepEqual(cleanup.failed_items, ["trusted_certificate"]);
+    assert.deepEqual(cleanup.failed_items, ["trusted_certificate", "application"]);
 
     const retry = toolValue(
       await callTool(server.client, "clear_local_credentials"),
     );
-    assert.equal(retry.cleared, true);
+    assert.equal(retry.cleared, false);
+    assert.deepEqual(retry.failed_items, ["trusted_certificate", "application"]);
   } finally {
     await server.close();
   }

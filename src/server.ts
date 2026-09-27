@@ -713,8 +713,8 @@ server.registerTool(
         const credentials = application
           ? { appId: application.appId, privateKey: application.privateKey }
           : await resolveCredentials();
-        /* c8 ignore next 4 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
-        return await authorizationFlow.start(
+        /* c8 ignore next 6 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
+        return await authorizationFlow.startReserved(
           new EnableBankingClient(credentials),
           {
             aspspName: aspsp_name,
@@ -724,11 +724,9 @@ server.registerTool(
             validUntil: valid_until,
             accessProfile: access_profile as AccessProfile,
           },
-          true,
         );
-      } catch (error) {
+      } finally {
         authorizationFlow.release();
-        throw error;
       }
     }),
 );
@@ -926,60 +924,63 @@ server.registerTool(
         throw new Error("Cannot clear credentials while setup or authorization is pending");
       }
 
-      return controlPanelAuth.withCredentialCleanup(async () => {
-        const failures: string[] = [];
-        let trustedCertificateRemoved = false;
-        let applicationCanBeCleared = true;
-        let application: StoredApplication | undefined;
-        try {
-          application = await applicationStore.get();
-        } catch {
-          application = undefined;
-          failures.push("trusted_certificate");
-        }
-        if (application?.certificate) {
+      return authorizationFlow.withCredentialCleanup(() =>
+        controlPanelAuth.withCredentialCleanup(async () => {
+          const failures: string[] = [];
+          let trustedCertificateRemoved = false;
+          let applicationCanBeCleared = true;
+          let application: StoredApplication | undefined;
           try {
-            await removeTrustedCertificate(application.certificate);
-            trustedCertificateRemoved = true;
+            application = await applicationStore.get();
           } catch {
+            application = undefined;
             failures.push("trusted_certificate");
             applicationCanBeCleared = false;
           }
-        }
-
-        const clearStore = async (
-          name: string,
-          clear: () => Promise<void>,
-        ): Promise<void> => {
-          try {
-            await clear();
-          } catch {
-            failures.push(name);
+          if (application?.certificate) {
+            try {
+              await removeTrustedCertificate(application.certificate);
+              trustedCertificateRemoved = true;
+            } catch {
+              failures.push("trusted_certificate");
+              applicationCanBeCleared = false;
+            }
           }
-        };
-        await clearStore("session", () => sessionStore.clear());
-        if (applicationCanBeCleared) {
-          await clearStore("application", () => applicationStore.clear());
-        } else {
-          failures.push("application");
-        }
-        await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
-        const cleared = failures.length === 0;
-        if (cleared) setupFlow.reset();
+          const clearStore = async (
+            name: string,
+            clear: () => Promise<void>,
+          ): Promise<void> => {
+            try {
+              await clear();
+            } catch {
+              failures.push(name);
+            }
+          };
+          await clearStore("session", () => sessionStore.clear());
+          if (applicationCanBeCleared) {
+            await clearStore("application", () => applicationStore.clear());
+          } else {
+            failures.push("application");
+          }
+          await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
-        const environmentCredentialsPresent = Boolean(
-          process.env.ENABLE_BANKING_APP_ID?.trim() ||
-            process.env.ENABLE_BANKING_ID?.trim() ||
-            process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
-        );
-        return {
-          cleared,
-          trusted_certificate_removed: trustedCertificateRemoved,
-          environment_credentials_present: environmentCredentialsPresent,
-          ...(failures.length > 0 ? { failed_items: failures } : {}),
-        };
-      });
+          const cleared = failures.length === 0;
+          if (cleared) setupFlow.reset();
+
+          const environmentCredentialsPresent = Boolean(
+            process.env.ENABLE_BANKING_APP_ID?.trim() ||
+              process.env.ENABLE_BANKING_ID?.trim() ||
+              process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
+          );
+          return {
+            cleared,
+            trusted_certificate_removed: trustedCertificateRemoved,
+            environment_credentials_present: environmentCredentialsPresent,
+            ...(failures.length > 0 ? { failed_items: failures } : {}),
+          };
+        }),
+      );
     }),
 );
 

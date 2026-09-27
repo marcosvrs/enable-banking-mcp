@@ -31,7 +31,7 @@ export interface GuidedConnectionDependencies {
   applicationStore: Pick<ApplicationStore, "get">;
   sessionStore: Pick<SessionStore, "get" | "clear">;
   setupFlow: Pick<ApplicationSetupFlow, "status" | "registerApplication" | "start">;
-  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start" | "resetError">;
+  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start">;
   controlPanelAuthStore: Pick<ControlPanelAuthStore, "get">;
   resolveControlPanelEmail(
     environmentName: string,
@@ -140,12 +140,12 @@ export async function connectBank(
 
   if (dependencies.authorizationFlow.status.lastError) {
     const error = dependencies.authorizationFlow.status.lastError;
-    dependencies.authorizationFlow.resetError();
     return {
       status: "failed",
       phase: "bank_authorization",
       error,
-      message: "Bank authorization failed or was denied. Call connect_bank again to retry.",
+      message:
+        "Bank authorization failed or was denied. Do not retry automatically; ask the user whether to start a new authorize_bank flow.",
     };
   }
 

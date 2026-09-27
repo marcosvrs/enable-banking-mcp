@@ -37,19 +37,22 @@ let certificateDeleteAttempted = false;
 let delayApplicationRegistration =
   process.env.MCP_TEST_DELAY_REGISTRATION === "true";
 
-function completedChild(stdout = "", stderr = "", code = 0) {
+function completedChild(stdout = "", stderr = "", code = 0, delay = 0) {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = () => true;
   child.unref = () => child;
-  queueMicrotask(() => {
+  const finish = () => {
     child.stdout.end(stdout);
     child.stderr.end(stderr);
     child.emit("close", code, null);
-  });
+  };
+  if (delay > 0) setTimeout(finish, delay);
+  else queueMicrotask(finish);
   return child;
 }
+
 
 function runSecurity(args) {
   const operation = args[0];
@@ -57,9 +60,14 @@ function runSecurity(args) {
   const service = serviceIndex === -1 ? undefined : args[serviceIndex + 1];
   if (operation === "find-generic-password" && service) {
     const value = records.get(service);
+    const delay =
+      service === "enable-banking-mcp.application" &&
+      process.env.MCP_TEST_DELAY_APPLICATION_LOOKUP === "true"
+        ? 250
+        : 0;
     return value === undefined
-      ? completedChild("", "The specified item could not be found in the keychain.", 44)
-      : completedChild(`${value}\n`);
+      ? completedChild("", "The specified item could not be found in the keychain.", 44, delay)
+      : completedChild(`${value}\n`, "", 0, delay);
   }
   if (operation === "delete-generic-password" && service) {
     if (

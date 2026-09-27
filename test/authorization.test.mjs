@@ -528,6 +528,47 @@ test("listener cleanup failure does not leave bank authorization pending", async
   assert.equal(await store.get(), "stored-before-cleanup-error");
 });
 
+test("authorization reservations exclude credential cleanup and release after cleanup", async () => {
+  const flow = new BankAuthorizationFlow(new MemorySessionStore());
+  await assert.rejects(
+    flow.startReserved({}, {}),
+    /reservation is not active/,
+  );
+  flow.reserve();
+  assert.equal(flow.status.pending, true);
+  assert.throws(() => flow.reserve(), /already in progress/);
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => {}),
+    /bank authorization or cleanup is pending/,
+  );
+  flow.release();
+  assert.equal(flow.status.pending, false);
+
+  let finishCleanup;
+  const cleanup = flow.withCredentialCleanup(
+    () =>
+      new Promise((resolve) => {
+        finishCleanup = resolve;
+      }),
+  );
+  assert.throws(() => flow.reserve(), /credential cleanup is pending/);
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => {}),
+    /bank authorization or cleanup is pending/,
+  );
+  finishCleanup();
+  await cleanup;
+
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => {
+      throw new Error("cleanup failed");
+    }),
+    /cleanup failed/,
+  );
+  flow.reserve();
+  flow.release();
+});
+
 test("real HTTPS callback rejects invalid requests and stores an accepted session", async () => {
   const port = await getAvailablePort();
   const redirectUrl = `https://127.0.0.1:${port}/authorization/callback`;
@@ -578,6 +619,10 @@ test("real HTTPS callback rejects invalid requests and stores an accepted sessio
   assert.equal(await store.get(), undefined);
   assert.equal(sessionCode, undefined);
   assert.equal(flow.status.pending, true);
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => {}),
+    /bank authorization or cleanup is pending/,
+  );
 
   callback.searchParams.set("code", "approved-code");
   assert.equal(await requestHttpsStatus(callback), 200);

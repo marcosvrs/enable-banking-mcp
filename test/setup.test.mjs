@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import childProcess from "node:child_process";
+import { generateKeyPairSync, X509Certificate } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
 import { connect } from "node:net";
 import test from "node:test";
+import { PassThrough } from "node:stream";
 import {
   MacKeychainControlPanelAuthStore,
 } from "../dist/control-panel-store.js";
@@ -15,6 +19,7 @@ import { BankAuthorizationFlow } from "../dist/authorization.js";
 import { EnableBankingClient } from "../dist/enable-banking.js";
 import {
   ApplicationSetupFlow,
+  generateKeyMaterial,
   removeTrustedCertificate,
 } from "../dist/setup.js";
 
@@ -88,6 +93,45 @@ test("rejects invalid stored certificates before cleanup commands", async () => 
     removeTrustedCertificate("not-a-certificate"),
     /Stored localhost certificate is invalid/,
   );
+});
+
+test("removes a trusted certificate using its SHA-1 fingerprint", async (context) => {
+  const { certificate } = await generateKeyMaterial();
+  const expectedFingerprint = new X509Certificate(certificate).fingerprint.replaceAll(
+    ":",
+    "",
+  );
+  let capturedArgs;
+  const realSpawn = childProcess.spawn.bind(childProcess);
+  context.mock.method(childProcess, "spawn", (command, args = [], options) => {
+    if (command !== "/usr/bin/security") {
+      return realSpawn(command, args, options);
+    }
+    capturedArgs = args;
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    queueMicrotask(() => {
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("close", 0, null);
+    });
+    return child;
+  });
+  syncBuiltinESMExports();
+  try {
+    await removeTrustedCertificate(certificate);
+  } finally {
+    context.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+
+  assert.deepEqual(capturedArgs.slice(0, 3), [
+    "delete-certificate",
+    "-Z",
+    expectedFingerprint,
+  ]);
 });
 
 test("reports persisted completion after the MCP process restarts", async () => {

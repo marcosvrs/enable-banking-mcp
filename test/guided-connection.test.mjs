@@ -44,6 +44,7 @@ async function runConnection({
   environmentEmail = "local@example.com",
   setupPending = false,
   authorizationPending = false,
+  authorizationLastError,
   applicationInfo = { active: true, countries: ["FI"] },
   globalBanks = [],
   banksByCountry = {},
@@ -99,7 +100,10 @@ async function runConnection({
       },
     },
     authorizationFlow: {
-      status: { pending: authorizationPending },
+      status: {
+        pending: authorizationPending,
+        ...(authorizationLastError ? { lastError: authorizationLastError } : {}),
+      },
       async start(client, authorization) {
         state.authorizationCalls.push({ client, authorization });
         return {
@@ -373,6 +377,22 @@ test("pending bank authorization resumes without requesting application data", a
   assert.equal(state.bankCalls.length, 0);
   assert.equal(state.authorizationCalls.length, 0);
   assert.deepEqual(elicitationRequests, []);
+});
+
+test("surfaces bank authorization failure without retrying automatically", async () => {
+  const { result, state } = await runConnection({
+    application: storedApplication(),
+    authorizationLastError: "Bank authorization was denied",
+    environmentEmail: "",
+  });
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.phase, "bank_authorization");
+  assert.equal(result.error, "Bank authorization was denied");
+  assert.match(result.message, /Do not retry automatically/);
+  assert.equal(state.applicationReads, 0);
+  assert.equal(state.bankCalls.length, 0);
+  assert.equal(state.authorizationCalls.length, 0);
 });
 
 test("inactive Production application pauses for dashboard linking before bank discovery", async () => {
