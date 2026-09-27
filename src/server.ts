@@ -45,7 +45,7 @@ import { resolveControlPanelEmailInput } from "./control-panel-email.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.3.0-beta.10",
+    version: "0.3.0-beta.11",
   },
   {
     instructions:
