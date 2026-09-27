@@ -382,20 +382,22 @@ server.registerTool(
       "Reuse or refresh a stored Control Panel session, or request a sign-in link. If no local email or stored identity exists, use MCP form elicitation when supported; the email and tokens are never tool arguments or results.",
   },
   async () =>
-    safely(async () => {
-      const existingAuth = await controlPanelAuthStore.get();
-      const email = await resolveControlPanelEmail(
-        CONTROL_PANEL_EMAIL_ENV,
-        existingAuth?.email,
-      );
-      if (typeof email !== "string") return email;
-      const auth = await controlPanelAuth.authenticate(email, existingAuth);
-      if (auth !== existingAuth) await controlPanelAuthStore.set(auth);
-      return {
-        authenticated: true,
-        ...(auth.expiresAt ? { expires_at: auth.expiresAt } : {}),
-      };
-    }),
+    safely(() =>
+      controlPanelAuth.withAuthentication(async () => {
+        const existingAuth = await controlPanelAuthStore.get();
+        const email = await resolveControlPanelEmail(
+          CONTROL_PANEL_EMAIL_ENV,
+          existingAuth?.email,
+        );
+        if (typeof email !== "string") return email;
+        const auth = await controlPanelAuth.authenticate(email, existingAuth);
+        if (auth !== existingAuth) await controlPanelAuthStore.set(auth);
+        return {
+          authenticated: true,
+          ...(auth.expiresAt ? { expires_at: auth.expiresAt } : {}),
+        };
+      }),
+    ),
 );
 server.registerTool(
   "control_panel_status",
@@ -427,8 +429,13 @@ server.registerTool(
   },
   async () =>
     safely(async () => {
-      await controlPanelAuthStore.clear();
-      return { authenticated: false };
+      if (setupFlow.status.pending) {
+        throw new Error("Cannot log out while application setup is pending");
+      }
+      return controlPanelAuth.withCredentialCleanup(async () => {
+        await controlPanelAuthStore.clear();
+        return { authenticated: false };
+      });
     }),
 );
 
@@ -909,60 +916,60 @@ server.registerTool(
         throw new Error("Cannot clear credentials while setup or authorization is pending");
       }
 
-      const failures: string[] = [];
-      let trustedCertificateRemoved = false;
-      let applicationCanBeCleared = true;
-      let application: StoredApplication | undefined;
-      try {
-        application = await applicationStore.get();
-      } catch {
-        application = undefined;
-        failures.push("trusted_certificate");
-      }
-      if (application?.certificate) {
+      return controlPanelAuth.withCredentialCleanup(async () => {
+        const failures: string[] = [];
+        let trustedCertificateRemoved = false;
+        let applicationCanBeCleared = true;
+        let application: StoredApplication | undefined;
         try {
-          await removeTrustedCertificate(application.certificate);
-          trustedCertificateRemoved = true;
+          application = await applicationStore.get();
         } catch {
+          application = undefined;
           failures.push("trusted_certificate");
-          applicationCanBeCleared = false;
         }
-      }
-
-      const clearStore = async (
-        name: string,
-        clear: () => Promise<void>,
-      ): Promise<void> => {
-        try {
-          await clear();
-        } catch {
-          failures.push(name);
+        if (application?.certificate) {
+          try {
+            await removeTrustedCertificate(application.certificate);
+            trustedCertificateRemoved = true;
+          } catch {
+            failures.push("trusted_certificate");
+            applicationCanBeCleared = false;
+          }
         }
-      };
-      await clearStore("session", () => sessionStore.clear());
-      if (applicationCanBeCleared) {
-        await clearStore("application", () => applicationStore.clear());
-      } else {
-        failures.push("application");
-      }
-      await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
-      const cleared = failures.length === 0;
-      if (cleared) setupFlow.reset();
+        const clearStore = async (
+          name: string,
+          clear: () => Promise<void>,
+        ): Promise<void> => {
+          try {
+            await clear();
+          } catch {
+            failures.push(name);
+          }
+        };
+        await clearStore("session", () => sessionStore.clear());
+        if (applicationCanBeCleared) {
+          await clearStore("application", () => applicationStore.clear());
+        } else {
+          failures.push("application");
+        }
+        await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
-      const environmentCredentialsPresent = Boolean(
-        (
+        const cleared = failures.length === 0;
+        if (cleared) setupFlow.reset();
+
+        const environmentCredentialsPresent = Boolean(
           process.env.ENABLE_BANKING_APP_ID?.trim() ||
-          process.env.ENABLE_BANKING_ID?.trim()
-        ) &&
-          process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
-      );
-      return {
-        cleared,
-        trusted_certificate_removed: trustedCertificateRemoved,
-        environment_credentials_present: environmentCredentialsPresent,
-        ...(failures.length > 0 ? { failed_items: failures } : {}),
-      };
+            process.env.ENABLE_BANKING_ID?.trim() ||
+            process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
+        );
+        return {
+          cleared,
+          trusted_certificate_removed: trustedCertificateRemoved,
+          environment_credentials_present: environmentCredentialsPresent,
+          ...(failures.length > 0 ? { failed_items: failures } : {}),
+        };
+      });
     }),
 );
 

@@ -452,6 +452,46 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
   }
 });
 
+test("blocks Control Panel logout and credential cleanup during authentication", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_DELAY_EMAIL_CALLBACK: "true",
+  });
+  let authentication;
+  try {
+    authentication = callTool(server.client, "control_panel_authenticate");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const logout = await callTool(server.client, "control_panel_logout");
+    assert.equal(logout.isError, true);
+    assert.match(
+      logout.content[0].text,
+      /Control Panel authentication or cleanup is pending/,
+    );
+    const cleanup = await callTool(server.client, "clear_local_credentials");
+    assert.equal(cleanup.isError, true);
+    assert.match(
+      cleanup.content[0].text,
+      /Control Panel authentication or cleanup is pending/,
+    );
+
+    const login = await authentication;
+    assert.equal(toolValue(login).authenticated, true);
+    assert.equal(
+      toolValue(await callTool(server.client, "control_panel_logout"))
+        .authenticated,
+      false,
+    );
+    assert.equal(
+      toolValue(await callTool(server.client, "clear_local_credentials"))
+        .cleared,
+      true,
+    );
+  } finally {
+    if (authentication) await authentication.catch(() => undefined);
+    await server.close();
+  }
+});
+
 test("blocks setup with environment credentials and reports partial configuration", async () => {
   const configured = await startIsolatedServer({
     ENABLE_BANKING_APP_ID: "fixture-app-id",
@@ -485,8 +525,42 @@ test("blocks setup with environment credentials and reports partial configuratio
     const missingKey = await callTool(partial.client, "get_application");
     assert.equal(missingKey.isError, true);
     assert.match(missingKey.content[0].text, /ENABLE_BANKING_PRIVATE_KEY/);
+
+    const cleared = toolValue(
+      await callTool(partial.client, "clear_local_credentials"),
+    );
+    assert.equal(cleared.environment_credentials_present, true);
   } finally {
     await partial.close();
+  }
+});
+
+test("reports private-key-only environment credentials during cleanup", async () => {
+  const server = await startIsolatedServer({
+    ENABLE_BANKING_PRIVATE_KEY: "not-a-real-key",
+  });
+  try {
+    const cleared = toolValue(
+      await callTool(server.client, "clear_local_credentials"),
+    );
+    assert.equal(cleared.cleared, true);
+    assert.equal(cleared.environment_credentials_present, true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("reports the legacy application ID alias during cleanup", async () => {
+  const server = await startIsolatedServer({
+    ENABLE_BANKING_ID: "fixture-app-id",
+  });
+  try {
+    const cleared = toolValue(
+      await callTool(server.client, "clear_local_credentials"),
+    );
+    assert.equal(cleared.environment_credentials_present, true);
+  } finally {
+    await server.close();
   }
 });
 
@@ -588,7 +662,7 @@ test("reports configuration-free sessions as unverifiable and requires an applic
   }
 });
 
-test("blocks authorization and credential cleanup while registration is pending", async () => {
+test("blocks logout, authorization, and credential cleanup while registration is pending", async () => {
   const server = await startIsolatedServer({
     MCP_TEST_DELAY_REGISTRATION: "true",
   });
@@ -614,6 +688,13 @@ test("blocks authorization and credential cleanup while registration is pending"
       /Cannot clear credentials while setup or authorization is pending/,
     );
 
+    const logout = await callTool(server.client, "control_panel_logout");
+    assert.equal(logout.isError, true);
+    assert.match(
+      logout.content[0].text,
+      /Cannot log out while application setup is pending/,
+    );
+
     const status = await waitForToolValue(
       server.client,
       "setup_status",
@@ -624,6 +705,7 @@ test("blocks authorization and credential cleanup while registration is pending"
     await server.close();
   }
 });
+
 test("clears recoverable state when the persisted application record is malformed", async () => {
   const server = await startIsolatedServer({
     MCP_TEST_KEYCHAIN: JSON.stringify({

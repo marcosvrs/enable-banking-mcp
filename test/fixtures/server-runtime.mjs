@@ -143,7 +143,9 @@ globalThis.fetch = async (input, init = {}) => {
     const request = JSON.parse(init.body);
     const callback = new URL(request.continueUrl);
     callback.searchParams.set("oobCode", "fixture-email-code");
-    setTimeout(() => sendLocalCallback(callback), 5);
+    const callbackDelay =
+      process.env.MCP_TEST_DELAY_EMAIL_CALLBACK === "true" ? 1_000 : 5;
+    setTimeout(() => sendLocalCallback(callback), callbackDelay);
     return Response.json({});
   }
 

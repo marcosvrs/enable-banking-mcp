@@ -448,7 +448,11 @@ target ASPSP name and country directly.
 ## Local cleanup
 
 - `delete_session` deletes the current provider session and clears the matching local session ID.
+- `control_panel_logout` removes the persisted Control Panel session.
 - `clear_local_credentials` clears local session, application, and Control Panel records and attempts to remove the locally trusted callback certificate. If certificate removal fails, it preserves the application record so the cleanup can be retried.
+
+Logout and credential cleanup are refused while authentication or setup is
+pending, preventing a later callback from restoring credentials after removal.
 
 Local cleanup does not revoke bank consent, unlink accounts, delete provider-side records not covered by the session call, remove environment variables, erase MCP-client or AI-host history, or erase backups. Perform those actions through the relevant provider and operating-system controls.
 

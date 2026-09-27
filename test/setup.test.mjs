@@ -1324,6 +1324,53 @@ test("reuses matching unexpired Control Panel auth without contacting the provid
   );
 });
 
+test("serializes Control Panel authentication and credential cleanup", async () => {
+  const flow = new ControlPanelAuthFlow({});
+  let finishAuthentication;
+  const authentication = flow.withAuthentication(
+    () =>
+      new Promise((resolve) => {
+        finishAuthentication = resolve;
+      }),
+  );
+
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => undefined),
+    /Cannot clear credentials while Control Panel authentication or cleanup is pending/,
+  );
+  finishAuthentication("authenticated");
+  assert.equal(await authentication, "authenticated");
+
+  let finishCleanup;
+  const cleanup = flow.withCredentialCleanup(
+    () =>
+      new Promise((resolve) => {
+        finishCleanup = resolve;
+      }),
+  );
+  await assert.rejects(
+    flow.authenticate("user@example.com"),
+    /Control Panel credentials are being cleared/,
+  );
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => undefined),
+    /Cannot clear credentials while Control Panel authentication or cleanup is pending/,
+  );
+  finishCleanup("cleared");
+  assert.equal(await cleanup, "cleared");
+
+  await assert.rejects(
+    flow.withCredentialCleanup(async () => {
+      throw new Error("credential deletion failed");
+    }),
+    /credential deletion failed/,
+  );
+  assert.equal(
+    await flow.withAuthentication(async () => "authentication resumed"),
+    "authentication resumed",
+  );
+});
+
 test("a stored identity for another email starts a fresh Control Panel login", async () => {
   const calls = [];
   const client = new ControlPanelClient(

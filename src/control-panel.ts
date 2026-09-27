@@ -262,13 +262,51 @@ export type ControlPanelCallbackListener = {
 export type ControlPanelCallbackListenerFactory = () => Promise<ControlPanelCallbackListener>;
 
 export class ControlPanelAuthFlow {
+  private activeAuthenticationCount = 0;
+  private credentialCleanupPending = false;
+
   constructor(
     private readonly client: ControlPanelClient,
     private readonly listenerFactory: ControlPanelCallbackListenerFactory =
       createControlPanelCallbackListener,
   ) {}
 
-  async authenticate(
+  async withAuthentication<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.credentialCleanupPending) {
+      throw new Error("Control Panel credentials are being cleared");
+    }
+    this.activeAuthenticationCount += 1;
+    try {
+      return await operation();
+    } finally {
+      this.activeAuthenticationCount -= 1;
+    }
+  }
+
+  async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.activeAuthenticationCount > 0 || this.credentialCleanupPending) {
+      throw new Error(
+        "Cannot clear credentials while Control Panel authentication or cleanup is pending",
+      );
+    }
+    this.credentialCleanupPending = true;
+    try {
+      return await operation();
+    } finally {
+      this.credentialCleanupPending = false;
+    }
+  }
+
+  authenticate(
+    email: string,
+    existingAuth?: ControlPanelAuth,
+  ): Promise<ControlPanelAuth> {
+    return this.withAuthentication(() =>
+      this.authenticateWhileReserved(email, existingAuth),
+    );
+  }
+
+  private async authenticateWhileReserved(
     email: string,
     existingAuth?: ControlPanelAuth,
   ): Promise<ControlPanelAuth> {
