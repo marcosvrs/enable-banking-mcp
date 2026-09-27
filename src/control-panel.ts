@@ -5,6 +5,9 @@ import type { ApplicationEnvironment } from "./application-store.js";
 
 const CONTROL_PANEL_BASE_URL = "https://enablebanking.com";
 const FIREBASE_SECURE_TOKEN_URL = "https://securetoken.googleapis.com/v1/token";
+// Public Firebase web key from Enable Banking's Control Panel client bundle.
+const CONTROL_PANEL_FIREBASE_WEB_KEY =
+  "AIzaSyBn8fvjRYQKslskRaO3cblUjmcyl5b9o-c"; // gitleaks:allow -- public Control Panel Firebase client key
 const REQUEST_TIMEOUT_MS = 30_000;
 const CALLBACK_TIMEOUT_MS = 10 * 60 * 1000;
 const ControlPanelLoginResponse = z.object({
@@ -131,11 +134,8 @@ export class ControlPanelClient {
   }
 
   async refreshAuth(auth: ControlPanelAuth): Promise<ControlPanelAuth> {
-    if (!this.firebaseApiKey) {
-      throw new Error(
-        "Control Panel token refresh requires ENABLE_BANKING_FIREBASE_API_KEY",
-      );
-    }
+    const firebaseApiKey =
+      this.firebaseApiKey || CONTROL_PANEL_FIREBASE_WEB_KEY;
     const headers = {
       Accept: "application/json",
       "Content-Type": "application/x-www-form-urlencoded",
@@ -145,7 +145,7 @@ export class ControlPanelClient {
       refresh_token: auth.refreshToken,
     });
     const response = await this.fetchFn(
-      `${FIREBASE_SECURE_TOKEN_URL}?key=${encodeURIComponent(this.firebaseApiKey)}`,
+      `${FIREBASE_SECURE_TOKEN_URL}?key=${encodeURIComponent(firebaseApiKey)}`,
       {
         method: "POST",
         headers,
@@ -268,12 +268,45 @@ export class ControlPanelAuthFlow {
       createControlPanelCallbackListener,
   ) {}
 
-  async authenticate(email: string): Promise<ControlPanelAuth> {
+  async authenticate(
+    email: string,
+    existingAuth?: ControlPanelAuth,
+  ): Promise<ControlPanelAuth> {
+    const normalizedEmail = email.trim();
+    if (
+      existingAuth &&
+      existingAuth.email.trim().toLowerCase() ===
+        normalizedEmail.toLowerCase()
+    ) {
+      if (
+        existingAuth.expiresAt === undefined ||
+        existingAuth.expiresAt > Date.now()
+      ) {
+        return existingAuth;
+      }
+
+      try {
+        return await this.client.refreshAuth(existingAuth);
+      } catch (error) {
+        const refreshRejected =
+          error instanceof ControlPanelApiError &&
+          (error.status === 400 || error.status === 401);
+        if (!refreshRejected) throw error;
+      }
+    }
+
     const listener = await this.listenerFactory();
     try {
-      await this.client.requestEmailLogin(email, listener.port, listener.path);
+      await this.client.requestEmailLogin(
+        normalizedEmail,
+        listener.port,
+        listener.path,
+      );
       const confirmationCode = await listener.wait;
-      return await this.client.completeEmailLogin(email, confirmationCode);
+      return await this.client.completeEmailLogin(
+        normalizedEmail,
+        confirmationCode,
+      );
     } finally {
       await listener.close();
     }

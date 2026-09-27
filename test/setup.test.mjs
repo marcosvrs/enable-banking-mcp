@@ -154,6 +154,159 @@ test("uses the documented Control Panel registration requests", async () => {
   assert.equal(calls[2].options.headers.Authorization, "Bearer id-token");
 });
 
+test("reuses a matching unexpired Control Panel session without sending email", async () => {
+  const existingAuth = {
+    email: "user@example.com",
+    idToken: "existing-id-token",
+    refreshToken: "test-existing-refresh-token",
+    expiresAt: Date.now() + 60_000,
+  };
+  let listenerCalls = 0;
+  const client = new ControlPanelClient(
+    async () => {
+      throw new Error("The unexpired stored session should be reused");
+    },
+    "https://enablebanking.com",
+    "",
+  );
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    listenerCalls += 1;
+    throw new Error("Email callback listener should not be opened");
+  });
+
+  const auth = await flow.authenticate("USER@example.com", existingAuth);
+
+  assert.deepEqual(auth, existingAuth);
+  assert.equal(listenerCalls, 0);
+});
+
+test("silently refreshes an expired Control Panel session when configured", async () => {
+  const calls = [];
+  const client = new ControlPanelClient(
+    async (url, options) => {
+      calls.push({ url: String(url), options });
+      return new Response(
+        JSON.stringify({
+          id_token: "renewed-id-token",
+          refresh_token: "test-rotated-refresh-token",
+          user_id: "user-id",
+          expires_in: "3600",
+        }),
+        { status: 200 },
+      );
+    },
+    "https://enablebanking.com",
+    "",
+  );
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    throw new Error("A successful refresh should not open an email callback");
+  });
+
+  const auth = await flow.authenticate("user@example.com", {
+    email: "user@example.com",
+    idToken: "expired-id-token",
+    refreshToken: "old-refresh-token",
+    expiresAt: 1,
+  });
+  const refreshUrl = new URL(calls[0].url);
+  const refreshBody = new URLSearchParams(calls[0].options.body);
+
+  assert.equal(calls.length, 1);
+  assert.ok(refreshUrl.searchParams.get("key"));
+  assert.equal(refreshBody.get("grant_type"), "refresh_token");
+  assert.equal(refreshBody.get("refresh_token"), "old-refresh-token");
+  assert.equal(auth.idToken, "renewed-id-token");
+  assert.equal(auth.refreshToken, "test-rotated-refresh-token");
+  assert.ok(auth.expiresAt > Date.now());
+});
+
+test("requests a sign-in link when the stored refresh token is rejected", async () => {
+  const calls = [];
+  const client = new ControlPanelClient(
+    async (url, options) => {
+      const requestUrl = String(url);
+      calls.push({ url: requestUrl, options });
+      if (requestUrl.includes("securetoken.googleapis.com")) {
+        return new Response(
+          JSON.stringify({ error: { message: "INVALID_REFRESH_TOKEN" } }),
+          { status: 400, statusText: "Bad Request" },
+        );
+      }
+      if (requestUrl.endsWith("getOobConfirmationCode")) {
+        return new Response("{}", { status: 200 });
+      }
+      if (requestUrl.endsWith("emailLinkSignin")) {
+        return new Response(
+          JSON.stringify({
+            idToken: "new-id-token",
+            refreshToken: "new-refresh-token",
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected Control Panel request: ${requestUrl}`);
+    },
+    "https://enablebanking.com",
+    "firebase-api-key",
+  );
+  let listenerCalls = 0;
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    listenerCalls += 1;
+    return {
+      port: 4321,
+      path: `/callback?state=${"A".repeat(43)}`,
+      wait: Promise.resolve("one-time-code"),
+      close: async () => {},
+    };
+  });
+
+  const auth = await flow.authenticate("user@example.com", {
+    email: "user@example.com",
+    idToken: "expired-id-token",
+    refreshToken: "test-rejected-refresh-token",
+    expiresAt: 1,
+  });
+
+  assert.deepEqual(
+    calls.map(({ url }) => new URL(url).pathname),
+    [
+      "/v1/token",
+      "/api/relyingparty/getOobConfirmationCode",
+      "/api/relyingparty/emailLinkSignin",
+    ],
+  );
+  assert.equal(listenerCalls, 1);
+  assert.equal(auth.idToken, "new-id-token");
+});
+
+test("propagates transient refresh failures without requesting another login", async () => {
+  let listenerCalls = 0;
+  const client = new ControlPanelClient(
+    async () =>
+      new Response("service unavailable", {
+        status: 503,
+        statusText: "Service Unavailable",
+      }),
+    "https://enablebanking.com",
+    "firebase-api-key",
+  );
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    listenerCalls += 1;
+    throw new Error("Email sign-in should not be requested");
+  });
+
+  await assert.rejects(
+    flow.authenticate("user@example.com", {
+      email: "user@example.com",
+      idToken: "expired-id-token",
+      refreshToken: "refresh-token",
+      expiresAt: 1,
+    }),
+    /Control Panel 503/,
+  );
+  assert.equal(listenerCalls, 0);
+});
+
 test("rejects Control Panel callback paths without a valid state", async () => {
   const client = new ControlPanelClient(async () => new Response("{}", { status: 200 }));
   await assert.rejects(
@@ -173,11 +326,37 @@ test("receives the Control Panel email callback on a loopback listener", async (
     invalid.searchParams.set("state", "wrong");
     const invalidResponse = await fetch(invalid);
     assert.equal(invalidResponse.status, 400);
+
+    const wrongMethod = await fetch(callback, { method: "POST" });
+    assert.equal(wrongMethod.status, 404);
+    const missingCode = await fetch(callback);
+    assert.equal(missingCode.status, 400);
     callback.searchParams.set("oobCode", "confirmation-code");
     const response = await fetch(callback);
     assert.equal(response.status, 200);
     assert.equal(await listener.wait, "confirmation-code");
   } finally {
+    await listener.close();
+  }
+});
+
+test("rejects a denied Control Panel callback and closes idempotently", async () => {
+  const listener = await createControlPanelCallbackListener();
+  try {
+    const denied = new URL(
+      listener.path,
+      `http://localhost:${listener.port}`,
+    );
+    denied.searchParams.set("error", "access_denied");
+    const completion = assert.rejects(
+      listener.wait,
+      /Control Panel sign-in was denied/,
+    );
+    const response = await fetch(denied);
+    assert.equal(response.status, 400);
+    await completion;
+  } finally {
+    await listener.close();
     await listener.close();
   }
 });
@@ -327,18 +506,12 @@ test("registers an application before bank details are provided", async () => {
   const controlPanelCalls = [];
   const controlPanelClient = new ControlPanelClient(async (url, options) => {
     controlPanelCalls.push({ url: String(url), options });
-    if (String(url).endsWith("getOobConfirmationCode")) {
-      return new Response("{}", { status: 200 });
+    if (String(url).endsWith("/api/applications")) {
+      return new Response(JSON.stringify({ app_id: "application-only-id" }), {
+        status: 200,
+      });
     }
-    if (String(url).endsWith("emailLinkSignin")) {
-      return new Response(
-        JSON.stringify({ idToken: "id-token", refreshToken: "refresh-token" }),
-        { status: 200 },
-      );
-    }
-    return new Response(JSON.stringify({ app_id: "application-only-id" }), {
-      status: 200,
-    });
+    throw new Error(`Unexpected Control Panel request: ${url}`);
   });
   const controlPanelAuth = new ControlPanelAuthFlow(
     controlPanelClient,
@@ -356,15 +529,22 @@ test("registers an application before bank details are provided", async () => {
   });
   const openedUrls = [];
   let trustCalls = 0;
+  const controlPanelAuthStore = new MacKeychainControlPanelAuthStore(
+    new MemorySecretStore(),
+  );
+  await controlPanelAuthStore.set({
+    email: "user@example.com",
+    idToken: "stored-id-token",
+    refreshToken: "test-stored-refresh-token",
+    expiresAt: Date.now() + 300_000,
+  });
   const setup = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
     controlPanelClient,
     controlPanelAuth,
     openBrowser: (url) => openedUrls.push(url),
-    controlPanelAuthStore: new MacKeychainControlPanelAuthStore(
-      new MemorySecretStore(),
-    ),
+    controlPanelAuthStore,
     authorizationFlow: new BankAuthorizationFlow(
       sessionStore,
       (url) => openedUrls.push(url),
@@ -394,10 +574,6 @@ test("registers an application before bank details are provided", async () => {
   assert.equal(setup.status.phase, "account_link", setup.status.error);
   assert.equal(setup.status.pending, false);
   assert.equal(setup.status.appId, "application-only-id");
-  assert.equal(
-    setup.status.message,
-    "Application registered; activate it in the dashboard, then call authorize_bank",
-  );
   assert.equal(setup.status.dashboardUrl, "https://enablebanking.com/cp/applications");
   assert.deepEqual(await sessionStore.get(), undefined);
   assert.deepEqual(await applicationStore.get(), {
@@ -409,20 +585,25 @@ test("registers an application before bank details are provided", async () => {
   });
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
   assert.equal(trustCalls, 1);
-  assert.equal(controlPanelCalls.length, 3);
+  assert.equal(controlPanelCalls.length, 1);
+  assert.ok(controlPanelCalls[0].url.endsWith("/api/applications"));
+  assert.equal(
+    controlPanelCalls[0].options.headers.Authorization,
+    "Bearer stored-id-token",
+  );
 
   const restarted = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
   });
-  assert.deepEqual(await restarted.getStatus(), {
-    phase: "account_link",
-    pending: false,
-    appId: "application-only-id",
-    dashboardUrl: "https://enablebanking.com/cp/applications",
-    message:
-      "Application registered; activate it in the dashboard, then call authorize_bank",
-  });
+  const restartedStatus = await restarted.getStatus();
+  assert.equal(restartedStatus.phase, "account_link");
+  assert.equal(restartedStatus.pending, false);
+  assert.equal(restartedStatus.appId, "application-only-id");
+  assert.equal(
+    restartedStatus.dashboardUrl,
+    "https://enablebanking.com/cp/applications",
+  );
   await applicationStore.clear();
   setup.reset();
   assert.deepEqual(await setup.getStatus(), {
@@ -506,4 +687,768 @@ test("rolls back the setup reservation after validation fails", async () => {
     phase: "idle",
     pending: false,
   });
+});
+async function waitForSetup(setup) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!setup.status.pending) return setup.status;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Setup did not leave its pending state");
+}
+
+function registrationOptions(overrides = {}) {
+  return {
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "SANDBOX",
+    redirectUrl: "https://localhost:8765/callback",
+    ...overrides,
+  };
+}
+
+function setupDependencies(overrides = {}) {
+  const applicationStore = overrides.applicationStore ?? new MemoryApplicationStore();
+  const sessionStore = overrides.sessionStore ?? new MemorySessionStore();
+  const setup = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+    controlPanelAuth: {
+      async authenticate(email) {
+        return { email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+      },
+    },
+    controlPanelClient: {
+      async registerApplication() {
+        return { app_id: "recorded-app-id" };
+      },
+    },
+    authorizationFlow: {
+      status: { pending: false },
+      async start() {
+        throw new Error("authorization collaborator not configured");
+      },
+    },
+    generateKeyMaterial: async () => ({
+      privateKey: "fake-private-key",
+      certificate: "fake-certificate",
+    }),
+    trustCertificate: async () => {},
+    createBankClient: () => ({
+      async listBanks() {
+        return { aspsps: [{ name: "Example Bank" }] };
+      },
+    }),
+    sleep: async () => {},
+    ...overrides,
+  });
+  return { setup, applicationStore, sessionStore };
+}
+
+test("rejects setup when either application or session state is already persisted", async () => {
+  const storedApplication = {
+    appId: "existing-app",
+    privateKey: "fake-private-key",
+    certificate: "fake-certificate",
+    environment: "SANDBOX",
+    redirectUrls: ["https://localhost:8765/callback"],
+  };
+
+  for (const existing of [
+    { applicationStore: Object.assign(new MemoryApplicationStore(), { value: storedApplication }) },
+    { sessionStore: Object.assign(new MemorySessionStore(), { value: "existing-session" }) },
+  ]) {
+    let registrationCalls = 0;
+    const { setup } = setupDependencies({
+      ...existing,
+      controlPanelClient: {
+        async registerApplication() {
+          registrationCalls += 1;
+          return { app_id: "unexpected-app" };
+        },
+      },
+    });
+
+    await assert.rejects(
+      setup.registerApplication(registrationOptions()),
+      /already stored/,
+    );
+    assert.equal(registrationCalls, 0);
+    assert.deepEqual(setup.status, { phase: "idle", pending: false });
+  }
+});
+
+test("records provider registration failures as failed setup without application persistence", async () => {
+  const registrationCalls = [];
+  const { setup, applicationStore } = setupDependencies({
+    controlPanelClient: {
+      async registerApplication(auth, request) {
+        registrationCalls.push({ auth, request });
+        throw new Error("provider registration rejected");
+      },
+    },
+  });
+
+  await setup.registerApplication(registrationOptions());
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.pending, false);
+  assert.equal(status.error, "provider registration rejected");
+  assert.equal(await applicationStore.get(), undefined);
+  assert.equal(registrationCalls.length, 1);
+  assert.equal(registrationCalls[0].request.name, "Enable Banking MCP");
+  assert.equal(registrationCalls[0].request.certificate, "fake-certificate");
+});
+
+test("keeps registered application persisted when certificate trust fails", async () => {
+  let trustCalls = 0;
+  const { setup, applicationStore, sessionStore } = setupDependencies({
+    trustCertificate: async (certificate) => {
+      trustCalls += 1;
+      assert.equal(certificate, "fake-certificate");
+      throw new Error("certificate trust failed");
+    },
+  });
+
+  await setup.registerApplication(registrationOptions());
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.appId, "recorded-app-id");
+  assert.equal(status.error, "certificate trust failed");
+  assert.equal(trustCalls, 1);
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  const restarted = new ApplicationSetupFlow({ applicationStore, sessionStore });
+  assert.equal((await restarted.getStatus()).phase, "application_ready");
+});
+
+test("fails setup when the requested bank is absent and retains the registered application", async () => {
+  let authorizationCalls = 0;
+  const { setup, applicationStore } = setupDependencies({
+    authorizationFlow: {
+      status: { pending: false },
+      async start() {
+        authorizationCalls += 1;
+        return { authorization_url: "https://bank.example/authorize" };
+      },
+    },
+    createBankClient: () => ({
+      async listBanks() {
+        return { aspsps: [{ name: "Other Bank" }] };
+      },
+    }),
+  });
+  await setup.start({
+    ...registrationOptions(),
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.match(status.error, /ASPSP "Example Bank" is not available in SANDBOX for FI/);
+  assert.equal(authorizationCalls, 0);
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+});
+
+test("reports bank authorization startup errors without losing application state", async () => {
+  const { setup, applicationStore, sessionStore } = setupDependencies({
+    authorizationFlow: {
+      status: { pending: false, lastError: "callback failed" },
+      async start() {
+        throw new Error("authorization provider unavailable");
+      },
+    },
+  });
+
+  await setup.start({
+    ...registrationOptions(),
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "authorization provider unavailable");
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal(await sessionStore.get(), undefined);
+});
+
+test("surfaces callback cancellation after authorization starts and keeps application state", async () => {
+  const authorizationFlow = {
+    status: { pending: true },
+    async start() {
+      this.status = { pending: false, lastError: "bank callback was cancelled" };
+      return { authorization_url: "https://bank.example/authorize" };
+    },
+  };
+  const { setup, applicationStore, sessionStore } = setupDependencies({
+    authorizationFlow,
+  });
+
+  await setup.start({
+    ...registrationOptions(),
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "bank callback was cancelled");
+  assert.equal(status.appId, "recorded-app-id");
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal(await sessionStore.get(), undefined);
+});
+
+test("rolls back setup reservation when a secret-store read fails", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  applicationStore.get = async () => {
+    throw new Error("application Keychain read failed");
+  };
+  let registrationCalls = 0;
+  const { setup } = setupDependencies({
+    applicationStore,
+    controlPanelClient: {
+      async registerApplication() {
+        registrationCalls += 1;
+        return { app_id: "unexpected-app" };
+      },
+    },
+  });
+
+  await assert.rejects(
+    setup.registerApplication(registrationOptions()),
+    /application Keychain read failed/,
+  );
+  assert.deepEqual(setup.status, { phase: "idle", pending: false });
+  assert.equal(registrationCalls, 0);
+});
+
+test("fails Control Panel authentication before application registration", async () => {
+  let registrationCalls = 0;
+  const { setup, applicationStore } = setupDependencies({
+    controlPanelAuth: {
+      async authenticate() {
+        throw new Error("Control Panel authentication failed");
+      },
+    },
+    controlPanelClient: {
+      async registerApplication() {
+        registrationCalls += 1;
+        return { app_id: "unexpected-app" };
+      },
+    },
+  });
+
+  await setup.registerApplication(registrationOptions());
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "Control Panel authentication failed");
+  assert.equal(await applicationStore.get(), undefined);
+  assert.equal(registrationCalls, 0);
+});
+
+test("reports provider-created application when local persistence fails", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  applicationStore.set = async () => {
+    throw new Error("application Keychain write failed");
+  };
+  let registrationCalls = 0;
+  const { setup } = setupDependencies({
+    applicationStore,
+    controlPanelClient: {
+      async registerApplication() {
+        registrationCalls += 1;
+        return { app_id: "provider-app-id" };
+      },
+    },
+  });
+
+  await setup.registerApplication(registrationOptions());
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "application Keychain write failed");
+  assert.equal(status.appId, undefined);
+  assert.equal(registrationCalls, 1);
+});
+
+test("reports an empty bank catalog without starting authorization", async () => {
+  let authorizationCalls = 0;
+  const { setup, applicationStore } = setupDependencies({
+    authorizationFlow: {
+      status: { pending: false },
+      async start() {
+        authorizationCalls += 1;
+        return { authorization_url: "https://bank.example/authorize" };
+      },
+    },
+    createBankClient: () => ({
+      async listBanks() {
+        return { aspsps: [] };
+      },
+    }),
+  });
+
+  await setup.start({
+    ...registrationOptions(),
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.match(status.error, /No ASPSPs were returned for this country/);
+  assert.equal(authorizationCalls, 0);
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+});
+
+test("times out Production activation without starting bank authorization", async () => {
+  let now = 0;
+  let activationChecks = 0;
+  let authorizationCalls = 0;
+  const openedUrls = [];
+  const { setup, applicationStore, sessionStore } = setupDependencies({
+    openBrowser: (url) => openedUrls.push(url),
+    createBankClient: () => ({
+      async getApplication() {
+        activationChecks += 1;
+        return { active: false };
+      },
+      async listBanks() {
+        return { aspsps: [{ name: "Example Bank" }] };
+      },
+    }),
+    authorizationFlow: {
+      status: { pending: false },
+      async start() {
+        authorizationCalls += 1;
+        return { authorization_url: "https://bank.example/authorize" };
+      },
+    },
+    sleep: async (milliseconds) => {
+      now += milliseconds;
+    },
+    now: () => now,
+  });
+
+  await setup.start({
+    ...registrationOptions({ environment: "PRODUCTION" }),
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.match(status.error, /application is still inactive/);
+  assert.ok(activationChecks > 0);
+  assert.equal(authorizationCalls, 0);
+  assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal(await sessionStore.get(), undefined);
+});
+
+test("times out pending bank consent without discarding the registered application", async () => {
+  let now = 0;
+  let authorizationCalls = 0;
+  const authorizationFlow = {
+    status: { pending: false },
+    async start() {
+      authorizationCalls += 1;
+      this.status = { pending: true };
+      return { authorization_url: "https://bank.example/authorize" };
+    },
+  };
+  const { setup, applicationStore, sessionStore } = setupDependencies({
+    authorizationFlow,
+    sleep: async (milliseconds) => {
+      now += milliseconds;
+    },
+    now: () => now,
+  });
+
+  await setup.start({
+    ...registrationOptions(),
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "Bank authorization did not complete before setup timed out");
+  assert.equal(authorizationCalls, 1);
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal(await sessionStore.get(), undefined);
+});
+
+test("reuses matching Control Panel auth without an expiry", async () => {
+  const existingAuth = {
+    email: "user@example.com",
+    idToken: "current-id-token",
+    refreshToken: "test-current-refresh-token",
+  };
+  const flow = new ControlPanelAuthFlow(
+    new ControlPanelClient(async () => {
+      throw new Error("Unexpired auth should not call the provider");
+    }),
+    async () => {
+      throw new Error("Unexpired auth should not open a callback listener");
+    },
+  );
+
+  assert.equal(
+    await flow.authenticate("USER@example.com", existingAuth),
+    existingAuth,
+  );
+});
+
+test("a stored identity for another email starts a fresh Control Panel login", async () => {
+  const calls = [];
+  const client = new ControlPanelClient(
+    async (url) => {
+      calls.push(String(url));
+      if (String(url).endsWith("getOobConfirmationCode")) {
+        return new Response("{}", { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ idToken: "new-id-token", refreshToken: "new-refresh-token" }),
+        { status: 200 },
+      );
+    },
+    "https://enablebanking.com",
+    "",
+  );
+  let closed = 0;
+  const flow = new ControlPanelAuthFlow(client, async () => ({
+    port: 4321,
+    path: `/callback?state=${"A".repeat(43)}`,
+    wait: Promise.resolve("one-time-code"),
+    close: async () => {
+      closed += 1;
+    },
+  }));
+  const existingAuth = {
+    email: "other@example.com",
+    idToken: "other-id-token",
+    refreshToken: "other-refresh-token",
+    expiresAt: Date.now() + 60_000,
+  };
+
+  const auth = await flow.authenticate("user@example.com", existingAuth);
+
+  assert.equal(auth.email, "user@example.com");
+  assert.equal(auth.idToken, "new-id-token");
+  assert.equal(auth.localId, undefined);
+  assert.deepEqual(
+    calls.map((url) => new URL(url).pathname),
+    [
+      "/api/relyingparty/getOobConfirmationCode",
+      "/api/relyingparty/emailLinkSignin",
+    ],
+  );
+  assert.equal(closed, 1);
+});
+
+test("closes the Control Panel listener when requesting an email link fails", async () => {
+  const client = new ControlPanelClient(
+    async () =>
+      new Response("provider unavailable", {
+        status: 503,
+        statusText: "Service Unavailable",
+      }),
+    "https://enablebanking.com",
+    "",
+  );
+  let closed = 0;
+  const flow = new ControlPanelAuthFlow(client, async () => ({
+    port: 4321,
+    path: `/callback?state=${"A".repeat(43)}`,
+    wait: new Promise(() => {}),
+    close: async () => {
+      closed += 1;
+    },
+  }));
+
+  await assert.rejects(
+    flow.authenticate("user@example.com"),
+    /Control Panel 503/,
+  );
+  assert.equal(closed, 1);
+});
+
+test("rejects malformed Control Panel login responses and closes the listener", async () => {
+  let requestCount = 0;
+  let closed = 0;
+  const client = new ControlPanelClient(
+    async () => {
+      requestCount += 1;
+      return new Response("{}", { status: 200 });
+    },
+    "https://enablebanking.com",
+    "",
+  );
+  const flow = new ControlPanelAuthFlow(client, async () => ({
+    port: 4321,
+    path: `/callback?state=${"A".repeat(43)}`,
+    wait: Promise.resolve("one-time-code"),
+    close: async () => {
+      closed += 1;
+    },
+  }));
+
+  await assert.rejects(
+    flow.authenticate("user@example.com"),
+    /invalid login response/,
+  );
+  assert.equal(requestCount, 2);
+  assert.equal(closed, 1);
+});
+
+test("key generation failure does not authenticate or register an application", async () => {
+  let authenticationCalls = 0;
+  let registrationCalls = 0;
+  const { setup, applicationStore } = setupDependencies({
+    async generateKeyMaterial() {
+      throw new Error("certificate generation failed");
+    },
+    controlPanelAuth: {
+      async authenticate() {
+        authenticationCalls += 1;
+        return { email: "user@example.com", idToken: "token", refreshToken: "refresh" };
+      },
+    },
+    controlPanelClient: {
+      async registerApplication() {
+        registrationCalls += 1;
+        return { app_id: "unexpected-app" };
+      },
+    },
+  });
+
+  await setup.registerApplication(registrationOptions());
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "certificate generation failed");
+  assert.equal(authenticationCalls, 0);
+  assert.equal(registrationCalls, 0);
+  assert.equal(await applicationStore.get(), undefined);
+});
+
+test("Control Panel auth persistence failure prevents provider registration", async () => {
+  let registrationCalls = 0;
+  const { setup, applicationStore } = setupDependencies({
+    controlPanelAuthStore: {
+      async get() {
+        return undefined;
+      },
+      async set() {
+        throw new Error("Control Panel Keychain write failed");
+      },
+    },
+    controlPanelClient: {
+      async registerApplication() {
+        registrationCalls += 1;
+        return { app_id: "unexpected-app" };
+      },
+    },
+  });
+
+  await setup.registerApplication(registrationOptions());
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "failed");
+  assert.equal(status.error, "Control Panel Keychain write failed");
+  assert.equal(registrationCalls, 0);
+  assert.equal(await applicationStore.get(), undefined);
+});
+
+test("a rejected 401 Control Panel refresh falls back to email sign-in", async () => {
+  const calls = [];
+  const client = new ControlPanelClient(
+    async (url) => {
+      calls.push(String(url));
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: "TOKEN_EXPIRED" } }),
+          { status: 401, statusText: "Unauthorized" },
+        );
+      }
+      if (String(url).endsWith("getOobConfirmationCode")) {
+        return new Response("{}", { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({ idToken: "new-id-token", refreshToken: "new-refresh-token" }),
+        { status: 200 },
+      );
+    },
+    "https://enablebanking.com",
+    "",
+  );
+  const flow = new ControlPanelAuthFlow(client, async () => ({
+    port: 4321,
+    path: `/callback?state=${"A".repeat(43)}`,
+    wait: Promise.resolve("one-time-code"),
+    close: async () => {},
+  }));
+
+  const auth = await flow.authenticate("user@example.com", {
+    email: "user@example.com",
+    idToken: "expired-id-token",
+    refreshToken: "test-rejected-refresh-token",
+    expiresAt: 1,
+  });
+
+  assert.equal(auth.idToken, "new-id-token");
+  assert.equal(calls.length, 3);
+  assert.match(calls[1], /getOobConfirmationCode$/);
+  assert.match(calls[2], /emailLinkSignin$/);
+});
+
+test("Control Panel refresh preserves optional stored identity fields", async () => {
+  const client = new ControlPanelClient(
+    async () =>
+      new Response(
+        JSON.stringify({ id_token: "renewed-id-token", expires_in: "3600" }),
+        { status: 200 },
+      ),
+    "https://enablebanking.com",
+    "",
+  );
+  const flow = new ControlPanelAuthFlow(client);
+  const existingAuth = {
+    email: "user@example.com",
+    idToken: "expired-id-token",
+    refreshToken: "test-current-refresh-token",
+    localId: "existing-user-id",
+    expiresAt: 1,
+  };
+
+  const auth = await flow.authenticate("user@example.com", existingAuth);
+
+  assert.equal(auth.idToken, "renewed-id-token");
+  assert.equal(auth.refreshToken, "test-current-refresh-token");
+  assert.equal(auth.localId, "existing-user-id");
+});
+
+test("invalid Control Panel refresh responses do not trigger another login", async () => {
+  let listenerCalls = 0;
+  const client = new ControlPanelClient(
+    async () => new Response("{}", { status: 200 }),
+    "https://enablebanking.com",
+    "",
+  );
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    listenerCalls += 1;
+    throw new Error("Invalid refresh responses must not request a new login");
+  });
+
+  await assert.rejects(
+    flow.authenticate("user@example.com", {
+      email: "user@example.com",
+      idToken: "expired-id-token",
+      refreshToken: "test-current-refresh-token",
+      expiresAt: 1,
+    }),
+    /invalid refresh response/,
+  );
+  assert.equal(listenerCalls, 0);
+});
+
+test("rejects invalid callback destinations and ports before Control Panel requests", async () => {
+  const client = new ControlPanelClient(async () => {
+    throw new Error("Invalid callback input must not reach the network");
+  });
+  const state = "A".repeat(43);
+  for (const callbackPath of [
+    `/other?state=${state}`,
+    `https://attacker.example/callback?state=${state}`,
+    `http://localhost/callback?state=${state}&extra=value`,
+    `http://localhost/callback?state=${state}#fragment`,
+  ]) {
+    await assert.rejects(
+      client.requestEmailLogin("user@example.com", 4321, callbackPath),
+      /callback path must contain a valid state/,
+    );
+  }
+  await assert.rejects(
+    client.requestEmailLogin("user@example.com", 0, `/callback?state=${state}`),
+    /callback port is invalid/,
+  );
+});
+
+test("rejects malformed provider application registration responses", async () => {
+  const client = new ControlPanelClient(
+    async () => new Response(JSON.stringify({}), { status: 200 }),
+  );
+
+  await assert.rejects(
+    client.registerApplication(
+      {
+        email: "user@example.com",
+        idToken: "id-token",
+        refreshToken: "refresh-token",
+      },
+      {
+        name: "Enable Banking MCP",
+        certificate: "certificate",
+        environment: "SANDBOX",
+        redirect_urls: ["https://localhost:8765/callback"],
+      },
+    ),
+    /invalid application registration response/,
+  );
+});
+
+test("Control Panel callback timeout closes the listener and rejects login", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const requested = Promise.withResolvers();
+  let listener;
+  const flow = new ControlPanelAuthFlow(
+    {
+      async requestEmailLogin(email, port, path) {
+        requested.resolve({ email, port, path });
+      },
+      async completeEmailLogin() {
+        throw new Error("A timed-out callback must not complete login");
+      },
+    },
+    async () => {
+      listener = await createControlPanelCallbackListener();
+      return listener;
+    },
+  );
+  const pendingLogin = flow.authenticate("user@example.com");
+  const request = await requested.promise;
+  assert.equal(request.email, "user@example.com");
+  assert.ok(request.port > 0);
+  assert.match(request.path, /^\/callback\?state=/);
+  const rejectedLogin = assert.rejects(
+    pendingLogin,
+    /Control Panel sign-in timed out/,
+  );
+
+  context.mock.timers.tick(10 * 60 * 1000);
+  await rejectedLogin;
+  await listener.close();
+});
+
+test("Sandbox registration completes without opening the Production dashboard", async () => {
+  const openedUrls = [];
+  const { setup, applicationStore } = setupDependencies({
+    openBrowser: (url) => openedUrls.push(url),
+  });
+
+  await setup.registerApplication(
+    registrationOptions({ environment: "SANDBOX" }),
+  );
+  const status = await waitForSetup(setup);
+
+  assert.equal(status.phase, "application_ready");
+  assert.equal(status.pending, false);
+  assert.equal(status.appId, "recorded-app-id");
+  assert.equal(status.dashboardUrl, undefined);
+  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.deepEqual(openedUrls, []);
 });

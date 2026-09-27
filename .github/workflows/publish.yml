@@ -47,5 +47,35 @@ jobs:
       - name: Inspect package contents
         run: npm pack --dry-run
 
+      - name: Run MCP contract E2E before publishing
+        env:
+          MCP_INSPECTOR_VERSION: "2.4.0"
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:mcp
+
+      - name: Upload pre-publish MCP diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pre-publish-mcp-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
       - name: Publish package through npm Trusted Publishing
         run: npm publish --access public --provenance
+
+      - name: Smoke-test published MCP package
+        env:
+          MCP_INSPECTOR_VERSION: "2.4.0"
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:published
+
+      - name: Upload published MCP diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: published-mcp-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore

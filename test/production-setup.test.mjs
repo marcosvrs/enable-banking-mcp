@@ -195,3 +195,119 @@ test("requires HTTPS policy URLs for Production setup", () => {
     /privacy_url must be a valid HTTPS URL/,
   );
 });
+
+test("keeps production application linking state when activation lookup fails", async () => {
+  const applicationStore = new MemoryStore();
+  const sessionStore = new MemoryStore();
+  const controlPanelAuth = {
+    async authenticate(email) {
+      return { email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+    },
+  };
+  const controlPanelClient = {
+    async registerApplication() {
+      return { app_id: "production-app-id" };
+    },
+  };
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  let activationCalls = 0;
+  const openedUrls = [];
+  const setup = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+    controlPanelClient,
+    controlPanelAuth,
+    authorizationFlow: {
+      status: { pending: false },
+      async start() {
+        throw new Error("authorization must wait for activation");
+      },
+    },
+    openBrowser: (url) => openedUrls.push(url),
+    generateKeyMaterial: async () => ({
+      privateKey,
+      certificate: "fake-certificate",
+    }),
+    trustCertificate: async () => {},
+    createBankClient: (credentials) =>
+      new EnableBankingClient(credentials, async () => {
+        activationCalls += 1;
+        return new Response(JSON.stringify({ error: "temporarily unavailable" }), {
+          status: 503,
+        });
+      }),
+    sleep: async () => {},
+  });
+
+  await setup.start({
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "PRODUCTION",
+    redirectUrl: "https://localhost:8765/callback",
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!setup.status.pending) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(setup.status.phase, "failed");
+  assert.equal(setup.status.error, "Enable Banking API 503: temporarily unavailable");
+  assert.equal(setup.status.appId, "production-app-id");
+  assert.equal(activationCalls, 1);
+  assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
+  assert.equal((await applicationStore.get()).appId, "production-app-id");
+  assert.equal(await sessionStore.get(), undefined);
+});
+
+test("rejects invalid setup environment and consent metadata before setup starts", () => {
+  const base = {
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "SANDBOX",
+    redirectUrl: "https://localhost:8765/callback",
+    aspspName: "Example Bank",
+    country: "FI",
+  };
+  const invalid = [
+    [{ environment: "TEST" }, /environment must be PRODUCTION or SANDBOX/],
+    [{ controlPanelEmail: "" }, /control_panel_email must be a valid email/],
+    [{ appName: "  " }, /app_name is required/],
+    [{ redirectUrl: "https://bank.example/callback" }, /redirect_url must be/],
+    [{ aspspName: " " }, /aspsp_name is required/],
+    [{ country: "F" }, /country must be a two-letter ISO/],
+    [{ accessProfile: "transactions" }, /access_profile is invalid/],
+    [{ validUntil: "2099-02-30T00:00:00Z" }, /future RFC3339 date-time/],
+    [
+      {
+        environment: "PRODUCTION",
+        privacyUrl: "https://user:secret@example.com/privacy",
+      },
+      /privacy_url must be a valid HTTPS URL/,
+    ],
+    [
+      { environment: "PRODUCTION", privacyUrl: "not a URL" },
+      /privacy_url must be a valid HTTPS URL/,
+    ],
+    [
+      {
+        environment: "PRODUCTION",
+        termsUrl: "https://example.com/terms#fragment",
+      },
+      /terms_url must be a valid HTTPS URL/,
+    ],
+  ];
+
+  for (const [overrides, error] of invalid) {
+    assert.throws(
+      () => normalizeSetupOptions({ ...base, ...overrides }),
+      error,
+      JSON.stringify(overrides),
+    );
+  }
+});

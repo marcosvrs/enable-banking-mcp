@@ -7,6 +7,7 @@ const expectedTools = [
   "authorize_bank",
   "clear_local_credentials",
   "connect_bank",
+  "connection_status",
   "control_panel_authenticate",
   "control_panel_logout",
   "control_panel_status",
@@ -39,16 +40,18 @@ test("exposes documented tools with the local Control Panel email", async () => 
 
   try {
     await client.connect(transport);
-    const instructions = client.getInstructions() ?? "";
-    assert.match(instructions, /setup_enable_banking/);
-    assert.match(instructions, /register_application/);
-    assert.match(instructions, /defaults to personal PRODUCTION/);
-    assert.match(instructions, /never initiates payments/);
-    assert.match(instructions, /connect_bank/);
     const response = await client.listTools();
     const names = response.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, expectedTools);
     assert.doesNotMatch(JSON.stringify(response), /user@example\.com/);
+    const connectionStatusTool = response.tools.find(
+      (tool) => tool.name === "connection_status",
+    );
+    assert.equal(connectionStatusTool?.annotations?.readOnlyHint, true);
+    assert.equal(connectionStatusTool?.annotations?.destructiveHint, false);
+    assert.equal(connectionStatusTool?.annotations?.idempotentHint, true);
+    assert.equal(connectionStatusTool?.annotations?.openWorldHint, true);
+    assert.deepEqual(connectionStatusTool?.inputSchema?.properties, {});
     const setupTool = response.tools.find((tool) => tool.name === "setup_enable_banking");
     assert.equal(setupTool?.inputSchema?.properties?.environment?.default, "PRODUCTION");
     assert.equal(

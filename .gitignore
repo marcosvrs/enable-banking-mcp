@@ -18,3 +18,4 @@ coverage/
 *.sqlite
 *.sqlite3
 *.db
+e2e-artifacts/

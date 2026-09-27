@@ -11,6 +11,10 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const zeroSha = /^0+$/;
+// This exact key is published as VUE_APP_FIREBASE_API_KEY in the Enable
+// Banking Control Panel SPA.
+const publicControlPanelFirebaseWebKey =
+  "AIzaSyBn8fvjRYQKslskRaO3cblUjmcyl5b9o-c"; // gitleaks:allow -- public Control Panel Firebase client key
 const safeEmailDomains = new Set([
   "example.com",
   "example.org",
@@ -43,6 +47,7 @@ const contentRules = [
     name: "known-secret-token",
     pattern:
       /\b(?:ghp_|github_pat_|glpat-|xox[baprs]-|sk_(?:live|test)_|AKIA|AIza)[A-Za-z0-9_./+=-]{10,}\b/gi,
+    accept: (value) => value !== publicControlPanelFirebaseWebKey,
   },
   {
     name: "bearer-token",

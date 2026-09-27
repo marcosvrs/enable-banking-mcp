@@ -148,17 +148,48 @@ export class BankAuthorizationFlow {
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
     } finally {
-      await listener.close();
-      if (this.pending?.listener === listener) {
-        this.pending = undefined;
+      try {
+        await listener.close();
+      } catch (error) {
+        if (!this.lastError) {
+          this.lastError =
+            error instanceof Error ? error.message : String(error);
+        }
+      } finally {
+        if (this.pending?.listener === listener) {
+          this.pending = undefined;
+        }
       }
     }
   }
 }
 
 export function parseValidUntil(value?: string): string {
-  if (value !== undefined && !RFC3339_DATE_TIME.test(value)) {
-    throw new Error("valid_until must be a future RFC3339 date-time");
+  if (value !== undefined) {
+    if (!RFC3339_DATE_TIME.test(value)) {
+      throw new Error("valid_until must be a future RFC3339 date-time");
+    }
+    const year = Number(value.slice(0, 4));
+    const month = Number(value.slice(5, 7));
+    const day = Number(value.slice(8, 10));
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [
+      31,
+      leapYear ? 29 : 28,
+      31,
+      30,
+      31,
+      30,
+      31,
+      31,
+      30,
+      31,
+      30,
+      31,
+    ][month - 1];
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth) {
+      throw new Error("valid_until must be a future RFC3339 date-time");
+    }
   }
   const timestamp =
     value === undefined

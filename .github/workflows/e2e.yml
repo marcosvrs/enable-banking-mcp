@@ -1,0 +1,139 @@
+name: MCP and offline plugin E2E
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  MCP_INSPECTOR_VERSION: "2.4.0"
+  CLAUDE_CODE_VERSION: "2.1.252"
+  CODEX_VERSION: "0.151.0"
+
+jobs:
+  mcp-contract:
+    name: MCP protocol contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # Pinned commit
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502b1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run MCP contract E2E
+        env:
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:mcp
+
+      - name: Upload MCP diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mcp-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
+  claude-plugin:
+    name: Claude offline plugin E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # Pinned commit
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502b1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install pinned Claude Code CLI
+        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+      - name: Verify Claude Code CLI
+        run: claude --version
+
+      - name: Run Claude offline plugin E2E
+        env:
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:claude
+
+      - name: Upload Claude diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: claude-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
+  codex-plugin:
+    name: Codex offline plugin E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # Pinned commit
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502b1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install pinned Codex CLI
+        run: npm install --global "@openai/codex@${CODEX_VERSION}"
+
+      - name: Verify Codex CLI
+        run: codex --version
+
+      - name: Run Codex offline plugin E2E
+        env:
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:codex
+
+      - name: Upload Codex diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: codex-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore

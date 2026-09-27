@@ -35,7 +35,9 @@ import {
   type SetupOptions,
 } from "./setup.js";
 import { MacKeychainSessionStore } from "./session-store.js";
-import { recoverConfiguredSession } from "./session-recovery.js";
+import { inspectConnectionStatus } from "./connection-status.js";
+import { connectBank as runGuidedConnection, type ConnectBankOptions } from "./guided-connection.js";
+import { resolveControlPanelEmailInput } from "./control-panel-email.js";
 
 const server = new McpServer(
   {
@@ -44,7 +46,45 @@ const server = new McpServer(
   },
   {
     instructions:
-      "Start with connect_bank for guided personal AIS setup and reconnection. It resumes stored state, opens required browser steps, lists available banks after a country is provided, starts read-only consent after a bank is selected, and returns authorized accounts. connect_bank defaults to personal PRODUCTION. Use register_application, setup_enable_banking, authorize_bank, and the other tools for advanced or explicit control. This server is read-only for personal account information; it never initiates payments. Never pass emails, tokens, private keys, or session IDs as tool arguments. Pass only documented account and transaction identifiers to corresponding read-only tools. Control Panel email comes only from the local MCP process environment.",
+      `MCP transport connectivity does not mean Enable Banking is authenticated.
+Use connect_bank as the primary guided setup. It reuses stored authentication
+and application state, opens required browser pages, and handles callbacks.
+Check conversation and stored/provider data before asking. If a bank is named
+without a country, search the global personal-AIS bank list and use an exact,
+unique match; if multiple matches remain, ask the user to select the bank and
+country. If a country is known and only one bank is listed, proceed with it.
+Never guess from device locale or location.
+
+When the client advertises MCP form elicitation, use it only for an unresolved
+Control Panel email, country, or bank choice. The user may decline. Never
+request passwords, OTPs, API keys, access tokens, bank credentials, or consent.
+If forms are unavailable, return provider choices so the agent can ask through
+its own UI. For Control Panel email fallback, request local
+ENABLE_BANKING_CONTROL_PANEL_EMAIL configuration; never pass an email through
+a tool argument or expose it in results. The email authenticates the Control Panel
+and is the data-protection contact for a Production application; it does not
+identify the user's bank or retrieve account data.
+
+The agent owns MCP orchestration: perform all safe follow-up calls, status
+checks, and resumption yourself. Never ask the user to rerun an MCP tool, copy
+a URL or code, or repeat information already available. After required human
+browser actions, monitor setup_status or connection_status and resume
+connect_bank until the session is verified. The user alone completes a
+Control Panel email link when requested, Production dashboard account linking,
+bank sign-in/MFA and explicit consent, and any local certificate-trust prompt.
+
+Use connection_status only for status checks; it does not open a browser, start
+consent, modify stored sessions, or return account data. For first-run setup
+with a known country and bank, pass both to connect_bank or use
+setup_enable_banking; the combined flow handles registration, Production
+activation polling, consent callback, and session storage. If a bank is
+unknown, use provider bank lists and request only unresolved choices. The
+default access profile is balances; request transactions only when needed.
+This server is read-only for personal account information and never initiates
+payments. Use register_application and authorize_bank only for advanced
+control. Never pass emails, tokens, private keys, or session IDs as tool
+arguments. Control Panel email is read from local configuration or Keychain
+when available.`
   },
 );
 
@@ -120,8 +160,15 @@ function failure(error: unknown): ToolResult {
 
 function redactLocalEmails(value: string): string {
   let redacted = value;
-  const email = process.env[CONTROL_PANEL_EMAIL_ENV]?.trim();
-  if (email) redacted = redacted.split(email).join("[local email redacted]");
+  const configuredEmail = process.env[CONTROL_PANEL_EMAIL_ENV]?.trim();
+  if (configuredEmail) {
+    redacted = redacted.split(configuredEmail).join("[local email redacted]");
+  }
+  if (storedControlPanelEmail) {
+    redacted = redacted
+      .split(storedControlPanelEmail)
+      .join("[local email redacted]");
+  }
   return redacted;
 }
 
@@ -183,202 +230,108 @@ async function authorizedAccounts(): Promise<Record<string, unknown>> {
   };
 }
 
-type ConnectBankOptions = {
-  appName: string;
-  environment: "PRODUCTION" | "SANDBOX";
-  country?: string;
-  aspspName?: string;
-  accessProfile: AccessProfile;
-};
-
-async function connectBank(options: ConnectBankOptions): Promise<unknown> {
-  const [storedSession, application] = await Promise.all([
-    sessionStore.get(),
+async function readConnectionStatus() {
+  const [application, storedSession, controlPanelAuth] = await Promise.all([
     applicationStore.get(),
+    sessionStore.get(),
+    controlPanelAuthStore.get(),
   ]);
   const environmentSessionId = process.env.ENABLE_BANKING_SESSION_ID?.trim();
-  const connected = await recoverConfiguredSession({
-    storedSession,
-    environmentSessionId,
-    read: async () => ({
-      status: "connected",
-      ...(await authorizedAccounts()),
-    }),
-    clearStoredSession: () => sessionStore.clear(),
-    clearEnvironmentSession: () => {
+  const sessionIds: string[] = [];
+  if (storedSession) sessionIds.push(storedSession);
+  if (environmentSessionId && environmentSessionId !== storedSession) {
+    sessionIds.push(environmentSessionId);
+  }
+  const environmentApplicationId = Boolean(
+    process.env.ENABLE_BANKING_APP_ID?.trim() ||
+      process.env.ENABLE_BANKING_ID?.trim(),
+  );
+  const environmentPrivateKey = Boolean(
+    process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
+  );
+  const configuration = application
+    ? "configured"
+    : environmentApplicationId && environmentPrivateKey
+      ? "configured"
+      : environmentApplicationId || environmentPrivateKey
+        ? "invalid"
+        : "missing";
+
+  let client: EnableBankingClient | undefined;
+  if (configuration === "configured") {
+    try {
+      client = new EnableBankingClient(await resolveCredentials());
+    } catch {
+      // Keep credential and key parsing errors out of status-only responses.
+    }
+  }
+
+  const setupStatus = setupFlow.status;
+  const pendingPhase = setupStatus.pending
+    ? setupStatus.phase
+    : authorizationFlow.status.pending
+      ? "bank_authorization"
+      : undefined;
+  return inspectConnectionStatus({
+    configuration,
+    client,
+    sessionIds,
+    controlPanelAuth,
+    configuredEnvironment: application?.environment,
+    pendingPhase,
+  });
+}
+
+
+async function connectBank(options: ConnectBankOptions): Promise<unknown> {
+  return runGuidedConnection(options, {
+    applicationStore,
+    sessionStore,
+    setupFlow,
+    authorizationFlow,
+    controlPanelAuthStore,
+    resolveControlPanelEmail,
+    assertNoEnvironmentCredentials,
+    getEnvironmentSessionId: () =>
+      process.env.ENABLE_BANKING_SESSION_ID?.trim(),
+    clearEnvironmentSession: (sessionId) => {
       if (
-        environmentSessionId &&
-        process.env.ENABLE_BANKING_SESSION_ID?.trim() === environmentSessionId
+        sessionId &&
+        process.env.ENABLE_BANKING_SESSION_ID?.trim() === sessionId
       ) {
         delete process.env.ENABLE_BANKING_SESSION_ID;
       }
     },
-  });
-  if (connected) return connected;
-
-  const setupStatus = setupFlow.status;
-  if (setupStatus.pending) {
-    return {
-      status: "awaiting_user",
-      phase: setupStatus.phase,
-      ...(setupStatus.message ? { message: setupStatus.message } : {}),
-      next_action: "Complete the browser step, then call connect_bank again",
-    };
-  }
-
-  if (!application) {
-    assertNoEnvironmentCredentials();
-    const controlPanelEmail = requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV);
-    if (!options.country || !options.aspspName) {
-      const started = await setupFlow.registerApplication({
-        controlPanelEmail,
-        appName: options.appName,
-        environment: options.environment,
-        redirectUrl: DEFAULT_REDIRECT_URL,
-        description: DEFAULT_PRODUCTION_DESCRIPTION,
-        privacyUrl: DEFAULT_PRODUCTION_PRIVACY_URL,
-        termsUrl: DEFAULT_PRODUCTION_TERMS_URL,
-      });
-      return {
-        status: "setup_started",
-        phase: started.phase,
-        message: started.message,
-        next_action:
-          "Complete the Control Panel email and dashboard steps, then call connect_bank again",
-      };
-    }
-
-    const started = await setupFlow.start({
-      controlPanelEmail,
-      appName: options.appName,
-      environment: options.environment,
-      redirectUrl: DEFAULT_REDIRECT_URL,
-      aspspName: options.aspspName,
-      country: options.country,
-      description: DEFAULT_PRODUCTION_DESCRIPTION,
-      privacyUrl: DEFAULT_PRODUCTION_PRIVACY_URL,
-      termsUrl: DEFAULT_PRODUCTION_TERMS_URL,
-      accessProfile: options.accessProfile,
-    });
-    return {
-      status: "setup_started",
-      phase: started.phase,
-      message: started.message,
-      next_action: "Complete the browser steps, then call connect_bank again",
-    };
-  }
-
-  if (authorizationFlow.status.pending) {
-    return {
-      status: "awaiting_user",
-      phase: "bank_authorization",
-      message: "Complete bank consent in the browser, then call connect_bank again",
-    };
-  }
-
-  const client = new EnableBankingClient(await resolveCredentials());
-  const applicationInfo = await client.getApplication();
-  if (application.environment === "PRODUCTION" && !applicationInfo.active) {
-    launchBrowser(APPLICATIONS_URL);
-    return {
-      status: "dashboard_action_required",
-      phase: "account_link",
-      dashboard_url: APPLICATIONS_URL,
-      message:
-        "Link your own bank account in the dashboard, then call connect_bank again",
-    };
-  }
-
-  const country = options.country?.trim().toUpperCase();
-  if (!country) {
-    return {
-      status: "needs_country",
-      supported_countries: applicationInfo.countries,
-      message:
-        "Provide the two-letter country code; connect_bank will list the available banks",
-    };
-  }
-  if (!/^[A-Z]{2}$/.test(country)) {
-    throw new Error("country must be a two-letter ISO 3166-1 code");
-  }
-
-  const banks = extractBankChoices(await client.listBanks(country), country);
-  if (!options.aspspName) {
-    return banks.length > 0
-      ? {
-          status: "needs_bank_selection",
-          country,
-          banks,
-          message: "Choose one bank name and call connect_bank again",
-        }
-      : {
-          status: "no_banks",
-          country,
-          message: "No personal AIS banks were returned for this country",
-        };
-  }
-
-  const requestedName = options.aspspName.trim().toLowerCase();
-  const selectedBank = banks.find(
-    (bank) => bank.name.toLowerCase() === requestedName,
-  );
-  if (!selectedBank) {
-    const available =
-      banks.length > 0 ? ` Available banks: ${banks.map((bank) => bank.name).join(", ")}.` : "";
-    throw new Error(
-      `Bank "${options.aspspName}" is not available in ${country}.${available}`,
-    );
-  }
-  const redirectUrl = application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL;
-
-  const authorization = await authorizationFlow.start(client, {
-    aspspName: selectedBank.name,
-    country,
-    redirectUrl,
-    accessProfile: options.accessProfile,
-  });
-  return {
-    ...authorization,
-    status: "awaiting_user",
-    phase: "bank_authorization",
-    aspsp: selectedBank,
-    message: "Complete bank consent in the browser, then call connect_bank again",
-  };
-}
-
-const APPLICATIONS_URL = "https://enablebanking.com/cp/applications";
-function extractBankChoices(
-  response: unknown,
-  fallbackCountry: string,
-): Array<{ name: string; country: string }> {
-  if (typeof response !== "object" || response === null) return [];
-  const values = (response as Record<string, unknown>).aspsps;
-  if (!Array.isArray(values)) return [];
-  return values.flatMap((value) => {
-    if (typeof value !== "object" || value === null) return [];
-    const record = value as Record<string, unknown>;
-    const name = typeof record.name === "string" ? record.name.trim() : "";
-    if (!name) return [];
-    const country =
-      typeof record.country === "string" && record.country.trim()
-        ? record.country.trim().toUpperCase()
-        : fallbackCountry;
-    return [{ name, country }];
+    readAuthorizedAccounts: authorizedAccounts,
+    resolveCredentials,
+    createBankClient: (credentials) => new EnableBankingClient(credentials),
+    openBrowser: launchBrowser,
+    mcpServer: server.server,
   });
 }
 
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+let storedControlPanelEmail: string | undefined;
 
-function requiredLocalEmail(environmentName: string): string {
-  const value = process.env[environmentName]?.trim();
-  if (!value || !EMAIL_PATTERN.test(value)) {
-    throw new Error(
-      `${environmentName} must be set to a valid email in the local MCP server environment`,
-    );
+async function resolveControlPanelEmail(
+  environmentName: string,
+  storedEmail?: string,
+): Promise<string | Record<string, string>> {
+  const persistedEmail = storedEmail?.trim();
+  if (persistedEmail) storedControlPanelEmail = persistedEmail;
+  const result = await resolveControlPanelEmailInput(
+    server.server,
+    environmentName,
+    process.env[environmentName],
+    persistedEmail,
+  );
+  if (result.status === "ready") {
+    storedControlPanelEmail = result.email;
+    return result.email;
   }
-  return value;
+  return result;
 }
+
 function assertNoEnvironmentCredentials(): void {
   const hasEnvironmentCredentials =
     Boolean(
@@ -401,14 +354,18 @@ server.registerTool(
   "control_panel_authenticate",
   {
     description:
-      "Authenticate with the local email configured in ENABLE_BANKING_CONTROL_PANEL_EMAIL and store the session in macOS Keychain; the email is never an MCP argument or result",
+      "Reuse or refresh a stored Control Panel session, or request a sign-in link. If no local email or stored identity exists, use MCP form elicitation when supported; the email and tokens are never tool arguments or results.",
   },
   async () =>
     safely(async () => {
-      const auth = await controlPanelAuth.authenticate(
-        requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
+      const existingAuth = await controlPanelAuthStore.get();
+      const email = await resolveControlPanelEmail(
+        CONTROL_PANEL_EMAIL_ENV,
+        existingAuth?.email,
       );
-      await controlPanelAuthStore.set(auth);
+      if (typeof email !== "string") return email;
+      const auth = await controlPanelAuth.authenticate(email, existingAuth);
+      if (auth !== existingAuth) await controlPanelAuthStore.set(auth);
       return {
         authenticated: true,
         ...(auth.expiresAt ? { expires_at: auth.expiresAt } : {}),
@@ -454,7 +411,7 @@ server.registerTool(
   "connect_bank",
   {
     description:
-      "Primary guided personal AIS connection flow; call with no arguments first to resume setup, open required browser steps, discover banks after a country is supplied, start read-only consent after a bank is selected, or return connected accounts",
+      "Primary personal AIS setup. Reuses stored sessions and credentials, opens provider pages, and handles callbacks. It elicits only a missing Control Panel email, country, or bank choice through MCP forms when supported; otherwise it returns choices for the agent to ask. The MCP agent owns follow-up calls and status checks. The user completes required sign-in/MFA and consent.",
     inputSchema: {
       app_name: z
         .string()
@@ -497,7 +454,7 @@ server.registerTool(
   "setup_enable_banking",
   {
     description:
-      "Create a personal, noncommercial Enable Banking AIS application using email configured in the local MCP server environment, guide linked-account setup, and store credentials in macOS Keychain; never send email through MCP",
+      "Advanced combined registration and personal AIS setup when the bank and country are already known. Reads local Control Panel identity or uses MCP form elicitation when supported. Use connect_bank for provider-discovered missing bank/country choices; the MCP agent owns follow-up calls and status checks.",
     inputSchema: {
       app_name: z
         .string()
@@ -561,8 +518,14 @@ server.registerTool(
   }) =>
     safely(async () => {
       assertNoEnvironmentCredentials();
+      const storedAuth = await controlPanelAuthStore.get();
+      const controlPanelEmail = await resolveControlPanelEmail(
+        CONTROL_PANEL_EMAIL_ENV,
+        storedAuth?.email,
+      );
+      if (typeof controlPanelEmail !== "string") return controlPanelEmail;
       const options: SetupOptions = {
-        controlPanelEmail: requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
+        controlPanelEmail,
         appName: app_name,
         environment,
         redirectUrl: redirect_url,
@@ -582,7 +545,7 @@ server.registerTool(
   "register_application",
   {
     description:
-      "Register a personal, noncommercial Enable Banking AIS application using the local Control Panel email, store credentials in macOS Keychain, and wait for dashboard activation before bank authorization; never send email through MCP",
+      "Register a personal, noncommercial Enable Banking AIS application using local Control Panel identity, store credentials in macOS Keychain, and wait for dashboard activation. If no identity is stored, use MCP form elicitation when supported; the email is never a tool argument or result.",
     inputSchema: {
       app_name: z
         .string()
@@ -625,8 +588,14 @@ server.registerTool(
   }) =>
     safely(async () => {
       assertNoEnvironmentCredentials();
+      const storedAuth = await controlPanelAuthStore.get();
+      const controlPanelEmail = await resolveControlPanelEmail(
+        CONTROL_PANEL_EMAIL_ENV,
+        storedAuth?.email,
+      );
+      if (typeof controlPanelEmail !== "string") return controlPanelEmail;
       const options: ApplicationRegistrationOptions = {
-        controlPanelEmail: requiredLocalEmail(CONTROL_PANEL_EMAIL_ENV),
+        controlPanelEmail,
         appName: app_name,
         environment,
         redirectUrl: redirect_url,
@@ -642,10 +611,26 @@ server.registerTool(
   "setup_status",
   {
     description:
-      "Show the first-run Enable Banking setup state without exposing credentials",
+      "Report setup progress without credentials. The MCP agent may poll this and must resume connect_bank itself after required human browser actions.",
   },
   async () => safely(async () => setupFlow.getStatus()),
 );
+
+server.registerTool(
+  "connection_status",
+  {
+    description:
+      "Read-only status of the personal AIS bank connection. Verifies a stored provider session and reports application activation or consent steps without opening a browser, starting consent, changing stored state, or returning account data",
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  async () => safely(async () => readConnectionStatus()),
+);
+
 
 server.registerTool(
   "authorize_bank",

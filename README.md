@@ -24,10 +24,16 @@ The source code is open source under the [MIT License](LICENSE). MIT permits dow
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
 
-Set `ENABLE_BANKING_CONTROL_PANEL_EMAIL` in the local MCP server environment
-before authentication. The email is deliberately not an MCP tool argument or
-result. Do not put it in a prompt, tool call, issue, log, or committed
-configuration.
+For first-time Control Panel authentication, set
+`ENABLE_BANKING_CONTROL_PANEL_EMAIL` in the local MCP server environment, or
+let the server request it through MCP form elicitation when no local email or
+Keychain identity exists and the client supports forms. The email authenticates
+the Control Panel and is the data-protection contact for a Production
+application; it does not identify a user's bank or retrieve account data.
+An elicited email is in-band MCP data visible to the connected client, not a
+tool argument or result. Use elicitation only with a trusted client; configure
+the local environment instead when the client must not receive the email. The
+email is reused from Keychain after authentication.
 
 For a shell-launched process, set it before starting the server:
 
@@ -36,11 +42,38 @@ export ENABLE_BANKING_CONTROL_PANEL_EMAIL='you@example.com'
 ```
 
 Use the equivalent local environment setting in an MCP client launch
-configuration. The server inherits the value locally; it is not loaded from a
-`.env` file. Keep the value out of cloud-managed prompts, tool arguments, logs,
-and configuration synchronization.
+configuration. The server inherits it locally; it is not loaded from a `.env`
+file. Keep this configuration local and out of cloud-managed synchronization.
+
+Matching unexpired Control Panel sessions are reused. Expired sessions are
+silently refreshed with the public Firebase client configuration used by
+Enable Banking's Control Panel. `ENABLE_BANKING_FIREBASE_API_KEY` may override
+that key for a different deployment. If refresh is rejected, the server
+requests a Control Panel email sign-in link; the user must open it.
 
 The bank-consent callback uses HTTPS and a generated or configured localhost certificate. The Control Panel email-link callback is loopback-only and state-bound. Setup can add the generated bank-callback certificate to the macOS login Keychain. The browser may still require the normal local-certificate trust confirmation.
+
+### MCP form elicitation
+
+Form elicitation is capability-negotiated MCP behavior, not a Claude-only
+question API. This server checks whether the client advertises
+`elicitation.form`. Claude Code displays supported requests automatically.
+Codex's `approval_policy.granular.mcp_elicitations = true` allows these
+prompts to surface instead of being auto-rejected; combine it with existing
+approval settings. Other clients can use forms only when their MCP
+implementation supports and advertises the capability. Without it, the server
+returns provider-listed bank/country choices for the agent to ask through its
+own interface. If a Control Panel email is missing, the tool instead returns
+instructions to configure local `ENABLE_BANKING_CONTROL_PANEL_EMAIL`.
+
+The server asks only for unresolved Control Panel email, country, or bank
+choices. Form data is visible to the connected MCP client. Never enter bank
+passwords, one-time codes, API keys, tokens, or bank credentials into an MCP
+form; authentication and consent stay on the provider's browser pages. See the
+[MCP elicitation specification](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation),
+[Claude Code MCP documentation](https://code.claude.com/docs/en/mcp#respond-to-mcp-elicitation-requests),
+and [Codex configuration reference](https://developers.openai.com/codex/config-reference).
+
 
 ## Install and run
 
@@ -72,11 +105,12 @@ For clients that accept an `mcpServers` JSON block, use the published package:
 }
 ```
 
-Keep this configuration local. The Control Panel email is the only required
-environment value. Do not commit it, synchronize it to a cloud-managed host,
-or put the email in a prompt or tool call. Pass
-`"environment": "SANDBOX"` to the setup tool only when sandbox testing is
-intended.
+Keep this configuration local. `ENABLE_BANKING_CONTROL_PANEL_EMAIL` is the
+only environment value required for first-run registration; supported MCP
+forms can collect it instead. Do not commit or synchronize it, or place it in
+a conversational prompt or tool argument. The MCP form response is visible to
+the connected client. Pass `"environment": "SANDBOX"` to the setup tool only
+when sandbox testing is intended.
 
 ### Claude Code
 
@@ -181,6 +215,33 @@ The server uses MCP stdio transport. Configure a client to launch
 `node /absolute/path/to/enable-banking-mcp/dist/server.js` and pass the local
 Control Panel email environment value.
 
+### Run E2E checks
+
+The deterministic MCP E2E suite uses a local fixture server. It verifies the
+stdio protocol handshake, the exact 20-tool contract, schemas and safety
+annotations, successful and failed tool calls, both plugin launch manifests,
+and the packed npm executable:
+
+```sh
+npm run e2e:mcp
+```
+
+The Claude Code and Codex plugin checks are fully offline. They validate the
+fixture-backed plugin manifests, Claude's strict plugin schema, and Codex's
+local marketplace discovery and installation. They do not start an agent,
+make an LLM request, require credentials, or contact a bank:
+
+```sh
+npm run e2e:claude
+npm run e2e:codex
+npm run e2e
+```
+
+`npm run e2e:published` checks the package version referenced by both bundled
+plugin manifests after publication. Every GitHub Actions E2E job is
+credential-free and can run on pull requests, pushes, schedules, or manual
+dispatches.
+
 To install the repository's optional privacy pre-push hook explicitly:
 
 ```sh
@@ -214,50 +275,84 @@ Do not tag an already-published version with the publishing workflow; npm
 rejects duplicate versions.
 
 The workflow runs the build, tests, privacy scan, `npm pack --dry-run`, and
-provenance-enabled public npm publication through GitHub Actions OIDC. Do not
-put npm tokens in this repository, an MCP configuration, or a prompt.
+provenance-enabled public npm publication through GitHub Actions OIDC, then
+smoke-tests the published MCP package through both bundled plugin manifests.
+Do not put npm tokens in this repository, an MCP configuration, or a prompt.
 
 ## First-run flow
 
-The setup tools read the Control Panel email from the local
-`ENABLE_BANKING_CONTROL_PANEL_EMAIL` environment variable. This is the only
-environment value required for first-run application registration. Application
-credentials and callback certificates are stored in the macOS login Keychain.
+The setup tools read the Control Panel email from local
+`ENABLE_BANKING_CONTROL_PANEL_EMAIL` configuration or reuse a Keychain
+identity. When neither exists, `connect_bank` and the authentication tools use
+MCP form elicitation if supported; otherwise configure the local environment.
+Application credentials and callback certificates are stored in the macOS
+login Keychain.
 
 The setup schemas default to personal `PRODUCTION` and use the Control Panel
-email as the Production privacy contact. They also supply the project's
-read-only description, privacy policy URL, and terms URL by default. Those
-values can be overridden in the setup arguments. To use `SANDBOX`, pass
-`"environment": "SANDBOX"` explicitly.
+email as the Production application's data-protection contact. They also
+supply the project's read-only description, privacy policy URL, and terms URL
+by default. Those values can be overridden in the setup arguments. To use
+`SANDBOX`, pass `"environment": "SANDBOX"` explicitly.
+
+### Check bank authorization state
+
+Call `connection_status` when the agent needs to distinguish MCP transport
+connectivity from a usable bank session. It verifies the stored provider
+session and reports application activation, consent, pending, or unavailable
+status without returning accounts, opening a browser, or starting consent.
+`connection: "connected"` means Enable Banking accepted the stored session.
+`control_panel_session` reports Control Panel login storage/expiry separately;
+it is not bank authorization. `status_unavailable` means the provider state
+could not be verified, not that the bank session is invalid.
 
 ### Recommended: guided connection
 
-Call `connect_bank` with `{}`. It is the primary user-facing setup tool and
-resumes whatever step is already complete:
+Call `connect_bank` as the primary guided setup. It reuses valid sessions,
+application credentials, and stored Control Panel identity before asking for
+anything.
 
-1. With no application, it starts local Control Panel authentication and
-   application registration.
-2. In Production, complete the dashboard account-link step when the browser
-   opens, then call `connect_bank` again.
-3. Provide only the two-letter country code, for example
-   `{"country": "IE"}`. The tool returns the available personal AIS banks.
-4. Call it again with the selected bank name, for example
-   `{"country": "IE", "aspsp_name": "Bank of Ireland"}`. It opens bank consent.
-5. After consent, call `connect_bank` with `{}` again to receive the
-   authorized accounts.
+1. Start with `connect_bank({})`. A valid bank session returns its authorized
+   accounts without asking for more input. If a new application is needed, the
+   server uses the personal Production defaults and asks for a Control Panel
+   email only when it is missing locally and the MCP client supports forms.
+2. The assistant owns all safe follow-up calls and status checks. The user
+   completes only a requested Control Panel email link, Production dashboard
+   account linking, bank sign-in/MFA and explicit consent, or a local
+   certificate-trust prompt.
+3. After the application is active, the server uses Enable Banking data before
+   asking. A supplied bank name is searched against the global personal-AIS
+   institution list; a unique exact match supplies its country automatically.
+   If multiple country matches remain, the form offers those bank/country
+   pairs.
+4. If no country is known, the server uses `GET /application` metadata. When
+   multiple countries are available or metadata is empty, it checks the global
+   personal-AIS catalog before prompting and filters to countries with listed
+   banks that the application supports. A single catalog country removes the
+   country question; without a supplied bank name, a sole catalog bank resolves
+   both fields. Otherwise, the form asks only for unresolved country/bank
+   choices. A sole bank in the selected country is used only when it does not
+   conflict with a supplied bank name. If the client cannot elicit, the tool
+   returns provider choices so the assistant can ask through its own interface
+   and resume `connect_bank` with the selection.
+5. Once the bank is resolved, `connect_bank` opens authorization and handles
+   the callback. The user completes bank sign-in/MFA and explicitly consents;
+   the assistant calls `connect_bank({})` afterward to verify the session and
+   return authorized accounts.
 
-`balances` is the default access profile. Use
-`"access_profile": "balances_and_transactions"` only when transaction history
-is required. The provider still requires a country and ASPSP for API consent;
-the guided tool removes the need to know the lower-level setup tools or exact
-call sequence.
+Email is not a lookup key for user, bank, or account information. With valid
+application credentials, `GET /application` returns application metadata and
+`GET /aspsps` lists institutions; personal account data requires an account ID
+from a user-authorized session. See the [Enable Banking API
+reference](https://enablebanking.com/docs/api/reference/) and [Production
+linked-accounts guide](https://enablebanking.com/docs/api/linked-accounts/);
+dashboard account linking does not itself authorize an API session.
 
-The Control Panel's Production linked-account restriction limits which
-accounts can be accessed, but it does not create the API session. The bank
-consent step remains required.
+The default access profile is balances. Request transaction history only when
+needed. A Production linked-account restriction limits which accounts may be
+accessed, but it does not create the API session: API bank consent remains
+required even when the user linked that same account in the dashboard.
 
 ### Advanced: register the application before choosing a bank
-
 
 Call `register_application` with:
 
@@ -275,10 +370,10 @@ For example:
 
 The tool authenticates the Control Panel, registers the application, stores
 its credentials locally, and returns. In Production it opens the application
-dashboard and reports `account_link`; activate the application there, then
-call `authorize_bank` with the target ASPSP name and two-letter country code.
-In SANDBOX, the application is ready for `authorize_bank` immediately.
-Use `setup_status` to inspect the registration state.
+dashboard and reports `account_link`; the user completes account linking there.
+Afterward, the assistant/MCP client resumes with `authorize_bank` when the bank
+and country are known. In SANDBOX, the assistant proceeds immediately.
+The assistant may poll `setup_status`; do not ask the user to rerun MCP tools.
 
 ### Advanced: register the application and authorize a bank in one flow
 
@@ -301,16 +396,18 @@ For example, the default Production call can contain:
 }
 ```
 
-This combined flow authenticates the Control Panel, registers the
-application, waits for Production account linking when required, starts the
-personal AIS consent flow, and stores the application and current session in
-the macOS Keychain. Complete the browser and bank steps, then use
-`setup_status`.
+This combined flow authenticates the Control Panel, registers the application,
+waits for Production account linking when required, starts the personal AIS
+consent flow, and stores the application and current session in the macOS
+Keychain. The MCP agent polls setup status and resumes all follow-up calls
+itself. The user completes only required browser actions.
 
 For an already configured application, `control_panel_authenticate` takes no
-arguments and reads the same local environment variable. `control_panel_status`
-reports only authentication state and expiry; it does not return the email or
-tokens.
+arguments and reuses the Keychain session, refreshing it silently when
+possible. If refresh is rejected, a new sign-in link uses a stored email,
+supported MCP form elicitation, or local `ENABLE_BANKING_CONTROL_PANEL_EMAIL`
+configuration. `control_panel_status` reports authentication state and expiry
+without returning the email or tokens.
 
 For an application registered with `register_application`, or any other
 already configured application, use `authorize_bank` to start a new personal

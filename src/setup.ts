@@ -118,6 +118,7 @@ export interface ApplicationSetupDependencies {
     credentials: EnableBankingCredentials,
   ) => EnableBankingClient;
   sleep?: (milliseconds: number) => Promise<void>;
+  now?: () => number;
 }
 
 export class ApplicationSetupFlow {
@@ -229,7 +230,7 @@ export class ApplicationSetupFlow {
       phase: "control_panel_auth",
       pending: true,
       message:
-        "A Control Panel sign-in email was requested; complete it to continue setup",
+        "Preparing Control Panel authentication; the MCP agent will monitor progress and resume setup. Complete an email link only if one is requested.",
     };
     return previous;
   }
@@ -250,7 +251,7 @@ export class ApplicationSetupFlow {
           appId: application.appId,
           dashboardUrl: APPLICATIONS_URL,
           message:
-            "Application registered; activate it in the dashboard, then call authorize_bank",
+            "Application registered; the user must activate it in the dashboard. The MCP agent continues once any missing country or bank choice is known.",
         });
         (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
       } else {
@@ -259,7 +260,7 @@ export class ApplicationSetupFlow {
           pending: false,
           appId: application.appId,
           message:
-            "Application registered; call authorize_bank to start bank consent",
+            "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
         });
       }
     } catch (error) {
@@ -293,10 +294,14 @@ export class ApplicationSetupFlow {
           appId: application.appId,
           dashboardUrl: APPLICATIONS_URL,
           message:
-            "Link the application to your own bank account in the dashboard; setup is waiting for activation",
+            "The user must link the application to their own bank in the dashboard; setup continues automatically when activation is detected.",
         });
         (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
-        await waitForActivation(client, this.dependencies.sleep);
+        await waitForActivation(
+          client,
+          this.dependencies.sleep,
+          this.dependencies.now,
+        );
       }
 
       const aspspName = await resolveAspspName(client, options);
@@ -317,12 +322,13 @@ export class ApplicationSetupFlow {
         appId: application.appId,
         authorizationUrl: authorization.authorization_url,
         message:
-          "Complete bank consent in the browser; setup will store the returned session automatically",
+          "Bank consent is open; the callback stores the session automatically after the user completes bank sign-in and consent.",
       });
       await waitForSession(
         this.dependencies.sessionStore,
         this.dependencies.authorizationFlow,
         this.dependencies.sleep,
+        this.dependencies.now,
       );
       this.update({
         phase: "complete",
@@ -346,10 +352,14 @@ export class ApplicationSetupFlow {
   ): Promise<StoredApplication> {
     const keyMaterial = await (this.dependencies.generateKeyMaterial ??
       generateKeyMaterial)();
+    const existingAuth = await this.dependencies.controlPanelAuthStore?.get();
     const controlPanelAuth = await this.dependencies.controlPanelAuth.authenticate(
       options.controlPanelEmail,
+      existingAuth,
     );
-    await this.dependencies.controlPanelAuthStore?.set(controlPanelAuth);
+    if (controlPanelAuth !== existingAuth) {
+      await this.dependencies.controlPanelAuthStore?.set(controlPanelAuth);
+    }
     this.update({
       phase: "registering_application",
       message: "Registering the Enable Banking application",
@@ -382,8 +392,8 @@ function applicationStatus(application: StoredApplication): SetupStatus {
     appId: application.appId,
     ...(production ? { dashboardUrl: APPLICATIONS_URL } : {}),
     message: production
-      ? "Application registered; activate it in the dashboard, then call authorize_bank"
-      : "Application registered; call authorize_bank to start bank consent",
+      ? "Application registered; the user must activate it in the dashboard, then the MCP agent resumes setup."
+      : "Application registered; the MCP agent continues with bank consent once the country and bank are known.",
   };
 }
 
@@ -531,15 +541,16 @@ function extractAspspNames(response: unknown): string[] {
 async function waitForActivation(
   client: EnableBankingClient,
   configuredSleep?: (milliseconds: number) => Promise<void>,
+  configuredNow: () => number = Date.now,
 ): Promise<void> {
-  const deadline = Date.now() + ACTIVATION_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  const deadline = configuredNow() + ACTIVATION_TIMEOUT_MS;
+  while (configuredNow() < deadline) {
     const application = await client.getApplication();
     if (application.active) return;
     await (configuredSleep ?? sleep)(ACTIVATION_POLL_MS);
   }
   throw new Error(
-    "The application is still inactive; complete dashboard account linking and retry setup_status",
+    "The application is still inactive; the user must complete dashboard account linking. The MCP agent can resume setup after activation.",
   );
 }
 
@@ -547,9 +558,10 @@ async function waitForSession(
   sessionStore: SessionStore,
   authorizationFlow: BankAuthorizationFlow,
   configuredSleep?: (milliseconds: number) => Promise<void>,
+  configuredNow: () => number = Date.now,
 ): Promise<void> {
-  const deadline = Date.now() + SESSION_TIMEOUT_MS;
-  while (Date.now() < deadline) {
+  const deadline = configuredNow() + SESSION_TIMEOUT_MS;
+  while (configuredNow() < deadline) {
     if (await sessionStore.get()) return;
     const status = authorizationFlow.status;
     if (!status.pending) {
