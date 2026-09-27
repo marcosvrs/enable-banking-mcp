@@ -68,6 +68,7 @@ type PendingAuthorization = {
 };
 
 export class BankAuthorizationFlow {
+  private starting = false;
   private pending?: PendingAuthorization;
   private lastError?: string;
 
@@ -82,7 +83,7 @@ export class BankAuthorizationFlow {
 
   get status(): { pending: boolean; lastError?: string } {
     return {
-      pending: Boolean(this.pending),
+      pending: this.starting || Boolean(this.pending),
       ...(this.lastError ? { lastError: this.lastError } : {}),
     };
   }
@@ -91,20 +92,27 @@ export class BankAuthorizationFlow {
     client: EnableBankingClient,
     options: BankAuthorizationOptions,
   ): Promise<AuthorizationStartResult> {
-    if (this.pending) {
+    if (this.starting || this.pending) {
       throw new Error("Bank authorization is already in progress");
     }
 
     const redirect = parseLoopbackRedirect(options.redirectUrl);
     const validUntil = parseValidUntil(options.validUntil);
     const state = randomBytes(32).toString("base64url");
-    const listener = await this.listenerFactory(
-      redirect,
-      state,
-      this.tlsOptionsProvider,
-    );
-    const pending = { listener };
-    this.pending = pending;
+    this.starting = true;
+    let listener: CallbackListener;
+    try {
+      listener = await this.listenerFactory(
+        redirect,
+        state,
+        this.tlsOptionsProvider,
+      );
+    } catch (error) {
+      this.starting = false;
+      throw error;
+    }
+    this.pending = { listener };
+    this.starting = false;
     this.lastError = undefined;
     try {
       const authorization = await client.startAuthorization({

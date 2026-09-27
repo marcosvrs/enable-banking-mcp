@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import { createServer as createNetServer } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
+
+const runtimeFixture = fileURLToPath(
+  new URL("./fixtures/server-runtime.mjs", import.meta.url),
+);
 
 const expectedTools = [
   "authorize_bank",
@@ -123,5 +130,518 @@ test("exposes documented tools with the local Control Panel email", async () => 
     assert.equal(paymentTool, undefined);
   } finally {
     await client.close();
+  }
+});
+
+function isolatedEnvironment(overrides = {}) {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (
+      name.startsWith("ENABLE_BANKING_") ||
+      /API[_-]?KEY/i.test(name) ||
+      name === "NODE_OPTIONS"
+    ) {
+      delete env[name];
+    }
+  }
+  return {
+    ...env,
+    ENABLE_BANKING_CONTROL_PANEL_EMAIL: "user@example.com",
+    MCP_TEST_KEYCHAIN: "{}",
+    ...overrides,
+  };
+}
+
+async function startIsolatedServer(overrides = {}) {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--import", runtimeFixture, "dist/server.js"],
+    cwd: process.cwd(),
+    env: isolatedEnvironment(overrides),
+  });
+  const client = new Client({
+    name: "enable-banking-mcp-runtime-test",
+    version: "0.1.0",
+  });
+  await client.connect(transport);
+  return { client, close: () => client.close() };
+}
+
+async function callTool(client, name, args = {}) {
+  return client.callTool({ name, arguments: args });
+}
+
+function toolValue(result) {
+  return JSON.parse(result.content[0].text);
+}
+
+async function availablePort() {
+  const listener = createNetServer();
+  await new Promise((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "localhost", resolve);
+  });
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  await new Promise((resolve, reject) => {
+    listener.close((error) => (error ? reject(error) : resolve()));
+  });
+  return address.port;
+}
+
+async function waitForToolValue(client, name, predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const result = await callTool(client, name);
+    if (!result.isError) {
+      const value = toolValue(result);
+      if (predicate(value)) return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`MCP tool ${name} did not reach the expected state`);
+}
+
+test("runs MCP handlers against isolated provider and Keychain boundaries", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_FAIL_ONCE: "delete-certificate,delete-session",
+  });
+  try {
+    const { client } = server;
+
+    const login = toolValue(await callTool(client, "control_panel_authenticate"));
+    assert.equal(login.authenticated, true);
+    assert.doesNotMatch(JSON.stringify(login), /user@example\.com/);
+
+    const controlPanelStatus = toolValue(
+      await callTool(client, "control_panel_status"),
+    );
+    assert.equal(controlPanelStatus.authenticated, true);
+    assert.equal(controlPanelStatus.expired, false);
+
+    const healthy = await callTool(client, "get_health");
+    assert.deepEqual(toolValue(healthy), { status: "ok" });
+
+    const healthError = await callTool(client, "get_health");
+    assert.equal(healthError.isError, true);
+    assert.match(healthError.content[0].text, /UPSTREAM_FAILURE/);
+    assert.match(healthError.content[0].text, /retry_after/);
+    assert.match(healthError.content[0].text, /\[local email redacted\]/);
+    assert.doesNotMatch(healthError.content[0].text, /user@example\.com/);
+
+    const networkError = await callTool(client, "get_health");
+    assert.equal(networkError.isError, true);
+    assert.match(networkError.content[0].text, /fixture health network failure/);
+
+    const setupStart = await callTool(client, "register_application", {
+      environment: "PRODUCTION",
+      redirect_url: `https://localhost:${await availablePort()}/callback`,
+    });
+    assert.equal(setupStart.isError, undefined);
+    const registered = await waitForToolValue(
+      client,
+      "setup_status",
+      (status) => status.phase === "account_link" && !status.pending,
+    );
+    assert.equal(registered.appId, "fixture-app-id");
+
+    const dashboard = toolValue(await callTool(client, "connect_bank"));
+    assert.equal(dashboard.status, "dashboard_action_required");
+
+    assert.equal(
+      toolValue(await callTool(client, "control_panel_logout")).authenticated,
+      false,
+    );
+    assert.equal(
+      toolValue(await callTool(client, "control_panel_status")).authenticated,
+      false,
+    );
+
+    const combinedSetup = await callTool(client, "setup_enable_banking", {
+      aspsp_name: "Fixture Bank",
+      country: "IE",
+    });
+    assert.equal(combinedSetup.isError, true);
+    assert.match(combinedSetup.content[0].text, /already stored/);
+
+    const inactiveStatus = toolValue(
+      await callTool(client, "connection_status"),
+    );
+    assert.equal(inactiveStatus.connection, "application_activation_required");
+    const activeStatus = toolValue(
+      await callTool(client, "connection_status"),
+    );
+    assert.equal(activeStatus.connection, "bank_authorization_required");
+    const directAuthorization = toolValue(
+      await callTool(client, "authorize_bank", {
+        aspsp_name: "Fixture Bank",
+        country: "IE",
+      }),
+    );
+    assert.equal(directAuthorization.status, "awaiting_user");
+    const directSession = await waitForToolValue(
+      client,
+      "get_session",
+      (value) => value.session_id === "fixture-session-id",
+    );
+    assert.equal(directSession.session_id, "fixture-session-id");
+    assert.equal(
+      toolValue(await callTool(client, "delete_session")).deleted,
+      true,
+    );
+    const authorization = toolValue(
+      await callTool(client, "connect_bank", {
+        country: "IE",
+        aspsp_name: "Fixture Bank",
+      }),
+    );
+    assert.equal(authorization.status, "awaiting_user");
+    const pendingStatus = toolValue(
+      await callTool(client, "connection_status"),
+    );
+    assert.equal(pendingStatus.connection, "awaiting_user");
+    const pendingSession = await callTool(client, "get_session");
+    assert.equal(pendingSession.isError, true);
+    assert.match(pendingSession.content[0].text, /authorization is pending/);
+
+    const session = await waitForToolValue(
+      client,
+      "get_session",
+      (value) => value.session_id === "fixture-session-id",
+    );
+    assert.equal(session.aspsp.name, "Fixture Bank");
+    const connected = toolValue(await callTool(client, "connect_bank"));
+    assert.equal(connected.status, "connected");
+    assert.deepEqual(connected.accounts, [{ uid: "fixture-account" }]);
+    assert.equal(
+      toolValue(await callTool(client, "connection_status")).connection,
+      "connected",
+    );
+
+    assert.equal(
+      toolValue(await callTool(client, "get_application")).name,
+      "Fixture application",
+    );
+    assert.equal(
+      toolValue(await callTool(client, "list_banks", { country: "IE" }))
+        .aspsps[0].name,
+      "Fixture Bank",
+    );
+    assert.equal(
+      toolValue(await callTool(client, "list_accounts")).accounts[0].uid,
+      "fixture-account",
+    );
+    assert.equal(
+      toolValue(
+        await callTool(client, "get_account_details", {
+          account_id: "fixture-account",
+        }),
+      ).name,
+      "Fixture account",
+    );
+    assert.equal(
+      toolValue(
+        await callTool(client, "get_account_balances", {
+          account_id: "fixture-account",
+        }),
+      ).balances[0].currency,
+      "EUR",
+    );
+    assert.equal(
+      toolValue(
+        await callTool(client, "get_account_transactions", {
+          account_id: "fixture-account",
+        }),
+      ).transactions[0].transaction_id,
+      "fixture-transaction",
+    );
+    assert.equal(
+      toolValue(
+        await callTool(client, "get_transaction_details", {
+          account_id: "fixture-account",
+          transaction_id: "fixture-transaction",
+        }),
+      ).amount,
+      "12.34",
+    );
+    for (const [name, arguments_] of [
+      ["get_account_details", { account_id: "foreign-account" }],
+      ["get_account_balances", { account_id: "foreign-account" }],
+      ["get_account_transactions", { account_id: "foreign-account" }],
+      [
+        "get_transaction_details",
+        {
+          account_id: "foreign-account",
+          transaction_id: "fixture-transaction",
+        },
+      ],
+    ]) {
+      const unauthorized = await callTool(client, name, arguments_);
+      assert.equal(unauthorized.isError, true);
+      assert.match(
+        unauthorized.content[0].text,
+        /not authorized by the current bank session/,
+      );
+    }
+
+    const deleted = toolValue(await callTool(client, "delete_session"));
+    assert.equal(deleted.deleted, true);
+    const noSession = await callTool(client, "get_session");
+    assert.equal(noSession.isError, true);
+    assert.match(noSession.content[0].text, /No Enable Banking session is stored/);
+
+    const failedAuthorization = toolValue(
+      await callTool(client, "authorize_bank", {
+        aspsp_name: "Fixture Bank",
+        country: "IE",
+        redirect_url: `https://localhost:${await availablePort()}/callback`,
+      }),
+    );
+    assert.equal(failedAuthorization.status, "awaiting_user");
+    const pendingRetry = await callTool(client, "get_session");
+    assert.equal(pendingRetry.isError, true);
+    assert.match(pendingRetry.content[0].text, /authorization is pending/);
+    let failedSession;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      failedSession = await callTool(client, "get_session");
+      if (failedSession.content[0].text.includes("Bank authorization failed")) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(failedSession.isError, true);
+    assert.match(failedSession.content[0].text, /Bank authorization failed/);
+
+    const failure = toolValue(await callTool(client, "clear_local_credentials"));
+    assert.equal(failure.cleared, false);
+    assert.deepEqual(failure.failed_items, [
+      "trusted_certificate",
+      "session",
+      "application",
+    ]);
+    const cleared = toolValue(await callTool(client, "clear_local_credentials"));
+    assert.equal(cleared.cleared, true);
+    assert.equal(cleared.trusted_certificate_removed, true);
+
+    const idle = toolValue(await callTool(client, "setup_status"));
+    assert.equal(idle.phase, "idle");
+    assert.equal(
+      toolValue(await callTool(client, "connection_status")).connection,
+      "setup_required",
+    );
+
+    const firstRun = toolValue(
+      await callTool(client, "connect_bank", { environment: "SANDBOX" }),
+    );
+    assert.equal(firstRun.status, "setup_started");
+    const secondRegistration = await waitForToolValue(
+      client,
+      "setup_status",
+      (status) => status.phase === "application_ready" && !status.pending,
+    );
+    assert.equal(secondRegistration.appId, "fixture-app-id");
+    assert.equal(
+      toolValue(await callTool(client, "clear_local_credentials")).cleared,
+      true,
+    );
+    assert.equal(
+      toolValue(await callTool(client, "control_panel_status")).authenticated,
+      false,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("blocks setup with environment credentials and reports partial configuration", async () => {
+  const configured = await startIsolatedServer({
+    ENABLE_BANKING_APP_ID: "fixture-app-id",
+    ENABLE_BANKING_PRIVATE_KEY: "not-a-real-key",
+  });
+  try {
+    const blocked = await callTool(configured.client, "register_application", {
+      environment: "SANDBOX",
+    });
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.content[0].text, /Existing Enable Banking environment credentials/);
+
+    const status = toolValue(
+      await callTool(configured.client, "connection_status"),
+    );
+    assert.equal(status.connection, "status_unavailable");
+    assert.equal(status.application, "configured");
+  } finally {
+    await configured.close();
+  }
+
+  const partial = await startIsolatedServer({
+    ENABLE_BANKING_APP_ID: "fixture-app-id",
+  });
+  try {
+    const status = toolValue(
+      await callTool(partial.client, "connection_status"),
+    );
+    assert.equal(status.connection, "status_unavailable");
+    assert.equal(status.application, "unknown");
+    const missingKey = await callTool(partial.client, "get_application");
+    assert.equal(missingKey.isError, true);
+    assert.match(missingKey.content[0].text, /ENABLE_BANKING_PRIVATE_KEY/);
+  } finally {
+    await partial.close();
+  }
+});
+
+test("clears a terminal environment session before refusing environment-based setup", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const server = await startIsolatedServer({
+    ENABLE_BANKING_APP_ID: "fixture-app-id",
+    ENABLE_BANKING_PRIVATE_KEY: privateKey
+      .export({ format: "pem", type: "pkcs8" })
+      .toString(),
+    ENABLE_BANKING_SESSION_ID: "terminal-session",
+  });
+  try {
+    const result = await callTool(server.client, "connect_bank", {
+      environment: "SANDBOX",
+    });
+    assert.equal(result.isError, true);
+    assert.match(
+      result.content[0].text,
+      /Existing Enable Banking environment credentials/,
+    );
+
+    const session = await callTool(server.client, "get_session");
+    assert.equal(session.isError, true);
+    assert.match(session.content[0].text, /No Enable Banking session is stored/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("returns local email setup instructions when the MCP client cannot elicit", async () => {
+  const server = await startIsolatedServer({
+    ENABLE_BANKING_CONTROL_PANEL_EMAIL: "",
+  });
+  try {
+    for (const [name, args] of [
+      ["connect_bank", { environment: "SANDBOX" }],
+      ["register_application", { environment: "SANDBOX" }],
+      ["control_panel_authenticate", {}],
+    ]) {
+      const result = await callTool(server.client, name, args);
+      assert.equal(result.isError, undefined);
+      const value = toolValue(result);
+      assert.equal(value.status, "needs_control_panel_email");
+      assert.match(value.required_input, /ENABLE_BANKING_CONTROL_PANEL_EMAIL/);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("returns a controlled error when the Keychain process has no pipes", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_FAIL_ONCE: "security-no-stdio",
+  });
+  try {
+    const result = await callTool(server.client, "control_panel_status");
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Required local credential command failed/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("returns a controlled error when the Keychain process fails to spawn", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_FAIL_ONCE: "security-spawn-error",
+  });
+  try {
+    const result = await callTool(server.client, "control_panel_status");
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Injected security spawn error/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("reports configuration-free sessions as unverifiable and requires an application", async () => {
+  const server = await startIsolatedServer({
+    ENABLE_BANKING_SESSION_ID: "fixture-session-id",
+  });
+  try {
+    const authorization = await callTool(server.client, "authorize_bank", {
+      aspsp_name: "Fixture Bank",
+    });
+    assert.equal(authorization.isError, true);
+    assert.match(
+      authorization.content[0].text,
+      /No Enable Banking application is configured/,
+    );
+
+    const status = toolValue(
+      await callTool(server.client, "connection_status"),
+    );
+    assert.equal(status.connection, "status_unavailable");
+    assert.equal(status.bank_session, "unknown");
+  } finally {
+    await server.close();
+  }
+});
+
+test("blocks authorization and credential cleanup while registration is pending", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_DELAY_REGISTRATION: "true",
+  });
+  try {
+    const registration = await callTool(server.client, "register_application", {
+      environment: "SANDBOX",
+    });
+    assert.equal(registration.isError, undefined);
+
+    const authorization = await callTool(server.client, "authorize_bank", {
+      aspsp_name: "Fixture Bank",
+    });
+    assert.equal(authorization.isError, true);
+    assert.match(
+      authorization.content[0].text,
+      /Enable Banking setup is already in progress/,
+    );
+
+    const cleanup = await callTool(server.client, "clear_local_credentials");
+    assert.equal(cleanup.isError, true);
+    assert.match(
+      cleanup.content[0].text,
+      /Cannot clear credentials while setup or authorization is pending/,
+    );
+
+    const status = await waitForToolValue(
+      server.client,
+      "setup_status",
+      (value) => value.phase === "application_ready" && !value.pending,
+    );
+    assert.equal(status.phase, "application_ready");
+  } finally {
+    await server.close();
+  }
+});
+test("clears recoverable state when the persisted application record is malformed", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_KEYCHAIN: JSON.stringify({
+      "enable-banking-mcp.application": "not-json",
+    }),
+  });
+  try {
+    const cleanup = toolValue(
+      await callTool(server.client, "clear_local_credentials"),
+    );
+    assert.equal(cleanup.cleared, false);
+    assert.deepEqual(cleanup.failed_items, ["trusted_certificate"]);
+
+    const retry = toolValue(
+      await callTool(server.client, "clear_local_credentials"),
+    );
+    assert.equal(retry.cleared, true);
+  } finally {
+    await server.close();
   }
 });

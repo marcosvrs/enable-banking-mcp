@@ -16,6 +16,8 @@ const zeroSha = /^0+$/;
 const publicControlPanelFirebaseWebKey =
   "AIzaSyBn8fvjRYQKslskRaO3cblUjmcyl5b9o-c"; // gitleaks:allow -- public Control Panel Firebase client key
 const safeEmailDomains = new Set([
+  "example",
+  "test",
   "example.com",
   "example.org",
   "example.net",

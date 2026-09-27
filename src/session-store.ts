@@ -1,3 +1,4 @@
+import { Entry } from "@napi-rs/keyring";
 import { spawn } from "node:child_process";
 
 export interface SecretStore {
@@ -13,22 +14,37 @@ type SecurityResult = {
   stdout: string;
   stderr: string;
 };
-type SecurityRunner = (
-  args: string[],
-  password?: string,
-) => Promise<SecurityResult>;
+type SecurityRunner = (args: string[]) => Promise<SecurityResult>;
+export type NativeKeyringEntry = {
+  getPassword(): string | null;
+  setPassword(value: string): void;
+  deletePassword(): boolean;
+};
+export type NativeKeyringEntryFactory = (
+  service: string,
+  account: string,
+) => NativeKeyringEntry;
 
 const SECURITY_COMMAND = "/usr/bin/security";
 const DEFAULT_ACCOUNT = process.env.USER?.trim() || "default";
 export const DEFAULT_SESSION_SERVICE = "enable-banking-mcp";
 export const DEFAULT_APPLICATION_SERVICE = "enable-banking-mcp.application";
+const NATIVE_SERVICE_SUFFIX = ".native";
+let nativeKeyringEntryFactory: NativeKeyringEntryFactory = (
+  serviceName,
+  username,
+) => new Entry(serviceName, username);
 
-// Passing the value after `-w` avoids the interactive prompt used when `-w` is last.
-function runSecurity(args: string[], password?: string): Promise<SecurityResult> {
-  const commandArgs =
-    password === undefined ? args : [...args, password];
+// Allows isolated runtimes to inject an in-memory native keyring implementation.
+export function setNativeKeyringEntryFactory(
+  factory: NativeKeyringEntryFactory,
+): void {
+  nativeKeyringEntryFactory = factory;
+}
+
+function runSecurity(args: string[]): Promise<SecurityResult> {
   const { promise, resolve, reject } = Promise.withResolvers<SecurityResult>();
-  const child = spawn(SECURITY_COMMAND, commandArgs, {
+  const child = spawn(SECURITY_COMMAND, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -56,24 +72,62 @@ function runSecurity(args: string[], password?: string): Promise<SecurityResult>
 
 const ENCODED_SECRET_PREFIX = "enable-banking-mcp:v1:";
 const CHUNK_INDEX_PREFIX = "enable-banking-mcp:chunks:v1:";
+const CHUNK_INDEX_V2_PREFIX = "enable-banking-mcp:chunks:v2:";
 const CHUNK_SERVICE_SUFFIX = ".part.";
-// Keep individual Keychain values short for compatibility with existing records.
-const KEYCHAIN_CHUNK_SIZE = 80;
+const RETIRED_SERVICE_SUFFIX = ".retired";
+const PENDING_SERVICE_SUFFIX = ".pending";
 const MAX_KEYCHAIN_CHUNKS = 256;
+
+type ChunkGeneration = { id: string; count: number };
+type ChunkManifest = { active: ChunkGeneration; retired: ChunkGeneration[] };
 
 function chunkService(service: string, index: number): string {
   return `${service}${CHUNK_SERVICE_SUFFIX}${index}`;
 }
 
-function parseChunkCount(value: string, label: string): number | undefined {
-  if (!value.startsWith(CHUNK_INDEX_PREFIX)) {
-    return undefined;
+function generationChunkService(
+  service: string,
+  generation: ChunkGeneration,
+  index: number,
+): string {
+  return generation.id === "legacy"
+    ? chunkService(service, index)
+    : `${service}${CHUNK_SERVICE_SUFFIX}${generation.id}.${index}`;
+}
+
+function parseManifest(value: string, label: string): ChunkManifest | undefined {
+  if (value.startsWith(CHUNK_INDEX_V2_PREFIX)) {
+    const [activeText, ...retiredTexts] = value
+      .slice(CHUNK_INDEX_V2_PREFIX.length)
+      .split(";");
+    const parseGeneration = (text: string | undefined): ChunkGeneration => {
+      const match = text?.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
+      const count = match ? Number(match[2]) : NaN;
+      if (
+        !match ||
+        !Number.isInteger(count) ||
+        count > MAX_KEYCHAIN_CHUNKS
+      ) {
+        throw new Error(`Stored Enable Banking ${label} is invalid`);
+      }
+      return { id: match[1], count };
+    };
+    return {
+      active: parseGeneration(activeText),
+      retired: retiredTexts.filter(Boolean).map(parseGeneration),
+    };
   }
-  const count = Number(value.slice(CHUNK_INDEX_PREFIX.length));
-  if (!Number.isInteger(count) || count < 1 || count > MAX_KEYCHAIN_CHUNKS) {
-    throw new Error(`Stored Enable Banking ${label} is invalid`);
+  if (value.startsWith(CHUNK_INDEX_PREFIX)) {
+    const count = Number(value.slice(CHUNK_INDEX_PREFIX.length));
+    if (!Number.isInteger(count) || count < 1 || count > MAX_KEYCHAIN_CHUNKS) {
+      throw new Error(`Stored Enable Banking ${label} is invalid`);
+    }
+    return {
+      active: { id: "legacy", count },
+      retired: [],
+    };
   }
-  return count;
+  return undefined;
 }
 
 function decodeStoredSecret(value: string, label: string): string {
@@ -97,12 +151,21 @@ function decodeStoredSecret(value: string, label: string): string {
 }
 
 export class MacKeychainSecretStore implements SecretStore {
+  private readonly nativeEntry: NativeKeyringEntry;
+
   constructor(
     private readonly service: string,
     private readonly account = DEFAULT_ACCOUNT,
     private readonly label = "secret",
     private readonly securityRunner: SecurityRunner = runSecurity,
-  ) {}
+    nativeEntryFactory: NativeKeyringEntryFactory = nativeKeyringEntryFactory,
+  ) {
+    // A distinct service avoids inheriting ACLs from legacy `security` items.
+    this.nativeEntry = nativeEntryFactory(
+      `${service}${NATIVE_SERVICE_SUFFIX}`,
+      account,
+    );
+  }
 
   private async readRaw(service: string): Promise<string | undefined> {
     const result = await this.securityRunner([
@@ -125,26 +188,6 @@ export class MacKeychainSecretStore implements SecretStore {
     return result.stdout.trim();
   }
 
-  private async writeRaw(service: string, value: string): Promise<void> {
-    const result = await this.securityRunner(
-      [
-        "add-generic-password",
-        "-a",
-        this.account,
-        "-s",
-        service,
-        "-U",
-        "-T",
-        SECURITY_COMMAND,
-        "-w",
-      ],
-      value,
-    );
-    if (result.code !== 0) {
-      throw new Error(`Unable to store the Enable Banking ${this.label} in Keychain`);
-    }
-  }
-
   private async deleteRaw(service: string): Promise<void> {
     const result = await this.securityRunner([
       "delete-generic-password",
@@ -162,19 +205,80 @@ export class MacKeychainSecretStore implements SecretStore {
     }
   }
 
-  async get(): Promise<string | undefined> {
+  private async readManifest(): Promise<ChunkManifest | undefined> {
     const value = await this.readRaw(this.service);
-    if (value === undefined) {
-      return undefined;
-    }
-    const chunkCount = parseChunkCount(value, this.label);
-    if (chunkCount === undefined) {
-      return decodeStoredSecret(value, this.label);
-    }
+    return value === undefined ? undefined : parseManifest(value, this.label);
+  }
 
+  private async deleteGeneration(generation: ChunkGeneration): Promise<void> {
+    for (let index = 0; index < generation.count; index += 1) {
+      await this.deleteRaw(
+        generationChunkService(this.service, generation, index),
+      );
+    }
+  }
+
+  private async recoverPendingWrite(): Promise<void> {
+    const pendingService = `${this.service}${PENDING_SERVICE_SUFFIX}`;
+    const pendingValue = await this.readRaw(pendingService);
+    if (pendingValue === undefined) return;
+    const match = pendingValue.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
+    const count = match ? Number(match[2]) : NaN;
+    if (
+      !match ||
+      !Number.isInteger(count) ||
+      count > MAX_KEYCHAIN_CHUNKS
+    ) {
+      throw new Error(`Stored Enable Banking ${this.label} is invalid`);
+    }
+    const pending = { id: match[1], count };
+    const manifest = await this.readManifest();
+    if (manifest?.active.id !== pending.id) {
+      await this.deleteGeneration(pending);
+    }
+    await this.deleteRaw(pendingService);
+  }
+
+  private async recoverRetiredWrite(): Promise<void> {
+    const retiredService = `${this.service}${RETIRED_SERVICE_SUFFIX}`;
+    const retiredValue = await this.readRaw(retiredService);
+    const manifest = await this.readManifest().catch((error: unknown) => {
+      if (retiredValue !== undefined) throw error;
+      return undefined;
+    });
+    if (retiredValue !== undefined) {
+      const match = retiredValue.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
+      const count = match ? Number(match[2]) : NaN;
+      if (
+        !match ||
+        !Number.isInteger(count) ||
+        count > MAX_KEYCHAIN_CHUNKS
+      ) {
+        throw new Error(`Stored Enable Banking ${this.label} is invalid`);
+      }
+      const retired = { id: match[1], count };
+      if (manifest?.active.id !== retired.id) {
+        await this.deleteGeneration(retired);
+      }
+      await this.deleteRaw(retiredService);
+    }
+    if (manifest?.retired.length) {
+      for (const generation of manifest.retired) {
+        await this.deleteGeneration(generation);
+      }
+    }
+  }
+
+  private async readLegacy(): Promise<string | undefined> {
+    const value = await this.readRaw(this.service);
+    if (value === undefined) return undefined;
+    const manifest = parseManifest(value, this.label);
+    if (manifest === undefined) return decodeStoredSecret(value, this.label);
     const chunks = await Promise.all(
-      Array.from({ length: chunkCount }, (_, index) =>
-        this.readRaw(chunkService(this.service, index)),
+      Array.from({ length: manifest.active.count }, (_, index) =>
+        this.readRaw(
+          generationChunkService(this.service, manifest.active, index),
+        ),
       ),
     );
     const encoded = chunks
@@ -191,57 +295,9 @@ export class MacKeychainSecretStore implements SecretStore {
     return decodeStoredSecret(encoded, this.label);
   }
 
-  private async rollbackFailedSet(
-    previous: string | undefined,
-    previousChunkCount: number | undefined,
-    previousChunks: Array<string | undefined>,
-    newChunkCount: number,
-    originalError: unknown,
-  ): Promise<never> {
-    const rollbackOperations: Promise<void>[] = [];
-    if (previousChunkCount === undefined) {
-      rollbackOperations.push(
-        ...Array.from({ length: newChunkCount }, (_, index) =>
-          this.deleteRaw(chunkService(this.service, index)),
-        ),
-      );
-    } else {
-      rollbackOperations.push(
-        ...previousChunks.map((chunk, index) =>
-          chunk === undefined
-            ? this.deleteRaw(chunkService(this.service, index))
-            : this.writeRaw(chunkService(this.service, index), chunk),
-        ),
-      );
-      if (newChunkCount > previousChunkCount) {
-        rollbackOperations.push(
-          ...Array.from(
-            { length: newChunkCount - previousChunkCount },
-            (_, index) =>
-              this.deleteRaw(
-                chunkService(this.service, previousChunkCount + index),
-              ),
-          ),
-        );
-      }
-    }
-    rollbackOperations.push(
-      previous === undefined
-        ? this.deleteRaw(this.service)
-        : this.writeRaw(this.service, previous),
-    );
-
-    const rollbackResults = await Promise.allSettled(rollbackOperations);
-    const rollbackFailures = rollbackResults.flatMap((result) =>
-      result.status === "rejected" ? [result.reason] : [],
-    );
-    if (rollbackFailures.length > 0) {
-      throw new AggregateError(
-        [originalError, ...rollbackFailures],
-        `Unable to roll back failed Enable Banking ${this.label} storage`,
-      );
-    }
-    throw originalError;
+  async get(): Promise<string | undefined> {
+    const value = this.nativeEntry.getPassword();
+    return value === null ? this.readLegacy() : value;
   }
 
   async set(value: string): Promise<void> {
@@ -249,72 +305,107 @@ export class MacKeychainSecretStore implements SecretStore {
     if (!normalized) {
       throw new Error(`Cannot store an empty Enable Banking ${this.label}`);
     }
-    const encoded =
-      `${ENCODED_SECRET_PREFIX}${Buffer.from(normalized, "utf8").toString("base64")}`;
-    const chunks: string[] = [];
-    for (let offset = 0; offset < encoded.length; offset += KEYCHAIN_CHUNK_SIZE) {
-      chunks.push(encoded.slice(offset, offset + KEYCHAIN_CHUNK_SIZE));
-    }
-    if (chunks.length > MAX_KEYCHAIN_CHUNKS) {
-      throw new Error(`Enable Banking ${this.label} is too large for Keychain storage`);
-    }
+    // Commit the new record first: legacy cleanup failure cannot hide it.
+    this.nativeEntry.setPassword(normalized);
+    await this.recoverPendingWrite();
+    await this.recoverRetiredWrite();
+    await this.clearLegacy();
+  }
 
-    const previous = await this.readRaw(this.service);
-    const previousChunkCount =
-      previous === undefined ? undefined : parseChunkCount(previous, this.label);
-    const previousChunks =
-      previousChunkCount === undefined
-        ? []
-        : await Promise.all(
-            Array.from({ length: previousChunkCount }, (_, index) =>
-              this.readRaw(chunkService(this.service, index)),
-            ),
-          );
-    try {
-      const chunkWriteResults = await Promise.allSettled(
-        chunks.map((chunk, index) =>
-          this.writeRaw(chunkService(this.service, index), chunk),
-        ),
-      );
-      const chunkWriteFailure = chunkWriteResults.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected",
-      );
-      if (chunkWriteFailure) throw chunkWriteFailure.reason;
-      // Commit the index last so readers never observe partial new values.
-      await this.writeRaw(
-        this.service,
-        `${CHUNK_INDEX_PREFIX}${chunks.length}`,
-      );
-    } catch (error) {
-      await this.rollbackFailedSet(
-        previous,
-        previousChunkCount,
-        previousChunks,
-        chunks.length,
-        error,
-      );
+  private async clearLegacy(): Promise<void> {
+    const errors: unknown[] = [];
+    const attempt = async (operation: () => Promise<void>) => {
+      try {
+        await operation();
+      } catch (error) {
+        errors.push(error);
+      }
+    };
+    const value = await this.readRaw(this.service).catch((error: unknown) => {
+      errors.push(error);
+      return undefined;
+    });
+    let manifest: ChunkManifest | undefined;
+    if (value !== undefined) {
+      try {
+        manifest = parseManifest(value, this.label);
+      } catch {
+        // Malformed records are still removable below.
+      }
     }
-    if (previousChunkCount !== undefined && previousChunkCount > chunks.length) {
-      await Promise.all(
-        Array.from(
-          { length: previousChunkCount - chunks.length },
-          (_, index) =>
-            this.deleteRaw(chunkService(this.service, chunks.length + index)),
-        ),
+    const malformedManifest =
+      value !== undefined &&
+      (value.startsWith(CHUNK_INDEX_PREFIX) ||
+        value.startsWith(CHUNK_INDEX_V2_PREFIX)) &&
+      manifest === undefined;
+    if (!malformedManifest) {
+      await attempt(() => this.recoverRetiredWrite());
+      await attempt(() => this.recoverPendingWrite());
+    }
+    if (manifest) {
+      await attempt(() => this.deleteGeneration(manifest.active));
+      for (const generation of manifest.retired) {
+        await attempt(() => this.deleteGeneration(generation));
+      }
+    } else if (value?.startsWith(CHUNK_INDEX_PREFIX)) {
+      // Malformed v1 indexes cannot identify their chunks; remove every bounded legacy slot.
+      for (let index = 0; index < MAX_KEYCHAIN_CHUNKS; index += 1) {
+        await attempt(() => this.deleteRaw(chunkService(this.service, index)));
+      }
+    } else if (value?.startsWith(CHUNK_INDEX_V2_PREFIX)) {
+      const generationEntries = value
+        .slice(CHUNK_INDEX_V2_PREFIX.length)
+        .split(";");
+      const generations = generationEntries
+        .map((item) => item.match(/^([a-zA-Z0-9-]+),/))
+        .filter((match): match is RegExpMatchArray => match !== null)
+        .map((match) => match[1]);
+      if (generations.length !== generationEntries.length) {
+        errors.push(new Error("Unable to identify every legacy chunk generation"));
+      }
+      for (const generation of generations) {
+        await attempt(async () => {
+          for (let index = 0; index < MAX_KEYCHAIN_CHUNKS; index += 1) {
+            await this.deleteRaw(
+              `${this.service}${CHUNK_SERVICE_SUFFIX}${generation}.${index}`,
+            );
+          }
+        });
+      }
+    }
+    if (errors.length === 0) {
+      await attempt(() =>
+        this.deleteRaw(`${this.service}${PENDING_SERVICE_SUFFIX}`),
+      );
+      await attempt(() =>
+        this.deleteRaw(`${this.service}${RETIRED_SERVICE_SUFFIX}`),
+      );
+      await attempt(() => this.deleteRaw(this.service));
+    }
+    if (errors.length) {
+      throw new AggregateError(
+        errors,
+        `Unable to clear legacy Enable Banking ${this.label} from Keychain`,
       );
     }
   }
 
   async clear(): Promise<void> {
-    const value = await this.readRaw(this.service);
-    const chunkCount =
-      value === undefined ? undefined : parseChunkCount(value, this.label);
-    await this.deleteRaw(this.service);
-    if (chunkCount !== undefined) {
-      await Promise.all(
-        Array.from({ length: chunkCount }, (_, index) =>
-          this.deleteRaw(chunkService(this.service, index)),
-        ),
+    const errors: unknown[] = [];
+    try {
+      this.nativeEntry.deletePassword();
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await this.clearLegacy();
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length) {
+      throw new AggregateError(
+        errors,
+        `Unable to clear the Enable Banking ${this.label} from Keychain`,
       );
     }
   }

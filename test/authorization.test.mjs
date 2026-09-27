@@ -383,6 +383,47 @@ test("rejects concurrent bank consent and permits retry after a denied callback"
   assert.equal(listenerCalls, 2);
   assert.equal(authorizationCalls, 2);
 });
+test("reserves bank authorization while callback listener creation is pending", async () => {
+  const listenerReady = Promise.withResolvers();
+  const listenerGate = Promise.withResolvers();
+  let listenerCalls = 0;
+  const completion = Promise.withResolvers();
+  const flow = new BankAuthorizationFlow(
+    new MemorySessionStore(),
+    () => {},
+    async () => {
+      listenerCalls += 1;
+      listenerReady.resolve();
+      return listenerGate.promise;
+    },
+  );
+  const client = {
+    async startAuthorization() {
+      return { url: "https://bank.example/authorize" };
+    },
+    async createSession() {
+      return { session_id: "session-id" };
+    },
+  };
+  const options = {
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+  };
+
+  const first = flow.start(client, options);
+  await listenerReady.promise;
+  assert.equal(flow.status.pending, true);
+  await assert.rejects(flow.start(client, options), /already in progress/);
+  assert.equal(listenerCalls, 1);
+
+  listenerGate.resolve({
+    wait: completion.promise,
+    close: async () => {},
+  });
+  await first;
+  completion.resolve("consent-code");
+});
 
 test("reports callback exchange and session-store failures after closing the listener", async () => {
   for (const scenario of [

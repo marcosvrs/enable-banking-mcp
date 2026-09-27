@@ -124,6 +124,25 @@ test("lists all ASPSPs when country is omitted", async () => {
   assert.equal(new URL(requestedUrl).searchParams.get("service"), "AIS");
   assert.equal(new URL(requestedUrl).searchParams.get("country"), null);
 });
+
+test("rejects invalid bank-list countries before requesting provider data", async () => {
+  const { privateKey } = testKey();
+  let requestCount = 0;
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => {
+      requestCount += 1;
+      return Response.json({ aspsps: [] });
+    },
+  );
+
+  await assert.rejects(
+    client.listBanks("FIN"),
+    /country must be a two-letter ISO 3166-1 code/,
+  );
+  assert.equal(requestCount, 0);
+});
+
 function testKey() {
   return generateKeyPairSync("rsa", {
     modulusLength: 2048,
@@ -211,6 +230,34 @@ test("paginates transactions and stops at the requested limit", async () => {
   assert.equal(limited.hasMore, true);
   assert.equal(limited.continuationKey, "next");
 });
+test("returns every transaction from a provider page that exceeds the client limit", async () => {
+  const { privateKey } = testKey();
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () =>
+      new Response(
+        JSON.stringify({
+          transactions: [{ id: "first" }, { id: "second" }, { id: "third" }],
+          continuation_key: "next",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+  );
+
+  const result = await client.getAccountTransactions("account-uid", {
+    dateFrom: "2026-08-01",
+    limit: 2,
+  });
+
+  assert.deepEqual(result.transactions, [
+    { id: "first" },
+    { id: "second" },
+    { id: "third" },
+  ]);
+  assert.equal(result.hasMore, true);
+  assert.equal(result.continuationKey, "next");
+});
+
 
 test("rejects date_to without date_from before making a request", async () => {
   const { privateKey } = testKey();
@@ -440,4 +487,243 @@ test("rejects invalid authorization expiry before requesting authorization", asy
     }),
     /access\.valid_until must be a future RFC3339 date-time/,
   );
+});
+test("rejects a repeated provider continuation key instead of looping", async () => {
+  const { privateKey } = testKey();
+  const requests = [];
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async (url) => {
+      requests.push(String(url));
+      return new Response(
+        JSON.stringify({
+          transactions: [{ transaction_id: "transaction-1" }],
+          continuation_key: "cursor-a",
+        }),
+        { status: 200 },
+      );
+    },
+  );
+
+  await assert.rejects(
+    client.getAccountTransactions("account-1", {
+      limit: 10,
+      continuationKey: "cursor-a",
+    }),
+    /provider returned a repeated continuation key/,
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(
+    new URL(requests[0]).searchParams.get("continuation_key"),
+    "cursor-a",
+  );
+});
+
+test("returns an empty first transaction page when the provider omits transactions", async () => {
+  const { privateKey } = testKey();
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => new Response(JSON.stringify({}), { status: 200 }),
+  );
+
+  assert.deepEqual(
+    await client.getAccountTransactions("account-1", { limit: 1 }),
+    { transactions: [], pages: 1, hasMore: false },
+  );
+});
+test("rejects empty and malformed base64 DER private keys", () => {
+  assert.throws(
+    () => privateKeyFromValue(" \n "),
+    /ENABLE_BANKING_PRIVATE_KEY must be PEM or base64-encoded DER/,
+  );
+  assert.throws(
+    () => privateKeyFromValue("not-a-private-key"),
+    /ENABLE_BANKING_PRIVATE_KEY is not a readable RSA private key:/,
+  );
+});
+
+test("rejects invalid authorization fields before making a provider request", async () => {
+  const { privateKey } = testKey();
+  let requests = 0;
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => {
+      requests += 1;
+      throw new Error("unexpected provider request");
+    },
+  );
+  const validRequest = {
+    aspsp: { name: "Example Bank", country: "IE" },
+    access: {
+      balances: true,
+      transactions: false,
+      valid_until: "2099-12-01T00:00:00.000Z",
+    },
+    state: "A".repeat(43),
+    redirect_url: "https://localhost:8765/callback",
+    psu_type: "personal",
+  };
+  const invalidRequests = [
+    [
+      { ...validRequest, aspsp: { ...validRequest.aspsp, country: "I" } },
+      /country must be a two-letter ISO 3166-1 code/,
+    ],
+    [
+      { ...validRequest, aspsp: { ...validRequest.aspsp, name: "  " } },
+      /aspsp\.name is required/,
+    ],
+    [{ ...validRequest, state: "invalid" }, /state must be a 256-bit base64url value/],
+    [
+      {
+        ...validRequest,
+        access: { ...validRequest.access, balances: "true" },
+      },
+      /access\.balances and access\.transactions must be boolean/,
+    ],
+    [
+      {
+        ...validRequest,
+        access: { ...validRequest.access, transactions: 0 },
+      },
+      /access\.balances and access\.transactions must be boolean/,
+    ],
+  ];
+
+  for (const [request, error] of invalidRequests) {
+    await assert.rejects(client.startAuthorization(request), error);
+  }
+  assert.equal(requests, 0);
+});
+
+test("rejects an empty authorization code before exchanging it", async () => {
+  const { privateKey } = testKey();
+  let requests = 0;
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => {
+      requests += 1;
+      throw new Error("unexpected provider request");
+    },
+  );
+
+  await assert.rejects(client.createSession(" \n "), /authorization code is required/);
+  assert.equal(requests, 0);
+});
+
+test("rejects malformed and unsafe provider authorization URLs", async () => {
+  const { privateKey } = testKey();
+  const invalidUrls = [
+    undefined,
+    "not a URL",
+    "http://bank.example/authorize",
+    "https://user:password@bank.example/authorize",
+  ];
+
+  for (const url of invalidUrls) {
+    const client = new EnableBankingClient(
+      { appId: "app-id", privateKey },
+      async () =>
+        new Response(JSON.stringify({ url }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    await assert.rejects(
+      client.startAuthorization({
+        aspsp: { name: "Example Bank", country: "IE" },
+        access: {
+          balances: true,
+          transactions: false,
+          valid_until: "2099-12-01T00:00:00.000Z",
+        },
+        state: "A".repeat(43),
+        redirect_url: "https://localhost:8765/callback",
+        psu_type: "personal",
+      }),
+      /Enable Banking returned an invalid authorization URL/,
+    );
+  }
+});
+
+test("uses provider error fallbacks and retains only structured API details", async () => {
+  const { privateKey } = testKey();
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () =>
+      new Response(
+        JSON.stringify({
+          code: 502,
+          error: "UPSTREAM_FAILURE",
+          detail: "Provider gateway unavailable",
+        }),
+        { status: 502, statusText: "Bad Gateway" },
+      ),
+  );
+
+  await assert.rejects(client.getApplication(), (error) => {
+    assert.ok(error instanceof EnableBankingApiError);
+    assert.equal(
+      error.message,
+      "Enable Banking API 502: UPSTREAM_FAILURE",
+    );
+    assert.deepEqual(error.details, {
+      code: 502,
+      error: "UPSTREAM_FAILURE",
+      detail: "Provider gateway unavailable",
+    });
+    return true;
+  });
+
+  const emptyErrorClient = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => new Response("", { status: 503, statusText: "Service Unavailable" }),
+  );
+  await assert.rejects(emptyErrorClient.getApplication(), (error) => {
+    assert.ok(error instanceof EnableBankingApiError);
+    assert.equal(error.message, "Enable Banking API 503: Service Unavailable");
+    assert.deepEqual(error.details, {});
+    return true;
+  });
+
+  const genericFallbackClient = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => new Response("", { status: 502, statusText: "" }),
+  );
+  await assert.rejects(genericFallbackClient.getApplication(), (error) => {
+    assert.ok(error instanceof EnableBankingApiError);
+    assert.equal(error.message, "Enable Banking API 502: request failed");
+    assert.deepEqual(error.details, {});
+    return true;
+  });
+
+  await assert.rejects(
+    getHealth(async () =>
+      new Response("", { status: 503, statusText: "Health unavailable" }),
+    ),
+    (error) =>
+      error instanceof EnableBankingApiError &&
+      error.message === "Enable Banking API 503: Health unavailable" &&
+      Object.keys(error.details).length === 0,
+  );
+});
+
+test("preserves malformed JSON response text as the observable response message", async () => {
+  const { privateKey } = testKey();
+  const client = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () => new Response("{broken", { status: 200 }),
+  );
+  assert.deepEqual(await client.getApplication(), { message: "{broken" });
+
+  const failedClient = new EnableBankingClient(
+    { appId: "app-id", privateKey },
+    async () =>
+      new Response("{broken", { status: 502, statusText: "Bad Gateway" }),
+  );
+  await assert.rejects(failedClient.getApplication(), (error) => {
+    assert.ok(error instanceof EnableBankingApiError);
+    assert.equal(error.message, "Enable Banking API 502: {broken");
+    assert.deepEqual(error.details, {});
+    return true;
+  });
 });

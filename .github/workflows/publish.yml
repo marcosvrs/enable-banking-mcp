@@ -63,7 +63,12 @@ jobs:
           if-no-files-found: ignore
 
       - name: Publish package through npm Trusted Publishing
-        run: npm publish --access public --provenance
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            npm publish --access public --tag beta --provenance
+          else
+            npm publish --access public --provenance
+          fi
 
       - name: Smoke-test published MCP package
         env:

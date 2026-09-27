@@ -107,6 +107,7 @@ export function privateKeyFromValue(value: string): KeyObject {
   try {
     der = Buffer.from(normalized, "base64");
   } catch {
+    /* c8 ignore next 4 -- Base64 decoding only fails on runtime allocation or resource errors. */
     throw new Error(
       "ENABLE_BANKING_PRIVATE_KEY must be PEM or base64-encoded DER",
     );
@@ -312,26 +313,21 @@ export class EnableBankingClient {
       pages += 1;
 
       const pageTransactions = page.transactions ?? [];
-      const available = query.limit - transactions.length;
-      const count = Math.min(pageTransactions.length, available);
-      for (let index = 0; index < count; index += 1) {
-        transactions.push(pageTransactions[index]);
-      }
+      // The limit controls whether another page is fetched, not truncation of
+      // an already-fetched provider page. Truncating here would lose its tail.
+      transactions.push(...pageTransactions);
 
       const providerContinuation = page.continuation_key ?? undefined;
       if (providerContinuation && providerContinuation === continuationKey) {
         throw new Error("provider returned a repeated continuation key");
       }
-      const pageHasUnreturnedTransactions =
-        pageTransactions.length > available;
-      hasMore = Boolean(providerContinuation) || pageHasUnreturnedTransactions;
+      hasMore = Boolean(providerContinuation);
       if (providerContinuation) nextContinuationKey = providerContinuation;
       continuationKey =
         transactions.length >= query.limit
           ? undefined
           : providerContinuation;
     } while (continuationKey);
-
     return {
       transactions,
       pages,

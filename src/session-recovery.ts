@@ -20,7 +20,7 @@ export async function recoverConfiguredSession<T>(
   } catch (error) {
     if (!isTerminalSessionError(error)) throw error;
     if (!hasStoredSession) {
-      if (hasEnvironmentSession) options.clearEnvironmentSession();
+      options.clearEnvironmentSession();
       return undefined;
     }
 

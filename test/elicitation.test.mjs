@@ -111,3 +111,23 @@ test("URL elicitation support alone does not claim form input support", async ()
   assert.deepEqual(result, { status: "unsupported" });
   assert.equal(requested, undefined);
 });
+test("legacy elicitation capability uses the protocol request and rejects non-string content", async () => {
+  let sentRequest;
+  const result = await elicitFormString(
+    {
+      getClientCapabilities: () => ({ elicitation: {} }),
+      async request(request, schema) {
+        sentRequest = { request, schema };
+        return { action: "accept", content: { value: 42 } };
+      },
+    },
+    "value",
+    "Choose a value",
+    { type: "string", title: "Value" },
+  );
+
+  assert.deepEqual(result, { status: "invalid" });
+  assert.equal(sentRequest.request.method, "elicitation/create");
+  assert.equal(sentRequest.request.params.mode, "form");
+  assert.deepEqual(sentRequest.request.params.requestedSchema.required, ["value"]);
+});

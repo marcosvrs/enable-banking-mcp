@@ -130,12 +130,12 @@ export async function inspectConnectionStatus(
     return unavailable(input, controlPanelSession, bankSession);
   }
 
-  const environment = application.environment;
+  const environment = application.environment ?? input.configuredEnvironment;
   const environmentField =
     environment === "PRODUCTION" || environment === "SANDBOX"
       ? { application_environment: environment }
       : {};
-  if (!application.active) {
+  if (!application.active && environment === "PRODUCTION") {
     return {
       connection: "application_activation_required",
       application: "inactive",
@@ -144,6 +144,18 @@ export async function inspectConnectionStatus(
       ...environmentField,
       next_action:
         "The user must link the application to their own bank in the dashboard; after that, the MCP agent should resume connect_bank itself.",
+    };
+  }
+
+  if (!application.active) {
+    return {
+      connection: "bank_authorization_required",
+      application: "inactive",
+      bank_session: bankSession,
+      control_panel_session: controlPanelSession,
+      ...environmentField,
+      next_action:
+        "Use known country/bank context and provider bank lists first; ask only for a genuinely missing choice, then let the MCP agent continue.",
     };
   }
 

@@ -4,7 +4,12 @@ import test from "node:test";
 import { BankAuthorizationFlow } from "../dist/authorization.js";
 import { ControlPanelAuthFlow, ControlPanelClient } from "../dist/control-panel.js";
 import { EnableBankingClient } from "../dist/enable-banking.js";
-import { ApplicationSetupFlow, normalizeSetupOptions } from "../dist/setup.js";
+import {
+  ApplicationSetupFlow,
+  callbackTlsFromApplication,
+  normalizeApplicationRegistrationOptions,
+  normalizeSetupOptions,
+} from "../dist/setup.js";
 
 class MemoryStore {
   value;
@@ -310,4 +315,357 @@ test("rejects invalid setup environment and consent metadata before setup starts
       JSON.stringify(overrides),
     );
   }
+});
+
+async function waitForSetup(setup) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!setup.status.pending) return setup.status;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Setup did not settle");
+}
+
+function setupDependencies({ applicationStore = new MemoryStore(), sessionStore = new MemoryStore(), ...overrides } = {}) {
+  return {
+    applicationStore,
+    sessionStore,
+    controlPanelClient: {
+      async registerApplication(_auth, request) {
+        this.request = request;
+        return { app_id: "sandbox-app-id" };
+      },
+    },
+    controlPanelAuth: {
+      async authenticate(email, existing) {
+        this.arguments = [email, existing];
+        return { email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+      },
+    },
+    authorizationFlow: { status: { pending: false } },
+    generateKeyMaterial: async () => ({
+      privateKey: "fake-private-key",
+      certificate: "fake-certificate",
+    }),
+    trustCertificate: async () => {},
+    ...overrides,
+  };
+}
+
+test("registration without optional auth store persists a Sandbox application", async () => {
+  const dependencies = setupDependencies();
+  const setup = new ApplicationSetupFlow(dependencies);
+
+  await setup.registerApplication({
+    controlPanelEmail: " user@example.com ",
+    appName: " Test application ",
+    environment: "SANDBOX",
+    redirectUrl: " https://localhost:8765/callback ",
+  });
+
+  assert.deepEqual(await waitForSetup(setup), {
+    phase: "application_ready",
+    pending: false,
+    appId: "sandbox-app-id",
+    message:
+      "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
+  });
+  assert.deepEqual(dependencies.controlPanelClient.request, {
+    name: "Test application",
+    certificate: "fake-certificate",
+    environment: "SANDBOX",
+    redirect_urls: ["https://localhost:8765/callback"],
+  });
+  assert.deepEqual(await dependencies.applicationStore.get(), {
+    appId: "sandbox-app-id",
+    privateKey: "fake-private-key",
+    certificate: "fake-certificate",
+    environment: "SANDBOX",
+    redirectUrls: ["https://localhost:8765/callback"],
+  });
+  assert.deepEqual(dependencies.controlPanelAuth.arguments, [
+    "user@example.com",
+    undefined,
+  ]);
+});
+
+test("registration stores changed Control Panel auth when its optional store exists", async () => {
+  const controlPanelAuthStore = new MemoryStore();
+  controlPanelAuthStore.value = { idToken: "old-token" };
+  const dependencies = setupDependencies({ controlPanelAuthStore });
+  const setup = new ApplicationSetupFlow(dependencies);
+
+  await setup.registerApplication({
+    controlPanelEmail: "user@example.com",
+    appName: "Test application",
+    environment: "SANDBOX",
+    redirectUrl: "https://127.0.0.1:8765/callback",
+  });
+  await waitForSetup(setup);
+
+  assert.deepEqual(dependencies.controlPanelAuth.arguments, [
+    "user@example.com",
+    { idToken: "old-token" },
+  ]);
+  assert.deepEqual(await controlPanelAuthStore.get(), {
+    email: "user@example.com",
+    idToken: "fake-id-token",
+    refreshToken: "fake-refresh-token",
+  });
+});
+
+test("failed application registration reports an error and can be retried", async () => {
+  let authenticationAttempts = 0;
+  const dependencies = setupDependencies({
+    controlPanelAuth: {
+      async authenticate() {
+        authenticationAttempts += 1;
+        if (authenticationAttempts === 1) throw new Error("authentication unavailable");
+        return { idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+      },
+    },
+  });
+  const setup = new ApplicationSetupFlow(dependencies);
+  const options = {
+    controlPanelEmail: "user@example.com",
+    appName: "Test application",
+    environment: "SANDBOX",
+    redirectUrl: "https://localhost:8765/callback",
+  };
+
+  await setup.registerApplication(options);
+  const failure = await waitForSetup(setup);
+  assert.equal(failure.phase, "failed");
+  assert.equal(failure.error, "authentication unavailable");
+  assert.equal(authenticationAttempts, 1);
+
+  await setup.registerApplication(options);
+  assert.equal((await waitForSetup(setup)).phase, "application_ready");
+  assert.equal(authenticationAttempts, 2);
+});
+
+test("getStatus reports completion when a session exists for a persisted Production app", async () => {
+  const applicationStore = new MemoryStore();
+  const sessionStore = new MemoryStore();
+  const setup = new ApplicationSetupFlow(setupDependencies({ applicationStore, sessionStore }));
+  applicationStore.value = {
+    appId: "production-app-id",
+    environment: "PRODUCTION",
+    privateKey: "fake-private-key",
+    certificate: "fake-certificate",
+    redirectUrls: [],
+  };
+
+  sessionStore.value = "fake-session-id";
+  assert.deepEqual(await setup.getStatus(), {
+    phase: "complete",
+    pending: false,
+    appId: "production-app-id",
+    sessionStored: true,
+    message: "Enable Banking setup is complete",
+  });
+});
+
+test("getStatus reports incomplete state after a formerly complete setup loses its application", async () => {
+  const applicationStore = new MemoryStore();
+  const sessionStore = new MemoryStore();
+  const authorizationFlow = {
+    status: { pending: false },
+    async start() {
+      await sessionStore.set("fake-session-id");
+      return { authorization_url: "https://bank.example/authorize" };
+    },
+  };
+  const setup = new ApplicationSetupFlow(setupDependencies({
+    applicationStore,
+    sessionStore,
+    authorizationFlow,
+    createBankClient: () => ({
+      async listBanks() {
+        return { aspsps: [{ name: "Example Bank" }] };
+      },
+    }),
+  }));
+
+  await setup.start({
+    controlPanelEmail: "user@example.com",
+    appName: "Sandbox",
+    environment: "SANDBOX",
+    redirectUrl: "https://localhost:8765/callback",
+    aspspName: "Example Bank",
+    country: "FI",
+  });
+  assert.equal((await waitForSetup(setup)).phase, "complete");
+  applicationStore.value = undefined;
+
+  assert.deepEqual(await setup.getStatus(), {
+    phase: "idle",
+    pending: false,
+    sessionStored: true,
+    message: "Enable Banking setup is incomplete",
+  });
+});
+
+test("registration validation accepts Sandbox without Production policy metadata", () => {
+  assert.deepEqual(normalizeApplicationRegistrationOptions({
+    controlPanelEmail: " user@example.com ",
+    appName: " Sandbox ",
+    environment: "SANDBOX",
+    redirectUrl: " https://127.0.0.1:8765/callback ",
+  }), {
+    controlPanelEmail: "user@example.com",
+    appName: "Sandbox",
+    environment: "SANDBOX",
+    redirectUrl: "https://127.0.0.1:8765/callback",
+  });
+});
+
+test("Production provider URLs reject credentials and fragments", () => {
+  for (const field of ["privacyUrl", "termsUrl"]) {
+    for (const value of [
+      "https://user:fake-password@example.com/document",
+      "https://example.com/document#section",
+    ]) {
+      assert.throws(
+        () => normalizeSetupOptions({
+          controlPanelEmail: "user@example.com",
+          appName: "Production application",
+          environment: "PRODUCTION",
+          redirectUrl: "https://localhost:8765/callback",
+          aspspName: "Example Bank",
+          country: "FI",
+          [field]: value,
+        }),
+        new RegExp(`${field === "privacyUrl" ? "privacy" : "terms"}_url must be a valid HTTPS URL`),
+      );
+    }
+  }
+});
+
+test("callback TLS options contain UTF-8 key and certificate bytes", () => {
+  const options = callbackTlsFromApplication({
+    appId: "app-id",
+    environment: "SANDBOX",
+    redirectUrls: ["https://localhost:8765/callback"],
+    privateKey: "fake-key-秘密",
+    certificate: "fake-certificate-証明書",
+  });
+
+  assert.ok(Buffer.isBuffer(options.key));
+  assert.ok(Buffer.isBuffer(options.cert));
+  assert.equal(options.key.toString("utf8"), "fake-key-秘密");
+  assert.equal(options.cert.toString("utf8"), "fake-certificate-証明書");
+});
+
+test("uses the default timers for Production activation and consent polling", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const applicationStore = new MemoryStore();
+  const sessionStore = new MemoryStore();
+  const firstActivationCheck = Promise.withResolvers();
+  const authorizationStarted = Promise.withResolvers();
+  let activationChecks = 0;
+  const authorizationFlow = {
+    get status() {
+      return { pending: sessionStore.value === undefined };
+    },
+    async start() {
+      authorizationStarted.resolve();
+      setTimeout(() => {
+        void sessionStore.set("fixture-session-id");
+      }, 1000);
+      return { authorization_url: "https://bank.example/authorize" };
+    },
+  };
+  const setup = new ApplicationSetupFlow(
+    setupDependencies({
+      applicationStore,
+      sessionStore,
+      authorizationFlow,
+      openBrowser: () => {},
+      createBankClient: () => ({
+        async getApplication() {
+          activationChecks += 1;
+          if (activationChecks === 1) firstActivationCheck.resolve();
+          return { active: activationChecks > 1 };
+        },
+        async listBanks() {
+          return { aspsps: [{ name: "Fixture Bank", country: "FI" }] };
+        },
+      }),
+    }),
+  );
+
+  await setup.start({
+    controlPanelEmail: "user@example.com",
+    appName: "Production application",
+    environment: "PRODUCTION",
+    redirectUrl: "https://localhost:8765/callback",
+    aspspName: "Fixture Bank",
+    country: "FI",
+  });
+  await firstActivationCheck.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  context.mock.timers.tick(5000);
+  await authorizationStarted.promise;
+  await new Promise((resolve) => setImmediate(resolve));
+  context.mock.timers.tick(1000);
+
+  const status = await waitForSetup(setup);
+  assert.equal(status.phase, "complete");
+  assert.equal(activationChecks, 2);
+  assert.equal(await sessionStore.get(), "fixture-session-id");
+});
+
+test("uses the default Enable Banking client for provider bank discovery", async (context) => {
+  const applicationStore = new MemoryStore();
+  const sessionStore = new MemoryStore();
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" },
+  });
+  const requests = [];
+  context.mock.method(globalThis, "fetch", async (input, init) => {
+    requests.push({ url: new URL(String(input)), headers: init.headers });
+    return Response.json({
+      aspsps: [{ name: "Fixture Bank", country: "FI" }],
+    });
+  });
+  const authorizationFlow = {
+    status: { pending: false },
+    async start(client, options) {
+      assert.ok(client instanceof EnableBankingClient);
+      assert.equal(options.aspspName, "Fixture Bank");
+      await sessionStore.set("fixture-session-id");
+      return { authorization_url: "https://bank.example/authorize" };
+    },
+  };
+  const setup = new ApplicationSetupFlow(
+    setupDependencies({
+      applicationStore,
+      sessionStore,
+      authorizationFlow,
+      openBrowser: () => {},
+      generateKeyMaterial: async () => ({
+        privateKey,
+        certificate: "fake-certificate",
+      }),
+    }),
+  );
+
+  await setup.start({
+    controlPanelEmail: "user@example.com",
+    appName: "Sandbox application",
+    environment: "SANDBOX",
+    redirectUrl: "https://localhost:8765/callback",
+    aspspName: "Fixture Bank",
+    country: "FI",
+  });
+
+  const status = await waitForSetup(setup);
+  assert.equal(status.phase, "complete");
+  assert.equal(await sessionStore.get(), "fixture-session-id");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url.pathname, "/aspsps");
+  assert.equal(requests[0].url.searchParams.get("country"), "FI");
+  assert.match(requests[0].headers.Authorization, /^Bearer /);
 });

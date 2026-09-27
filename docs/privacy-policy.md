@@ -113,12 +113,17 @@ The current macOS implementation stores the following in macOS Keychain:
 - the current Enable Banking session ID; and
 - the Control Panel authentication record.
 
-Large credential records may be stored across multiple related Keychain
-records. The private key is generated or supplied by the operator and is used
-to sign API requests. The certificate is registered with Enable Banking and
-may be trusted locally for the HTTPS loopback callback. API responses and
-callback codes are held in process memory while used; the MCP does not
-intentionally persist banking responses.
+New credential values are written as a single native Keychain item through
+`@napi-rs/keyring`, under a separate service name from the older records.
+Existing raw and chunked credential records remain readable until a successful
+replacement, then are removed; `/usr/bin/security` is used only to read or
+remove those legacy records, never to pass newly written secret values.
+Previously written large credential records may occupy multiple related
+Keychain records. The private key is generated or supplied by the operator and
+is used to sign API requests. The certificate is registered with Enable
+Banking and may be trusted locally for the HTTPS loopback callback. API
+responses and callback codes are held in process memory while used; the MCP
+does not intentionally persist banking responses.
 
 The retention schedule for this personal deployment is:
 

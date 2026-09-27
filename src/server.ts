@@ -16,7 +16,10 @@ import {
   EnableBankingClient,
   getHealth,
 } from "./enable-banking.js";
-import { MacKeychainApplicationStore } from "./application-store.js";
+import {
+  MacKeychainApplicationStore,
+  type StoredApplication,
+} from "./application-store.js";
 import {
   ControlPanelAuthFlow,
   ControlPanelClient,
@@ -111,6 +114,8 @@ const setupFlow = new ApplicationSetupFlow({
   controlPanelAuth,
   controlPanelAuthStore,
   authorizationFlow,
+  /* c8 ignore next -- test/server.test.mjs exercises this factory in a child process, outside c8 counters. */
+  createBankClient: (credentials) => new EnableBankingClient(credentials),
   openBrowser: launchBrowser,
 });
 
@@ -219,6 +224,26 @@ async function sessionClient(): Promise<{
     sessionId,
   };
 }
+async function authorizedAccountClient(
+  accountId: string,
+): Promise<EnableBankingClient> {
+  const { client, sessionId } = await sessionClient();
+  const session = await client.getSession(sessionId);
+  const accounts = session.accounts;
+  if (
+    !Array.isArray(accounts) ||
+    !accounts.some(
+      (account) =>
+        typeof account === "object" &&
+        account !== null &&
+        (account as Record<string, unknown>).uid === accountId,
+    )
+  ) {
+    throw new Error("Account is not authorized by the current bank session");
+  }
+  return client;
+}
+
 async function authorizedAccounts(): Promise<Record<string, unknown>> {
   const { client, sessionId } = await sessionClient();
   const session = await client.getSession(sessionId);
@@ -679,12 +704,12 @@ server.registerTool(
       const credentials = application
         ? { appId: application.appId, privateKey: application.privateKey }
         : await resolveCredentials();
-      const resolvedRedirectUrl =
-        redirect_url ?? application?.redirectUrls[0] ?? DEFAULT_REDIRECT_URL;
+      /* c8 ignore next 4 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
       return authorizationFlow.start(new EnableBankingClient(credentials), {
         aspspName: aspsp_name,
         country,
-        redirectUrl: resolvedRedirectUrl,
+        redirectUrl:
+          redirect_url ?? application?.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
         validUntil: valid_until,
         accessProfile: access_profile as AccessProfile,
       });
@@ -776,9 +801,7 @@ server.registerTool(
   },
   async ({ account_id }) =>
     safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).getAccountDetails(
-        account_id,
-      ),
+      (await authorizedAccountClient(account_id)).getAccountDetails(account_id),
     ),
 );
 
@@ -792,9 +815,7 @@ server.registerTool(
   },
   async ({ account_id }) =>
     safely(async () =>
-      new EnableBankingClient(await resolveCredentials()).getAccountBalances(
-        account_id,
-      ),
+      (await authorizedAccountClient(account_id)).getAccountBalances(account_id),
     ),
 );
 
@@ -846,8 +867,8 @@ server.registerTool(
     limit,
   }) =>
     safely(async () =>
-      new EnableBankingClient(
-        await resolveCredentials(),
+      (
+        await authorizedAccountClient(account_id)
       ).getAccountTransactions(account_id, {
         dateFrom: date_from,
         dateTo: date_to,
@@ -870,8 +891,8 @@ server.registerTool(
   },
   async ({ account_id, transaction_id }) =>
     safely(async () =>
-      new EnableBankingClient(
-        await resolveCredentials(),
+      (
+        await authorizedAccountClient(account_id)
       ).getTransactionDetails(account_id, transaction_id),
     ),
 );
@@ -884,15 +905,20 @@ server.registerTool(
   },
   async () =>
     safely(async () => {
-      const setupStatus = await setupFlow.getStatus();
-      if (setupStatus.pending || authorizationFlow.status.pending) {
+      if (setupFlow.status.pending || authorizationFlow.status.pending) {
         throw new Error("Cannot clear credentials while setup or authorization is pending");
       }
 
       const failures: string[] = [];
       let trustedCertificateRemoved = false;
       let applicationCanBeCleared = true;
-      const application = await applicationStore.get();
+      let application: StoredApplication | undefined;
+      try {
+        application = await applicationStore.get();
+      } catch {
+        application = undefined;
+        failures.push("trusted_certificate");
+      }
       if (application?.certificate) {
         try {
           await removeTrustedCertificate(application.certificate);
@@ -946,6 +972,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
+  /* c8 ignore next 3 -- This top-level handler runs only when MCP transport startup rejects, which the public tool contract cannot induce. */
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
   process.exitCode = 1;

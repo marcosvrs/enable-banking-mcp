@@ -279,7 +279,7 @@ export class ControlPanelAuthFlow {
         normalizedEmail.toLowerCase()
     ) {
       if (
-        existingAuth.expiresAt === undefined ||
+        existingAuth.expiresAt !== undefined &&
         existingAuth.expiresAt > Date.now()
       ) {
         return existingAuth;
@@ -296,16 +296,25 @@ export class ControlPanelAuthFlow {
     }
 
     const listener = await this.listenerFactory();
+
+    const callbackResult = listener.wait.then(
+      (confirmationCode) => ({
+        status: "received" as const,
+        confirmationCode,
+      }),
+      (error: unknown) => ({ status: "failed" as const, error }),
+    );
     try {
       await this.client.requestEmailLogin(
         normalizedEmail,
         listener.port,
         listener.path,
       );
-      const confirmationCode = await listener.wait;
+      const result = await callbackResult;
+      if (result.status === "failed") throw result.error;
       return await this.client.completeEmailLogin(
         normalizedEmail,
-        confirmationCode,
+        result.confirmationCode,
       );
     } finally {
       await listener.close();
@@ -372,6 +381,7 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
   server.once("error", failListening);
   server.listen(0, "localhost", () => {
     const address = server.address();
+    /* c8 ignore next 4 -- listen(0, "localhost") guarantees a TCP address before this callback. */
     if (!address || typeof address === "string") {
       failListening(new Error("Control Panel callback listener did not expose a port"));
       return;
@@ -383,6 +393,7 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
   try {
     port = await listening;
   } catch (error) {
+    /* c8 ignore next 3 -- This rejects OS-level listener startup failures not safely inducible through the public API. */
     server.close();
     throw error;
   }

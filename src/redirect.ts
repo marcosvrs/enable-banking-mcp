@@ -31,13 +31,13 @@ export function parseLoopbackRedirect(value: string): LoopbackRedirect {
     );
   }
   const port = Number(url.port);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  if (port < 1) {
     throw new Error("redirect_url must include a valid TCP port");
   }
   return {
     protocol: "https:",
     hostname: url.hostname,
     port,
-    path: url.pathname || "/",
+    path: url.pathname,
   };
 }

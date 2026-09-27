@@ -19,7 +19,7 @@ The source code is open source under the [MIT License](LICENSE). MIT permits dow
 
 ## Requirements
 
-- macOS, because local credentials and certificate trust use macOS Keychain and `/usr/bin/security`;
+- macOS, because credentials and certificate trust use macOS Keychain (credentials use the native `@napi-rs/keyring` API; `/usr/bin/security` remains used for certificate trust and legacy credential cleanup);
 - Node.js 22 or newer;
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
@@ -249,6 +249,30 @@ npm run privacy:install-hooks
 ```
 
 The npm lifecycle does not modify Git configuration automatically.
+
+### Run test gates
+
+```sh
+npm test
+npm run test:coverage
+npm run test:mutation
+```
+
+The coverage gate requires 100% statement and function coverage for `src/`;
+line and branch coverage are reported but have no minimum. Mutation testing
+requires a score of at least 99% for the deterministic configuration,
+localhost-redirect, and session-recovery logic. This is a focused mutation
+gate, not a repository-wide mutation score. Provider, OS, browser, and
+stdio-facing code remains covered by the regression suite but is excluded from
+the score; in particular, the stdio integration test launches a child process
+outside Stryker's mutant instrumentation.
+
+The only coverage exclusions are narrow defensive states and a V8 source-map
+gap on `authorize_bank`'s request literal, which is exercised by the isolated
+stdio integration test.
+CI runs coverage on every pull request and push to `main`; it runs mutation
+testing only when source, tests, or test configuration changes. CI caches npm
+downloads and the incremental mutation report.
 
 ### Publish a release
 

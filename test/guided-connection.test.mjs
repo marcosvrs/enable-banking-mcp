@@ -516,3 +516,37 @@ test("clients without form support receive bank choices without authorization", 
   assert.equal(state.authorizationCalls.length, 0);
   assert.deepEqual(elicitationRequests, []);
 });
+test("clears a terminal environment session before continuing setup", async () => {
+  const { result, state } = await runConnection({
+    environmentSessionId: "expired-environment-session",
+    application: undefined,
+    environmentEmail: "local@example.com",
+    readAuthorizedAccounts: async () => {
+      throw new EnableBankingApiError(401, "session expired", {
+        error: "EXPIRED_SESSION",
+      });
+    },
+  });
+
+  assert.equal(state.environmentSessionId, undefined);
+  assert.equal(state.authorizedAccountReads, 1);
+  assert.equal(result.status, "setup_started");
+  assert.equal(state.setupRegistrationCalls.length, 1);
+});
+
+test("does not clear an environment session when authorized-account lookup has a transient failure", async () => {
+  const failure = new Error("temporary provider outage");
+  const { result, state, flowError, toolResponse } = await runConnection({
+    environmentSessionId: "environment-session",
+    application: undefined,
+    readAuthorizedAccounts: async () => {
+      throw failure;
+    },
+  });
+
+  assert.equal(flowError, failure);
+  assert.equal(result, undefined);
+  assert.equal(toolResponse.isError, true);
+  assert.equal(state.environmentSessionId, "environment-session");
+  assert.equal(state.emailResolveCalls, 0);
+});

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { connect } from "node:net";
 import test from "node:test";
 import {
   MacKeychainControlPanelAuthStore,
@@ -219,6 +220,26 @@ test("silently refreshes an expired Control Panel session when configured", asyn
   assert.equal(auth.refreshToken, "test-rotated-refresh-token");
   assert.ok(auth.expiresAt > Date.now());
 });
+test("refreshes matching stored Control Panel auth with missing expiry metadata", async () => {
+  let refreshCalls = 0;
+  const client = {
+    async refreshAuth(auth) {
+      refreshCalls += 1;
+      return { ...auth, idToken: "renewed-id-token", expiresAt: Date.now() + 60_000 };
+    },
+  };
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    throw new Error("A refreshable session should not open an email callback");
+  });
+  const auth = await flow.authenticate("user@example.com", {
+    email: "user@example.com",
+    idToken: "stored-id-token",
+    refreshToken: "fake-stored-refresh-token",
+  });
+
+  assert.equal(refreshCalls, 1);
+  assert.equal(auth.idToken, "renewed-id-token");
+});
 
 test("requests a sign-in link when the stored refresh token is rejected", async () => {
   const calls = [];
@@ -327,6 +348,21 @@ test("receives the Control Panel email callback on a loopback listener", async (
     const invalidResponse = await fetch(invalid);
     assert.equal(invalidResponse.status, 400);
 
+    const malformedRequest = await new Promise((resolve, reject) => {
+      const socket = connect(listener.port, "localhost", () => {
+        socket.end(
+          "GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+      });
+      let response = "";
+      socket.on("data", (chunk) => {
+        response += chunk;
+      });
+      socket.once("error", reject);
+      socket.once("close", () => resolve(response));
+    });
+    assert.match(malformedRequest, /^HTTP\/1\.1 400 /);
+
     const wrongMethod = await fetch(callback, { method: "POST" });
     assert.equal(wrongMethod.status, 404);
     const missingCode = await fetch(callback);
@@ -359,6 +395,135 @@ test("rejects a denied Control Panel callback and closes idempotently", async ()
     await listener.close();
     await listener.close();
   }
+});
+test("Control Panel auth flow rejects malformed callback paths and closes its listener", async () => {
+  const malformedPaths = [
+    "/not-callback?state=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "/callback?state=short",
+    `https://evil.example/callback?state=${"A".repeat(43)}`,
+    `/callback?state=${"A".repeat(43)}&extra=value`,
+  ];
+
+  for (const path of malformedPaths) {
+    let requests = 0;
+    let closed = 0;
+    const client = new ControlPanelClient(async () => {
+      requests += 1;
+      return new Response("{}", { status: 200 });
+    });
+    const flow = new ControlPanelAuthFlow(client, async () => ({
+      port: 4321,
+      path,
+      wait: new Promise(() => {}),
+      close: async () => {
+        closed += 1;
+      },
+    }));
+
+    await assert.rejects(
+      flow.authenticate("user@example.com"),
+      /callback path/,
+    );
+    assert.equal(requests, 0, `malformed callback path reached provider: ${path}`);
+    assert.equal(closed, 1, `listener was not closed for path: ${path}`);
+  }
+});
+
+test("Control Panel auth flow handles invalid state, missing code, and a valid callback", async () => {
+  const requests = [];
+  let listener;
+  let closeCalls = 0;
+  const client = {
+    async requestEmailLogin(email, port, path) {
+      requests.push({ email, port, path });
+    },
+    async completeEmailLogin(email, code) {
+      return { email, idToken: `id:${code}`, refreshToken: "refresh-token" };
+    },
+  };
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    listener = await createControlPanelCallbackListener();
+    const close = listener.close;
+    listener.close = async () => {
+      closeCalls += 1;
+      await close();
+    };
+    return listener;
+  });
+
+  const pendingLogin = flow.authenticate("  user@example.com  ");
+  while (!listener) await new Promise((resolve) => setImmediate(resolve));
+  const callback = new URL(
+    requests[0].path,
+    `http://localhost:${requests[0].port}`,
+  );
+
+  const wrongState = new URL(callback);
+  wrongState.searchParams.set("state", "incorrect");
+  const badStateResponse = await fetch(wrongState);
+  assert.equal(badStateResponse.status, 400);
+  assert.match(await badStateResponse.text(), /Invalid Enable Banking sign-in state/);
+
+  const missingCodeResponse = await fetch(callback);
+  assert.equal(missingCodeResponse.status, 400);
+  assert.match(await missingCodeResponse.text(), /sign-in code was not provided/);
+
+  callback.searchParams.set("oobCode", "one-time-code");
+  const validResponse = await fetch(callback);
+  assert.equal(validResponse.status, 200);
+  assert.equal(await validResponse.text(), "Enable Banking sign-in complete. You may close this window.");
+  assert.deepEqual(await pendingLogin, {
+    email: "user@example.com",
+    idToken: "id:one-time-code",
+    refreshToken: "refresh-token",
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(closeCalls, 1);
+  await assert.rejects(
+    fetch(`http://localhost:${requests[0].port}${requests[0].path}`),
+    /fetch failed|ECONNREFUSED/,
+  );
+});
+
+test("Control Panel auth flow rejects provider denial and closes its listener", async () => {
+  let listener;
+  let closeCalls = 0;
+  const client = {
+    async requestEmailLogin() {},
+    async completeEmailLogin() {
+      assert.fail("denied callback must not complete login");
+    },
+  };
+  const flow = new ControlPanelAuthFlow(client, async () => {
+    listener = await createControlPanelCallbackListener();
+    const close = listener.close;
+    listener.close = async () => {
+      closeCalls += 1;
+      await close();
+    };
+    return listener;
+  });
+
+  const pendingLogin = flow.authenticate("user@example.com");
+  const rejectedLogin = assert.rejects(
+    pendingLogin,
+    /Control Panel sign-in was denied/,
+  );
+  while (!listener) await new Promise((resolve) => setImmediate(resolve));
+  const denied = new URL(
+    listener.path,
+    `http://localhost:${listener.port}`,
+  );
+  denied.searchParams.set("error", "access_denied");
+  const response = await fetch(denied);
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /sign-in was denied/);
+  await rejectedLogin;
+  assert.equal(closeCalls, 1);
+  await assert.rejects(
+    fetch(`http://localhost:${listener.port}${listener.path}`),
+    /fetch failed|ECONNREFUSED/,
+  );
 });
 
 test("completes a sandbox setup without shelling to another application", async () => {
@@ -610,6 +775,59 @@ test("registers an application before bank details are provided", async () => {
     phase: "idle",
     pending: false,
   });
+});
+test("checks provider activation before reporting a persisted Production app", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  const sessionStore = new MemorySessionStore();
+  await applicationStore.set({
+    appId: "persisted-production-app",
+    privateKey: "private-key",
+    certificate: "certificate",
+    environment: "PRODUCTION",
+    redirectUrls: ["https://localhost:8765/callback"],
+  });
+  let activationChecks = 0;
+  const setup = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+    createBankClient: () => ({
+      async getApplication() {
+        activationChecks += 1;
+        return { active: true };
+      },
+    }),
+  });
+
+  const status = await setup.getStatus();
+
+  assert.equal(activationChecks, 1);
+  assert.equal(status.phase, "application_ready");
+});
+
+test("reports Production activation as unverified when provider lookup fails", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  const sessionStore = new MemorySessionStore();
+  await applicationStore.set({
+    appId: "persisted-production-app",
+    privateKey: "private-key",
+    certificate: "certificate",
+    environment: "PRODUCTION",
+    redirectUrls: ["https://localhost:8765/callback"],
+  });
+  const setup = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+    createBankClient: () => ({
+      async getApplication() {
+        throw new Error("provider unavailable");
+      },
+    }),
+  });
+
+  const status = await setup.getStatus();
+
+  assert.equal(status.phase, "account_link");
+  assert.match(status.message, /could not be verified/);
 });
 
 class MemoryApplicationStore {
@@ -1040,8 +1258,8 @@ test("times out Production activation without starting bank authorization", asyn
   });
   const status = await waitForSetup(setup);
 
-  assert.equal(status.phase, "failed");
-  assert.match(status.error, /application is still inactive/);
+  assert.equal(status.phase, "account_link");
+  assert.match(status.message, /resume connect_bank/);
   assert.ok(activationChecks > 0);
   assert.equal(authorizationCalls, 0);
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
@@ -1082,11 +1300,12 @@ test("times out pending bank consent without discarding the registered applicati
   assert.equal(await sessionStore.get(), undefined);
 });
 
-test("reuses matching Control Panel auth without an expiry", async () => {
+test("reuses matching unexpired Control Panel auth without contacting the provider", async () => {
   const existingAuth = {
     email: "user@example.com",
     idToken: "current-id-token",
     refreshToken: "test-current-refresh-token",
+    expiresAt: Date.now() + 60_000,
   };
   const flow = new ControlPanelAuthFlow(
     new ControlPanelClient(async () => {
@@ -1373,6 +1592,10 @@ test("rejects invalid callback destinations and ports before Control Panel reque
     );
   }
   await assert.rejects(
+    client.requestEmailLogin("user@example.com", 4321, "http://["),
+    /callback path is invalid/,
+  );
+  await assert.rejects(
     client.requestEmailLogin("user@example.com", 0, `/callback?state=${state}`),
     /callback port is invalid/,
   );
@@ -1404,6 +1627,7 @@ test("rejects malformed provider application registration responses", async () =
 test("Control Panel callback timeout closes the listener and rejects login", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   const requested = Promise.withResolvers();
+  let closeCalls = 0;
   let listener;
   const flow = new ControlPanelAuthFlow(
     {
@@ -1416,6 +1640,11 @@ test("Control Panel callback timeout closes the listener and rejects login", asy
     },
     async () => {
       listener = await createControlPanelCallbackListener();
+      const close = listener.close;
+      listener.close = async () => {
+        closeCalls += 1;
+        await close();
+      };
       return listener;
     },
   );
@@ -1431,7 +1660,11 @@ test("Control Panel callback timeout closes the listener and rejects login", asy
 
   context.mock.timers.tick(10 * 60 * 1000);
   await rejectedLogin;
-  await listener.close();
+  assert.equal(closeCalls, 1);
+  await assert.rejects(
+    fetch(`http://localhost:${request.port}${request.path}`),
+    /fetch failed|ECONNREFUSED/,
+  );
 });
 
 test("Sandbox registration completes without opening the Production dashboard", async () => {
@@ -1451,4 +1684,22 @@ test("Sandbox registration completes without opening the Production dashboard", 
   assert.equal(status.dashboardUrl, undefined);
   assert.equal((await applicationStore.get()).appId, "recorded-app-id");
   assert.deepEqual(openedUrls, []);
+});
+test("rejects invalid Control Panel email and callback ports before network access", async () => {
+  let requestCount = 0;
+  const client = new ControlPanelClient(async () => {
+    requestCount += 1;
+    return new Response("{}", { status: 200 });
+  });
+  const validCallback = `/callback?state=${"A".repeat(43)}`;
+
+  await assert.rejects(
+    client.requestEmailLogin("   ", 4321, validCallback),
+    /control_panel_email must be a valid email address/,
+  );
+  await assert.rejects(
+    client.requestEmailLogin("person@example.com", 65536, validCallback),
+    /Control Panel callback port is invalid/,
+  );
+  assert.equal(requestCount, 0);
 });

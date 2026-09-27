@@ -167,6 +167,28 @@ export class ApplicationSetupFlow {
         : { phase: "idle", pending: false };
     }
     if (application && !session && this.current.phase === "idle") {
+      if (
+        application.environment === "PRODUCTION" &&
+        this.dependencies.createBankClient &&
+        application.appId &&
+        application.privateKey
+      ) {
+        try {
+          const providerApplication = await this.dependencies
+            .createBankClient({
+              appId: application.appId,
+              privateKey: application.privateKey,
+            })
+            .getApplication();
+          return applicationStatus(application, providerApplication.active);
+        } catch {
+          return {
+            ...applicationStatus(application),
+            message:
+              "Production application status could not be verified; the MCP agent should resume connect_bank to check activation.",
+          };
+        }
+      }
       return applicationStatus(application);
     }
     return this.status;
@@ -297,13 +319,24 @@ export class ApplicationSetupFlow {
             "The user must link the application to their own bank in the dashboard; setup continues automatically when activation is detected.",
         });
         (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
-        await waitForActivation(
+        const activated = await waitForActivation(
           client,
           this.dependencies.sleep,
           this.dependencies.now,
         );
-      }
+        if (!activated) {
+          this.update({
+            phase: "account_link",
+            pending: false,
+            appId: application.appId,
+            dashboardUrl: APPLICATIONS_URL,
+            message:
+              "The application is still inactive. After dashboard account linking, the MCP agent should resume connect_bank to continue setup.",
+          });
+          return;
+        }
 
+      }
       const aspspName = await resolveAspspName(client, options);
       this.update({
         phase: "bank_authorization",
@@ -384,14 +417,18 @@ export class ApplicationSetupFlow {
   }
 }
 
-function applicationStatus(application: StoredApplication): SetupStatus {
+function applicationStatus(
+  application: StoredApplication,
+  active?: boolean,
+): SetupStatus {
   const production = application.environment === "PRODUCTION";
+  const activationRequired = production && active !== true;
   return {
-    phase: production ? "account_link" : "application_ready",
+    phase: activationRequired ? "account_link" : "application_ready",
     pending: false,
     appId: application.appId,
-    ...(production ? { dashboardUrl: APPLICATIONS_URL } : {}),
-    message: production
+    ...(activationRequired ? { dashboardUrl: APPLICATIONS_URL } : {}),
+    message: activationRequired
       ? "Application registered; the user must activate it in the dashboard, then the MCP agent resumes setup."
       : "Application registered; the MCP agent continues with bank consent once the country and bank are known.",
   };
@@ -542,16 +579,14 @@ async function waitForActivation(
   client: EnableBankingClient,
   configuredSleep?: (milliseconds: number) => Promise<void>,
   configuredNow: () => number = Date.now,
-): Promise<void> {
+): Promise<boolean> {
   const deadline = configuredNow() + ACTIVATION_TIMEOUT_MS;
   while (configuredNow() < deadline) {
     const application = await client.getApplication();
-    if (application.active) return;
+    if (application.active) return true;
     await (configuredSleep ?? sleep)(ACTIVATION_POLL_MS);
   }
-  throw new Error(
-    "The application is still inactive; the user must complete dashboard account linking. The MCP agent can resume setup after activation.",
-  );
+  return false;
 }
 
 async function waitForSession(

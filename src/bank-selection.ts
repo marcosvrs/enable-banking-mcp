@@ -182,6 +182,7 @@ export async function resolveBankSelection(options: {
     }
   }
 
+  /* c8 ignore next 3 -- All non-selected choices return a required-input result before this invariant. */
   if (!selectedBank) {
     throw new Error("No personal AIS bank was selected");
   }

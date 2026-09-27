@@ -378,3 +378,109 @@ test("free-form country rejects values that are not two-letter codes", async () 
   assert.deepEqual(selection.supported_countries, []);
   assert.deepEqual(bankCalls, [undefined]);
 });
+test("ambiguous global bank match can be declined without choosing a country", async () => {
+  const { selection, bankCalls } = await runSelection({
+    capabilities: { elicitation: { form: {} } },
+    applicationCountries: ["FI", "IE"],
+    aspspName: "Shared Bank",
+    banks: {
+      "*": {
+        aspsps: [
+          { name: "Shared Bank", country: "FI" },
+          { name: "Shared Bank", country: "IE" },
+        ],
+      },
+    },
+    responses: [{ action: "decline" }],
+  });
+
+  assert.equal(selection.status, "input_declined");
+  assert.equal(selection.required_input, "bank");
+  assert.deepEqual(selection.banks, [
+    { name: "Shared Bank", country: "FI" },
+    { name: "Shared Bank", country: "IE" },
+  ]);
+  assert.deepEqual(bankCalls, [undefined]);
+});
+
+test("invalid explicit country is rejected before provider bank lookup", async () => {
+  const bankCalls = [];
+  await assert.rejects(
+    resolveBankSelection({
+      client: {
+        async listBanks(country) {
+          bankCalls.push(country);
+          return { aspsps: [] };
+        },
+      },
+      mcpServer: {
+        getClientCapabilities: () => undefined,
+      },
+      applicationCountries: [],
+      country: "FIN",
+    }),
+    /two-letter ISO 3166-1 code/,
+  );
+  assert.deepEqual(bankCalls, []);
+});
+
+test("provider bank catalog ignores malformed rows and deduplicates names per country", async () => {
+  const { selection, bankCalls } = await runSelection({
+    applicationCountries: [],
+    aspspName: "Nordea",
+    country: "FI",
+    banks: {
+      FI: {
+        aspsps: [
+          null,
+          {},
+          { name: " " },
+          { name: "Nordea" },
+          { name: " nordea ", country: "fi" },
+          { name: "OP", country: "IE" },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(selection, {
+    status: "selected",
+    country: "FI",
+    bank: { name: "Nordea", country: "FI" },
+  });
+  assert.deepEqual(bankCalls, ["FI"]);
+});
+test("unmatched requested bank can be replaced by a provider-listed selection", async () => {
+  const { selection, bankCalls, elicitationRequests } = await runSelection({
+    capabilities: { elicitation: { form: {} } },
+    applicationCountries: ["FI"],
+    country: "FI",
+    aspspName: "Old Bank Name",
+    banks: {
+      FI: { aspsps: [{ name: "Nordea" }, { name: "OP" }] },
+    },
+    responses: [{ action: "accept", content: { bank: "1" } }],
+  });
+
+  assert.deepEqual(selection, {
+    status: "selected",
+    country: "FI",
+    bank: { name: "OP", country: "FI" },
+  });
+  assert.deepEqual(bankCalls, ["FI"]);
+  assert.equal(elicitationRequests[0].requestedSchema.properties.bank.oneOf[1].const, "1");
+});
+
+test("declining free-form country entry returns the input requirement", async () => {
+  const { selection, bankCalls } = await runSelection({
+    capabilities: { elicitation: { form: {} } },
+    applicationCountries: [],
+    banks: { "*": { aspsps: [] } },
+    responses: [{ action: "cancel" }],
+  });
+
+  assert.equal(selection.status, "input_declined");
+  assert.equal(selection.required_input, "country");
+  assert.deepEqual(selection.supported_countries, []);
+  assert.deepEqual(bankCalls, [undefined]);
+});
