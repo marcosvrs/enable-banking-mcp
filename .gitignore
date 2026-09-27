@@ -14,7 +14,10 @@ dist/
 *.der
 *.log
 coverage/
+reports/stryker-focused-incremental.json
+.stryker-tmp/
 .nyc_output/
 *.sqlite
 *.sqlite3
 *.db
+e2e-artifacts/

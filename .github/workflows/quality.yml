@@ -1,0 +1,116 @@
+name: Coverage and mutation gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  mutation-scope:
+    name: Detect mutation-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - name: Check out repository history
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check changed paths
+        id: diff
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="${BASE_SHA}...${HEAD_SHA}"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            range="${BEFORE_SHA}..${HEAD_SHA}"
+          fi
+
+          if git diff --quiet "$range" -- \
+            src/ test/ package.json package-lock.json tsconfig.json \
+            stryker.config.mjs .github/workflows/quality.yml; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 1 ]]; then
+              exit "$status"
+            fi
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  coverage:
+    name: 100% statements and functions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Enforce coverage thresholds
+        run: npm run test:coverage
+
+  mutation:
+    name: 99% mutation score
+    needs: [mutation-scope, coverage]
+    if: needs.mutation-scope.outputs.run == 'true' && needs.coverage.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore incremental mutation results
+        # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: reports/stryker-focused-incremental.json
+          key: stryker-v2-${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ hashFiles('package.json', 'package-lock.json', 'tsconfig.json', 'stryker.config.mjs', '.github/workflows/quality.yml') }}-${{ github.event.pull_request.base.ref || 'main' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stryker-v2-${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ hashFiles('package.json', 'package-lock.json', 'tsconfig.json', 'stryker.config.mjs', '.github/workflows/quality.yml') }}-${{ github.event.pull_request.base.ref || 'main' }}-
+
+      - name: Enforce mutation score
+        run: npm run test:mutation

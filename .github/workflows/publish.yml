@@ -1,0 +1,86 @@
+name: Publish npm package
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish public package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out full history
+        # Pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        # Pinned commit
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Verify release tag
+        run: |
+          test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Scan privacy and secrets
+        run: npm run privacy:scan
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
+
+      - name: Run MCP contract E2E before publishing
+        env:
+          MCP_INSPECTOR_VERSION: "2.4.0"
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:mcp
+
+      - name: Upload pre-publish MCP diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pre-publish-mcp-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore
+
+      - name: Publish package through npm Trusted Publishing
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            npm publish --access public --tag beta --provenance
+          else
+            npm publish --access public --provenance
+          fi
+
+      - name: Smoke-test published MCP package
+        env:
+          MCP_INSPECTOR_VERSION: "2.4.0"
+          E2E_ARTIFACT_DIR: ${{ github.workspace }}/e2e-artifacts
+        run: npm run e2e:published
+
+      - name: Upload published MCP diagnostics
+        if: always()
+        # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: published-mcp-e2e-diagnostics
+          path: e2e-artifacts/
+          if-no-files-found: ignore

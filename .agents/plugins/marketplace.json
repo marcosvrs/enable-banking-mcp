@@ -1,0 +1,20 @@
+{
+  "name": "enable-banking-mcp",
+  "interface": {
+    "displayName": "Enable Banking MCP"
+  },
+  "plugins": [
+    {
+      "name": "enable-banking-mcp",
+      "source": {
+        "source": "local",
+        "path": "./codex-plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
