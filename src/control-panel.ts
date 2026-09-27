@@ -271,14 +271,31 @@ export class ControlPanelAuthFlow {
       createControlPanelCallbackListener,
   ) {}
 
-  async withAuthentication<T>(operation: () => Promise<T>): Promise<T> {
+  async withAuthentication<T>(
+    operation: (
+      authenticate: (
+        email: string,
+        existingAuth?: ControlPanelAuth,
+      ) => Promise<ControlPanelAuth>,
+    ) => Promise<T>,
+  ): Promise<T> {
     if (this.credentialCleanupPending) {
       throw new Error("Control Panel credentials are being cleared");
     }
+    if (this.activeAuthenticationCount > 0) {
+      throw new Error("Control Panel authentication is already in progress");
+    }
     this.activeAuthenticationCount += 1;
+    let active = true;
     try {
-      return await operation();
+      return await operation((email, existingAuth) => {
+        if (!active) {
+          throw new Error("Control Panel authentication reservation has ended");
+        }
+        return this.authenticateWhileReserved(email, existingAuth);
+      });
     } finally {
+      active = false;
       this.activeAuthenticationCount -= 1;
     }
   }
@@ -301,8 +318,8 @@ export class ControlPanelAuthFlow {
     email: string,
     existingAuth?: ControlPanelAuth,
   ): Promise<ControlPanelAuth> {
-    return this.withAuthentication(() =>
-      this.authenticateWhileReserved(email, existingAuth),
+    return this.withAuthentication((authenticate) =>
+      authenticate(email, existingAuth),
     );
   }
 

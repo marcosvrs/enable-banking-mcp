@@ -127,6 +127,8 @@ export class ApplicationSetupFlow {
     pending: false,
   };
 
+  private credentialCleanupPending = false;
+
   constructor(private readonly dependencies: ApplicationSetupDependencies) {}
 
   get status(): SetupStatus {
@@ -138,6 +140,20 @@ export class ApplicationSetupFlow {
       phase: "idle",
       pending: false,
     };
+  }
+
+  async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.current.pending || this.credentialCleanupPending) {
+      throw new Error(
+        "Cannot clear credentials while setup or cleanup is pending",
+      );
+    }
+    this.credentialCleanupPending = true;
+    try {
+      return await operation();
+    } finally {
+      this.credentialCleanupPending = false;
+    }
   }
 
   async getStatus(): Promise<SetupStatus> {
@@ -166,7 +182,11 @@ export class ApplicationSetupFlow {
           }
         : { phase: "idle", pending: false };
     }
-    if (application && !session && this.current.phase === "idle") {
+    if (
+      application &&
+      !session &&
+      (this.current.phase === "idle" || this.current.phase === "account_link")
+    ) {
       if (
         application.environment === "PRODUCTION" &&
         this.dependencies.createBankClient &&
@@ -180,7 +200,14 @@ export class ApplicationSetupFlow {
               privateKey: application.privateKey,
             })
             .getApplication();
-          return applicationStatus(application, providerApplication.active);
+          const status = applicationStatus(application, providerApplication.active);
+          if (
+            this.current.phase === "account_link" &&
+            providerApplication.active
+          ) {
+            this.current = status;
+          }
+          return status;
         } catch {
           return {
             ...applicationStatus(application),
@@ -244,6 +271,9 @@ export class ApplicationSetupFlow {
   }
 
   private reserve(): SetupStatus {
+    if (this.credentialCleanupPending) {
+      throw new Error("Cannot start setup while credential cleanup is pending");
+    }
     if (this.current.pending) {
       throw new Error("Enable Banking setup is already in progress");
     }
@@ -462,8 +492,7 @@ export function normalizeApplicationRegistrationOptions(
   let normalizedTermsUrl = termsUrl;
 
   if (options.environment === "PRODUCTION") {
-    normalizedDescription =
-      description ?? DEFAULT_PRODUCTION_DESCRIPTION;
+    normalizedDescription = description || DEFAULT_PRODUCTION_DESCRIPTION;
     normalizedGdprEmail = controlPanelEmail;
     normalizedPrivacyUrl =
       privacyUrl ?? DEFAULT_PRODUCTION_PRIVACY_URL;

@@ -104,6 +104,10 @@ export class BankAuthorizationFlow {
     this.starting = false;
   }
 
+  resetError(): void {
+    this.lastError = undefined;
+  }
+
   async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
     if (this.starting || this.pending || this.credentialCleanupPending) {
       throw new Error(

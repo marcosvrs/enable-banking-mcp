@@ -670,6 +670,8 @@ test("real HTTPS callback handles denied bank consent without storing a session"
     lastError: "Bank authorization was denied",
   });
   assert.equal(await store.get(), undefined);
+  flow.resetError();
+  assert.deepEqual(flow.status, { pending: false });
 });
 
 test("TLS setup failure prevents provider authorization startup", async () => {

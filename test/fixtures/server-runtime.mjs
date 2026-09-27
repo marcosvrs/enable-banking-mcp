@@ -33,6 +33,8 @@ const oneShotFailures = new Set(
 let healthRequests = 0;
 let applicationRequests = 0;
 let sessionCreates = 0;
+let failFirstSessionCreate =
+  process.env.MCP_TEST_FAIL_FIRST_SESSION_CREATE === "true";
 let certificateDeleteAttempted = false;
 let delayApplicationRegistration =
   process.env.MCP_TEST_DELAY_REGISTRATION === "true";
@@ -180,7 +182,7 @@ globalThis.fetch = async (input, init = {}) => {
         kid: "fixture-app-id",
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
-        active: applicationRequests > 2,
+        active: applicationRequests > 3,
         countries: ["IE"],
         services: ["AIS"],
       });
@@ -202,7 +204,11 @@ globalThis.fetch = async (input, init = {}) => {
     }
     if (url.pathname === "/sessions" && method === "POST") {
       sessionCreates += 1;
-      if (sessionCreates === 3) {
+      if (
+        sessionCreates === 3 ||
+        (failFirstSessionCreate && sessionCreates === 1)
+      ) {
+        failFirstSessionCreate = false;
         return Response.json(
           { message: "fixture session exchange failed" },
           { status: 503 },

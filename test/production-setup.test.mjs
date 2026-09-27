@@ -183,6 +183,21 @@ test("defaults Production contact and policy fields", () => {
   );
 });
 
+test("defaults a whitespace-only Production description", () => {
+  const normalized = normalizeApplicationRegistrationOptions({
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "PRODUCTION",
+    redirectUrl: "https://localhost:8765/callback",
+    description: " \t ",
+  });
+
+  assert.equal(
+    normalized.description,
+    "Read-only personal account-information access",
+  );
+});
+
 test("requires HTTPS policy URLs for Production setup", () => {
   assert.throws(
     () =>
@@ -268,6 +283,36 @@ test("keeps production application linking state when activation lookup fails", 
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
   assert.equal((await applicationStore.get()).appId, "production-app-id");
   assert.equal(await sessionStore.get(), undefined);
+});
+
+test("refreshes cached Production account-link status after activation", async () => {
+  let active = false;
+  let activationChecks = 0;
+  const setup = new ApplicationSetupFlow(
+    setupDependencies({
+      openBrowser: () => {},
+      createBankClient: () => ({
+        async getApplication() {
+          activationChecks += 1;
+          return { active };
+        },
+      }),
+    }),
+  );
+
+  await setup.registerApplication({
+    controlPanelEmail: "user@example.com",
+    appName: "Enable Banking MCP",
+    environment: "PRODUCTION",
+    redirectUrl: "https://localhost:8765/callback",
+  });
+  assert.equal((await waitForSetup(setup)).phase, "account_link");
+
+  active = true;
+  const status = await setup.getStatus();
+  assert.equal(status.phase, "application_ready");
+  assert.equal(setup.status.phase, "application_ready");
+  assert.equal(activationChecks, 1);
 });
 
 test("rejects invalid setup environment and consent metadata before setup starts", () => {

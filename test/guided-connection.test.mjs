@@ -236,6 +236,35 @@ test("a valid session returns authorized accounts before asking for identity or 
   assert.deepEqual(elicitationRequests, []);
 });
 
+test("requests fresh transaction consent when a stored session lacks it", async () => {
+  const { result, state } = await runConnection({
+    sessionId: "balance-only-session",
+    application: storedApplication(),
+    options: {
+      country: "FI",
+      aspspName: "Nordea",
+      accessProfile: "balances_and_transactions",
+    },
+    readAuthorizedAccounts: async () => ({
+      aspsp: { name: "Nordea", country: "FI" },
+      accounts: [{ uid: "account-1" }],
+      access: { balances: true, transactions: false },
+    }),
+    banksByCountry: {
+      FI: [{ name: "Nordea", country: "FI" }],
+    },
+    environmentEmail: "",
+  });
+
+  assert.equal(result.status, "awaiting_user");
+  assert.equal(state.authorizedAccountReads, 1);
+  assert.equal(state.authorizationCalls.length, 1);
+  assert.equal(
+    state.authorizationCalls[0].authorization.accessProfile,
+    "balances_and_transactions",
+  );
+});
+
 test("a terminal stored session falls back to the environment session before setup", async () => {
   const { result, state, elicitationRequests } = await runConnection({
     sessionId: "expired-keychain-session",

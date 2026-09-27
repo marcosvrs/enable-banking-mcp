@@ -930,6 +930,47 @@ test("reserves the setup slot before asynchronous store checks", async () => {
   assert.equal(started.status, "started");
 });
 
+test("blocks setup reservations during credential cleanup", async () => {
+  const { setup } = setupDependencies();
+  let finishCleanup;
+  const cleanup = setup.withCredentialCleanup(
+    () =>
+      new Promise((resolve) => {
+        finishCleanup = resolve;
+      }),
+  );
+  const registration = registrationOptions();
+
+  await assert.rejects(
+    setup.registerApplication(registration),
+    /credential cleanup is pending/,
+  );
+  await assert.rejects(
+    setup.start({
+      ...registration,
+      aspspName: "Example Bank",
+      country: "FI",
+    }),
+    /credential cleanup is pending/,
+  );
+  await assert.rejects(
+    setup.withCredentialCleanup(async () => undefined),
+    /setup or cleanup is pending/,
+  );
+
+  finishCleanup();
+  await cleanup;
+  await assert.rejects(
+    setup.withCredentialCleanup(async () => {
+      throw new Error("cleanup failed");
+    }),
+    /cleanup failed/,
+  );
+  const started = await setup.registerApplication(registration);
+  assert.equal(started.status, "started");
+  assert.equal((await waitForSetup(setup)).phase, "application_ready");
+});
+
 test("rolls back the setup reservation after validation fails", async () => {
   const setup = new ApplicationSetupFlow({
     applicationStore: new MemoryApplicationStore(),
@@ -1269,6 +1310,7 @@ test("reports an empty bank catalog without starting authorization", async () =>
 test("times out Production activation without starting bank authorization", async () => {
   let now = 0;
   let activationChecks = 0;
+  let active = false;
   let authorizationCalls = 0;
   const openedUrls = [];
   const { setup, applicationStore, sessionStore } = setupDependencies({
@@ -1276,7 +1318,7 @@ test("times out Production activation without starting bank authorization", asyn
     createBankClient: () => ({
       async getApplication() {
         activationChecks += 1;
-        return { active: false };
+        return { active };
       },
       async listBanks() {
         return { aspsps: [{ name: "Example Bank" }] };
@@ -1301,6 +1343,9 @@ test("times out Production activation without starting bank authorization", asyn
     country: "FI",
   });
   const status = await waitForSetup(setup);
+  active = true;
+  const refreshedStatus = await setup.getStatus();
+  assert.equal(refreshedStatus.phase, "application_ready");
 
   assert.equal(status.phase, "account_link");
   assert.match(status.message, /resume connect_bank/);
@@ -1365,6 +1410,62 @@ test("reuses matching unexpired Control Panel auth without contacting the provid
   assert.equal(
     await flow.authenticate("USER@example.com", existingAuth),
     existingAuth,
+  );
+});
+
+test("rejects concurrent Control Panel authentication attempts", async () => {
+  let releaseListener;
+  const listenerGate = new Promise((resolve) => {
+    releaseListener = resolve;
+  });
+  let listenerCalls = 0;
+  let emailLinkCalls = 0;
+  const flow = new ControlPanelAuthFlow(
+    {
+      async requestEmailLogin() {
+        emailLinkCalls += 1;
+      },
+      async completeEmailLogin(email, code) {
+        return {
+          email,
+          idToken: `id:${code}`,
+          refreshToken: "refresh-token",
+        };
+      },
+    },
+    async () => {
+      listenerCalls += 1;
+      await listenerGate;
+      return {
+        port: 4321,
+        path: "/callback",
+        wait: Promise.resolve("first-code"),
+        close: async () => {},
+      };
+    },
+  );
+
+  const first = flow.authenticate("first@example.com");
+  await assert.rejects(
+    flow.authenticate("second@example.com"),
+    /Control Panel authentication is already in progress/,
+  );
+  assert.equal(listenerCalls, 1);
+
+  releaseListener();
+  assert.deepEqual(await first, {
+    email: "first@example.com",
+    idToken: "id:first-code",
+    refreshToken: "refresh-token",
+  });
+  assert.equal(emailLinkCalls, 1);
+  let escapedAuthenticate;
+  await flow.withAuthentication(async (authenticate) => {
+    escapedAuthenticate = authenticate;
+  });
+  assert.throws(
+    () => escapedAuthenticate("late@example.com"),
+    /authentication reservation has ended/,
   );
 });
 

@@ -743,6 +743,105 @@ test("reserves authorization before loading stored credentials during cleanup", 
   }
 });
 
+test("blocks application registration while credentials are being cleared", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_DELAY_APPLICATION_LOOKUP: "true",
+  });
+  try {
+    const cleanupPromise = callTool(
+      server.client,
+      "clear_local_credentials",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const registration = await callTool(server.client, "register_application", {
+      environment: "SANDBOX",
+    });
+    assert.equal(registration.isError, true);
+    assert.match(
+      registration.content[0].text,
+      /Cannot start setup while credential cleanup is pending/,
+    );
+
+    const cleanup = toolValue(await cleanupPromise);
+    assert.equal(cleanup.cleared, true);
+  } finally {
+    await server.close();
+  }
+});
+
+test("successful credential cleanup clears failed authorization state", async () => {
+  const server = await startIsolatedServer({
+    MCP_TEST_FAIL_FIRST_SESSION_CREATE: "true",
+  });
+  try {
+    await callTool(server.client, "register_application", {
+      environment: "SANDBOX",
+    });
+    await waitForToolValue(
+      server.client,
+      "setup_status",
+      (status) => status.phase === "application_ready" && !status.pending,
+    );
+
+    const authorization = toolValue(
+      await callTool(server.client, "authorize_bank", {
+        aspsp_name: "Fixture Bank",
+        country: "IE",
+      }),
+    );
+    assert.equal(authorization.status, "awaiting_user");
+
+    let failedAuthorization;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const result = toolValue(
+        await callTool(server.client, "connect_bank", {
+          environment: "SANDBOX",
+          country: "IE",
+          aspsp_name: "Fixture Bank",
+        }),
+      );
+      if (result.status === "failed") {
+        failedAuthorization = result;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.match(
+      failedAuthorization?.error ?? "",
+      /fixture session exchange failed/,
+    );
+
+    const cleanup = toolValue(
+      await callTool(server.client, "clear_local_credentials"),
+    );
+    assert.equal(cleanup.cleared, true);
+
+    const registration = toolValue(
+      await callTool(server.client, "connect_bank", {
+        environment: "SANDBOX",
+      }),
+    );
+    assert.equal(registration.status, "setup_started");
+    await waitForToolValue(
+      server.client,
+      "setup_status",
+      (status) => status.phase === "application_ready" && !status.pending,
+    );
+
+    const freshAuthorization = toolValue(
+      await callTool(server.client, "connect_bank", {
+        environment: "SANDBOX",
+        country: "IE",
+        aspsp_name: "Fixture Bank",
+      }),
+    );
+    assert.equal(freshAuthorization.status, "awaiting_user");
+  } finally {
+    await server.close();
+  }
+});
+
 
 test("clears recoverable state when the persisted application record is malformed", async () => {
   const server = await startIsolatedServer({

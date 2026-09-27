@@ -56,7 +56,7 @@ export async function connectBank(
     dependencies.applicationStore.get(),
   ]);
   const environmentSessionId = dependencies.getEnvironmentSessionId();
-  const connected = await recoverConfiguredSession({
+  const connected = await recoverConfiguredSession<Record<string, unknown>>({
     storedSession,
     environmentSessionId,
     read: async () => ({
@@ -67,7 +67,16 @@ export async function connectBank(
     clearEnvironmentSession: () =>
       dependencies.clearEnvironmentSession(environmentSessionId),
   });
-  if (connected) return connected;
+  const transactionAccess =
+    typeof connected?.access === "object" &&
+    connected.access !== null &&
+    (connected.access as Record<string, unknown>).transactions === true;
+  if (
+    connected &&
+    (options.accessProfile !== "balances_and_transactions" || transactionAccess)
+  ) {
+    return connected;
+  }
 
   const setupStatus = dependencies.setupFlow.status;
   if (setupStatus.pending) {

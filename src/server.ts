@@ -383,14 +383,14 @@ server.registerTool(
   },
   async () =>
     safely(() =>
-      controlPanelAuth.withAuthentication(async () => {
+      controlPanelAuth.withAuthentication(async (authenticate) => {
         const existingAuth = await controlPanelAuthStore.get();
         const email = await resolveControlPanelEmail(
           CONTROL_PANEL_EMAIL_ENV,
           existingAuth?.email,
         );
         if (typeof email !== "string") return email;
-        const auth = await controlPanelAuth.authenticate(email, existingAuth);
+        const auth = await authenticate(email, existingAuth);
         if (auth !== existingAuth) await controlPanelAuthStore.set(auth);
         return {
           authenticated: true,
@@ -924,7 +924,7 @@ server.registerTool(
         throw new Error("Cannot clear credentials while setup or authorization is pending");
       }
 
-      return authorizationFlow.withCredentialCleanup(() =>
+      const clearLocalCredentialStores = () =>
         controlPanelAuth.withCredentialCleanup(async () => {
           const failures: string[] = [];
           let trustedCertificateRemoved = false;
@@ -966,8 +966,10 @@ server.registerTool(
           await clearStore("control_panel_auth", () => controlPanelAuthStore.clear());
 
           const cleared = failures.length === 0;
-          if (cleared) setupFlow.reset();
-
+          if (cleared) {
+            setupFlow.reset();
+            authorizationFlow.resetError();
+          }
           const environmentCredentialsPresent = Boolean(
             process.env.ENABLE_BANKING_APP_ID?.trim() ||
               process.env.ENABLE_BANKING_ID?.trim() ||
@@ -979,7 +981,9 @@ server.registerTool(
             environment_credentials_present: environmentCredentialsPresent,
             ...(failures.length > 0 ? { failed_items: failures } : {}),
           };
-        }),
+        });
+      return setupFlow.withCredentialCleanup(() =>
+        authorizationFlow.withCredentialCleanup(clearLocalCredentialStores),
       );
     }),
 );
