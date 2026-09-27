@@ -31,7 +31,7 @@ export interface GuidedConnectionDependencies {
   applicationStore: Pick<ApplicationStore, "get">;
   sessionStore: Pick<SessionStore, "get" | "clear">;
   setupFlow: Pick<ApplicationSetupFlow, "status" | "registerApplication" | "start">;
-  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start">;
+  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start" | "resetError">;
   controlPanelAuthStore: Pick<ControlPanelAuthStore, "get">;
   resolveControlPanelEmail(
     environmentName: string,
@@ -135,6 +135,17 @@ export async function connectBank(
       phase: "bank_authorization",
       message:
         "Bank authentication is open. After the user completes sign-in/MFA and explicit consent, the MCP agent should call connect_bank itself to verify and return authorized accounts.",
+    };
+  }
+
+  if (dependencies.authorizationFlow.status.lastError) {
+    const error = dependencies.authorizationFlow.status.lastError;
+    dependencies.authorizationFlow.resetError();
+    return {
+      status: "failed",
+      phase: "bank_authorization",
+      error,
+      message: "Bank authorization failed or was denied. Call connect_bank again to retry.",
     };
   }
 

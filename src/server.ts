@@ -707,19 +707,29 @@ server.registerTool(
           "Enable Banking setup is already in progress; call setup_status or connect_bank instead",
         );
       }
-      const application = await applicationStore.get();
-      const credentials = application
-        ? { appId: application.appId, privateKey: application.privateKey }
-        : await resolveCredentials();
-      /* c8 ignore next 4 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
-      return authorizationFlow.start(new EnableBankingClient(credentials), {
-        aspspName: aspsp_name,
-        country,
-        redirectUrl:
-          redirect_url ?? application?.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
-        validUntil: valid_until,
-        accessProfile: access_profile as AccessProfile,
-      });
+      authorizationFlow.reserve();
+      try {
+        const application = await applicationStore.get();
+        const credentials = application
+          ? { appId: application.appId, privateKey: application.privateKey }
+          : await resolveCredentials();
+        /* c8 ignore next 4 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
+        return await authorizationFlow.start(
+          new EnableBankingClient(credentials),
+          {
+            aspspName: aspsp_name,
+            country,
+            redirectUrl:
+              redirect_url ?? application?.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
+            validUntil: valid_until,
+            accessProfile: access_profile as AccessProfile,
+          },
+          true,
+        );
+      } catch (error) {
+        authorizationFlow.release();
+        throw error;
+      }
     }),
 );
 

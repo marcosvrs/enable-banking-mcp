@@ -88,12 +88,27 @@ export class BankAuthorizationFlow {
     };
   }
 
+  resetError(): void {
+    this.lastError = undefined;
+  }
+  reserve(): void {
+    if (this.starting || this.pending) {
+      throw new Error("Bank authorization is already in progress");
+    }
+    this.starting = true;
+  }
+
+  release(): void {
+    this.starting = false;
+  }
+
   async start(
     client: EnableBankingClient,
     options: BankAuthorizationOptions,
+    reserved = false,
   ): Promise<AuthorizationStartResult> {
-    if (this.starting || this.pending) {
-      throw new Error("Bank authorization is already in progress");
+    if (!reserved) {
+      this.reserve();
     }
 
     const redirect = parseLoopbackRedirect(options.redirectUrl);

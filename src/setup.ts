@@ -676,7 +676,7 @@ export async function removeTrustedCertificate(
 ): Promise<void> {
   let fingerprint: string;
   try {
-    fingerprint = new X509Certificate(certificate).fingerprint256.replaceAll(
+    fingerprint = new X509Certificate(certificate).fingerprint.replaceAll(
       ":",
       "",
     );
