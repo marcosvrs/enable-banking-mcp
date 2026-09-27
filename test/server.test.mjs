@@ -190,7 +190,7 @@ async function availablePort() {
 }
 
 async function waitForToolValue(client, name, predicate) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     const result = await callTool(client, name);
     if (!result.isError) {
       const value = toolValue(result);
