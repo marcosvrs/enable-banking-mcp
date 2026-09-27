@@ -303,6 +303,17 @@ provenance-enabled public npm publication through GitHub Actions OIDC, then
 smoke-tests the published MCP package through both bundled plugin manifests.
 Do not put npm tokens in this repository, an MCP configuration, or a prompt.
 
+### Deploy the documentation site
+
+The GitHub Pages site is built from `docs/`. Its workflow builds and validates
+documentation changes on pull requests, then deploys changes to `main` to the
+`github-pages` environment. It can also be run manually with
+`workflow_dispatch`. The MCP server itself remains a locally run,
+self-hosted application; this workflow deploys only the static documentation.
+
+For the workflow to publish, set the repository’s Pages build and deployment
+source to **GitHub Actions** in Settings → Pages.
+
 ## First-run flow
 
 The setup tools read the Control Panel email from local
