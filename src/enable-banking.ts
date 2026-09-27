@@ -313,8 +313,8 @@ export class EnableBankingClient {
       pages += 1;
 
       const pageTransactions = page.transactions ?? [];
-      // The limit controls whether another page is fetched, not truncation of
-      // an already-fetched provider page. Truncating here would lose its tail.
+      // `limit` is a target, not a hard cap: provider pages are indivisible,
+      // so a final page may exceed it rather than losing its unreturned tail.
       transactions.push(...pageTransactions);
 
       const providerContinuation = page.continuation_key ?? undefined;

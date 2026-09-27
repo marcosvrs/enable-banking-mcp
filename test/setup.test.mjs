@@ -1295,6 +1295,8 @@ test("times out pending bank consent without discarding the registered applicati
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "Bank authorization did not complete before setup timed out");
+  assert.equal(status.authorizationUrl, undefined);
+  assert.equal(status.message, undefined);
   assert.equal(authorizationCalls, 1);
   assert.equal((await applicationStore.get()).appId, "recorded-app-id");
   assert.equal(await sessionStore.get(), undefined);

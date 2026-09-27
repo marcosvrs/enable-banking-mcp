@@ -371,12 +371,12 @@ export class ApplicationSetupFlow {
         message: "Enable Banking setup is complete",
       });
     } catch (error) {
-      this.update({
+      this.current = {
         phase: "failed",
         pending: false,
         ...(application?.appId ? { appId: application.appId } : {}),
         error: error instanceof Error ? error.message : String(error),
-      });
+      };
     }
   }
 

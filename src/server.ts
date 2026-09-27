@@ -854,7 +854,7 @@ server.registerTool(
         .min(1)
         .max(100)
         .default(25)
-        .describe("Maximum transactions to return"),
+        .describe("Target transaction count; the final provider page may exceed it"),
     },
   },
   async ({

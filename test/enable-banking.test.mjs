@@ -187,7 +187,7 @@ test("accepts base64-encoded DER private keys", () => {
   assert.equal(key.asymmetricKeyType, "rsa");
 });
 
-test("paginates transactions and stops at the requested limit", async () => {
+test("fetches provider pages until reaching the requested transaction target", async () => {
   const { privateKey } = testKey();
   const calls = [];
   const client = new EnableBankingClient(
@@ -230,7 +230,7 @@ test("paginates transactions and stops at the requested limit", async () => {
   assert.equal(limited.hasMore, true);
   assert.equal(limited.continuationKey, "next");
 });
-test("returns every transaction from a provider page that exceeds the client limit", async () => {
+test("returns complete provider pages that exceed the transaction target", async () => {
   const { privateKey } = testKey();
   const client = new EnableBankingClient(
     { appId: "app-id", privateKey },

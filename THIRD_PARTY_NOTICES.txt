@@ -7,17 +7,21 @@ This repository's original code is distributed under the MIT License in
 LICENSE. It does not include Enable Banking, bank, ASPSP, or other provider
 software, data, credentials, or trademarks.
 
-The npm dependency tree includes the packages below. Each package retains its
-own copyright and license terms. When redistributing installed dependencies,
-include the package's license and notice files from node_modules/<package>.
-The package-lock.json file records the resolved dependency versions.
+This inventory covers the production dependency set used by supported macOS
+builds, including the optional Darwin arm64 and x64 keyring binaries. It
+excludes development-only dependencies and optional binaries for other
+operating systems. Each package retains its own copyright and license terms.
+When redistributing installed dependencies, include each package's license
+and notice files from node_modules/<package>. The package-lock.json file
+records the resolved dependency versions.
 
 Package                                      Version   License
 -------                                      -------   -------
 @hono/node-server                           2.1.1     MIT
 @modelcontextprotocol/sdk                    1.30.0    MIT
 @napi-rs/keyring                             2.1.0     MIT
-@types/node                                  25.0.0    MIT
+@napi-rs/keyring-darwin-arm64                2.1.0     MIT
+@napi-rs/keyring-darwin-x64                  2.1.0     MIT
 accepts                                      2.0.0     MIT
 ajv                                          8.20.0    MIT
 ajv-formats                                  3.0.1     MIT
@@ -102,8 +106,6 @@ side-channel-weakmap                          1.0.2     MIT
 statuses                                       2.0.2     MIT
 toidentifier                                  1.0.1     MIT
 type-is                                       2.1.0     MIT
-typescript                                    5.9.3     Apache-2.0
-undici-types                                  7.16.0     MIT
 unpipe                                         1.0.0     MIT
 vary                                           1.1.2     MIT
 which                                          2.0.2     ISC
@@ -111,7 +113,7 @@ wrappy                                         1.0.2     ISC
 zod                                            4.5.2     MIT
 zod-to-json-schema                              3.25.2    ISC
 
-License identifiers above are the package metadata observed in the resolved
-npm tree. Before redistributing a changed dependency tree, regenerate this
-inventory and preserve the exact license and notice files shipped by each
-package.
+License identifiers are package metadata from the resolved macOS production
+dependency set. Before redistributing a changed production dependency tree,
+refresh this inventory and preserve the license and notice files shipped by
+each package.
