@@ -19,7 +19,7 @@ The source code is open source under the [MIT License](LICENSE). MIT permits dow
 
 ## Requirements
 
-- macOS, because credentials and certificate trust use macOS Keychain (credentials use the native `@napi-rs/keyring` API; `/usr/bin/security` remains used for certificate trust and legacy credential cleanup);
+- macOS, because credentials and certificate trust use macOS Keychain (credentials use the native `@napi-rs/keyring` API; `/usr/bin/security` is used for certificate trust);
 - Node.js 22 or newer;
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
@@ -80,7 +80,7 @@ and [Codex configuration reference](https://developers.openai.com/codex/config-r
 The published package is the easiest route for clients that support npm:
 
 ```sh
-npx -y enable-banking-mcp@0.3.0-beta.11
+npx -y enable-banking-mcp@0.4.0-beta.0
 ```
 
 The release workflow publishes the unscoped `enable-banking-mcp` package to
@@ -96,7 +96,7 @@ For clients that accept an `mcpServers` JSON block, use the published package:
   "mcpServers": {
     "enable-banking-mcp": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.3.0-beta.11"],
+      "args": ["-y", "enable-banking-mcp@0.4.0-beta.0"],
       "env": {
         "ENABLE_BANKING_CONTROL_PANEL_EMAIL": "you@example.com"
       }
@@ -121,7 +121,7 @@ claude mcp add --scope user \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
   --transport stdio \
   enable-banking-mcp -- \
-  npx -y enable-banking-mcp@0.3.0-beta.11
+  npx -y enable-banking-mcp@0.4.0-beta.0
 ```
 
 Use `--scope local` instead of `--scope user` to limit the server to the
@@ -151,7 +151,7 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 ```sh
 codex mcp add enable-banking-mcp \
   --env 'ENABLE_BANKING_CONTROL_PANEL_EMAIL=you@example.com' \
-  -- npx -y enable-banking-mcp@0.3.0-beta.11
+  -- npx -y enable-banking-mcp@0.4.0-beta.0
 ```
 
 The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop
@@ -267,6 +267,11 @@ stdio-facing code remains covered by the regression suite but is excluded from
 the score; in particular, the stdio integration test launches a child process
 outside Stryker's mutant instrumentation.
 
+The asynchronous application core uses Effect 3.22.2 for provider calls,
+credential storage, callback lifecycles, and setup workflows. Effect values are
+run at the MCP transport and process boundaries; pure validation and
+transformation functions remain ordinary TypeScript functions.
+
 The only coverage exclusions are narrow defensive states and a V8 source-map
 gap on `authorize_bank`'s request literal, which is exercised by the isolated
 stdio integration test.
@@ -309,8 +314,9 @@ The setup tools read the Control Panel email from local
 `ENABLE_BANKING_CONTROL_PANEL_EMAIL` configuration or reuse a Keychain
 identity. When neither exists, `connect_bank` and the authentication tools use
 MCP form elicitation if supported; otherwise configure the local environment.
-Application credentials and callback certificates are stored in the macOS
-login Keychain.
+The application credentials, current Enable Banking session, and Control Panel
+authentication share one native Keychain credential item. A locally trusted
+callback certificate remains a separate non-secret Keychain item.
 
 The setup schemas default to personal `PRODUCTION` and use the Control Panel
 email as the Production application's data-protection contact. They also

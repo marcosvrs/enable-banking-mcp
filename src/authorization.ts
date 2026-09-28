@@ -1,3 +1,4 @@
+import { Cause, Effect } from "effect";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -41,11 +42,13 @@ export interface AuthorizationStartResult {
   authorization_url: string;
 }
 
-export type BrowserOpener = (url: string) => void;
+export type BrowserOpener = (
+  url: string,
+) => Effect.Effect<void, unknown>;
 
 export type CallbackListener = {
-  wait: Promise<string>;
-  close: () => Promise<void>;
+  wait: Effect.Effect<string, unknown>;
+  close: Effect.Effect<void, unknown>;
 };
 
 export type CallbackTlsOptions = {
@@ -53,15 +56,16 @@ export type CallbackTlsOptions = {
   cert: Buffer;
 };
 
-export type CallbackTlsOptionsProvider = () =>
-  | CallbackTlsOptions
-  | Promise<CallbackTlsOptions>;
+export type CallbackTlsOptionsProvider = () => Effect.Effect<
+  CallbackTlsOptions,
+  unknown
+>;
 
 export type CallbackListenerFactory = (
   redirect: LoopbackRedirect,
   expectedState: string,
   tlsOptionsProvider?: CallbackTlsOptionsProvider,
-) => Promise<CallbackListener>;
+) => Effect.Effect<CallbackListener, unknown>;
 
 type PendingAuthorization = {
   listener: CallbackListener;
@@ -79,7 +83,7 @@ export class BankAuthorizationFlow {
     private readonly listenerFactory: CallbackListenerFactory =
       createCallbackListener,
     private readonly tlsOptionsProvider: CallbackTlsOptionsProvider =
-      loadCallbackTlsOptions,
+      loadCallbackTlsOptionsEffect,
   ) {}
 
   get status(): { pending: boolean; lastError?: string } {
@@ -108,113 +112,150 @@ export class BankAuthorizationFlow {
     this.lastError = undefined;
   }
 
-  async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.starting || this.pending || this.credentialCleanupPending) {
-      throw new Error(
-        "Cannot clear credentials while bank authorization or cleanup is pending",
-      );
-    }
-    this.credentialCleanupPending = true;
-    try {
-      return await operation();
-    } finally {
-      this.credentialCleanupPending = false;
-    }
-  }
-
-  async start(
-    client: EnableBankingClient,
-    options: BankAuthorizationOptions,
-  ): Promise<AuthorizationStartResult> {
-    this.reserve();
-    return this.startReserved(client, options);
-  }
-
-  async startReserved(
-    client: EnableBankingClient,
-    options: BankAuthorizationOptions,
-  ): Promise<AuthorizationStartResult> {
-    if (!this.starting || this.pending) {
-      throw new Error("Bank authorization reservation is not active");
-    }
-
-    let redirect: LoopbackRedirect;
-    let validUntil: string;
-    let state: string;
-    let listener: CallbackListener;
-    try {
-      redirect = parseLoopbackRedirect(options.redirectUrl);
-      validUntil = parseValidUntil(options.validUntil);
-      state = randomBytes(32).toString("base64url");
-      listener = await this.listenerFactory(
-        redirect,
-        state,
-        this.tlsOptionsProvider,
-      );
-    } catch (error) {
-      this.starting = false;
-      throw error;
-    }
-    this.pending = { listener };
-    this.starting = false;
-    this.lastError = undefined;
-    try {
-      const authorization = await client.startAuthorization({
-        aspsp: {
-          name: options.aspspName.trim(),
-          country: options.country.trim().toUpperCase(),
-        },
-        access: {
-          balances: true,
-          transactions: options.accessProfile === "balances_and_transactions",
-          valid_until: validUntil,
-        },
-        state,
-        redirect_url: options.redirectUrl,
-        psu_type: "personal",
-      });
-      validateAuthorizationUrl(authorization.url);
-      this.openBrowser(authorization.url);
-      void this.finish(client, listener);
-      return {
-        status: "awaiting_user",
-        authorization_url: authorization.url,
-      };
-    } catch (error) {
-      if (this.pending?.listener === listener) {
-        this.pending = undefined;
+  withCredentialCleanup<T>(
+    operation: () => Effect.Effect<T, unknown>,
+  ): Effect.Effect<T, unknown> {
+    return Effect.gen(this, function* () {
+      if (this.starting || this.pending || this.credentialCleanupPending) {
+        return yield* Effect.fail(
+          new Error(
+            "Cannot clear credentials while bank authorization or cleanup is pending",
+          ),
+        );
       }
-      await listener.close();
-      throw error;
-    }
+      this.credentialCleanupPending = true;
+      return yield* Effect.ensuring(
+        operation(),
+        Effect.sync(() => {
+          this.credentialCleanupPending = false;
+        }),
+      );
+    });
   }
 
-  private async finish(
+  start(
     client: EnableBankingClient,
-    listener: CallbackListener,
-  ): Promise<void> {
-    try {
-      const code = await listener.wait;
-      const session = await client.createSession(code);
-      await this.sessionStore.set(session.session_id);
-    } catch (error) {
-      this.lastError = error instanceof Error ? error.message : String(error);
-    } finally {
+    options: BankAuthorizationOptions,
+  ): Effect.Effect<AuthorizationStartResult, unknown> {
+    return Effect.gen(this, function* () {
+      yield* Effect.sync(() => this.reserve());
+      return yield* this.startReserved(client, options);
+    });
+  }
+
+  startReserved(
+    client: EnableBankingClient,
+    options: BankAuthorizationOptions,
+  ): Effect.Effect<AuthorizationStartResult, unknown> {
+    let acquiredListener: CallbackListener | undefined;
+    return Effect.gen(this, function* () {
+      if (!this.starting || this.pending) {
+        return yield* Effect.fail(
+          new Error("Bank authorization reservation is not active"),
+        );
+      }
+
+      let redirect: LoopbackRedirect;
+      let state: string;
+      let validUntil: string;
       try {
-        await listener.close();
+        redirect = parseLoopbackRedirect(options.redirectUrl);
+        validUntil = parseValidUntil(options.validUntil);
+        state = randomBytes(32).toString("base64url");
       } catch (error) {
-        if (!this.lastError) {
-          this.lastError =
-            error instanceof Error ? error.message : String(error);
-        }
-      } finally {
+        this.starting = false;
+        return yield* Effect.fail(error);
+      }
+      const listenerResult = yield* Effect.exit(
+        this.listenerFactory(redirect, state, this.tlsOptionsProvider),
+      );
+      if (listenerResult._tag === "Failure") {
+        this.starting = false;
+        return yield* Effect.fail(Cause.squash(listenerResult.cause));
+      }
+      const listener = acquiredListener = listenerResult.value;
+
+      this.pending = { listener };
+      this.starting = false;
+      this.lastError = undefined;
+      const authorizationResult = yield* Effect.exit(
+        Effect.gen(this, function* () {
+          const authorization = yield* client.startAuthorization({
+            aspsp: {
+              name: options.aspspName.trim(),
+              country: options.country.trim().toUpperCase(),
+            },
+            access: {
+              balances: true,
+              transactions: options.accessProfile === "balances_and_transactions",
+              valid_until: validUntil,
+            },
+            state,
+            redirect_url: options.redirectUrl,
+            psu_type: "personal",
+          });
+          validateAuthorizationUrl(authorization.url);
+          yield* this.openBrowser(authorization.url);
+          return authorization.url;
+        }),
+      );
+      if (authorizationResult._tag === "Failure") {
         if (this.pending?.listener === listener) {
           this.pending = undefined;
         }
+        yield* listener.close.pipe(Effect.catchAllCause(() => Effect.void));
+        return yield* Effect.fail(Cause.squash(authorizationResult.cause));
       }
-    }
+      yield* Effect.forkDaemon(this.finish(client, listener));
+      return {
+        status: "awaiting_user" as const,
+        authorization_url: authorizationResult.value,
+      };
+    }).pipe(
+      Effect.onInterrupt(() => {
+        this.starting = false;
+        if (!acquiredListener) return Effect.void;
+        if (this.pending?.listener === acquiredListener) this.pending = undefined;
+        return acquiredListener.close.pipe(Effect.catchAll(() => Effect.void));
+      }),
+    );
+  }
+
+  private finish(
+    client: EnableBankingClient,
+    listener: CallbackListener,
+  ): Effect.Effect<void, never> {
+    return Effect.gen(this, function* () {
+      const completion = Effect.gen(this, function* () {
+        const code = yield* listener.wait;
+        const session = yield* client.createSession(code);
+        yield* this.sessionStore.set(session.session_id);
+      });
+      yield* completion.pipe(
+        Effect.catchAllCause((cause) =>
+          Effect.sync(() => {
+            this.lastError = messageForCause(cause);
+          }),
+        ),
+      );
+      yield* listener.close.pipe(
+        Effect.catchAllCause((cause) =>
+          Effect.sync(() => {
+            if (!this.lastError) this.lastError = messageForCause(cause);
+          }),
+        ),
+      );
+      if (this.pending?.listener === listener) {
+        this.pending = undefined;
+      }
+    });
   }
 }
+function messageForCause(cause: Cause.Cause<unknown>): string {
+  const error = Cause.squash(cause);
+  return error instanceof Error ? error.message : String(error);
+}
+
 
 export function parseValidUntil(value?: string): string {
   if (value !== undefined) {
@@ -270,89 +311,101 @@ export function loadCallbackTlsOptions(): CallbackTlsOptions {
   }
 }
 
-async function createCallbackListener(
+function loadCallbackTlsOptionsEffect(): Effect.Effect<
+  CallbackTlsOptions,
+  unknown
+> {
+  return Effect.try({
+    try: loadCallbackTlsOptions,
+    catch: (error) => error,
+  });
+}
+
+function createCallbackListener(
   redirect: LoopbackRedirect,
   expectedState: string,
-  tlsOptionsProvider: CallbackTlsOptionsProvider = loadCallbackTlsOptions,
-): Promise<CallbackListener> {
-  const { promise: codePromise, resolve, reject } =
-    Promise.withResolvers<string>();
-  const handleCallback = (
-    request: IncomingMessage,
-    response: ServerResponse,
-  ): void => {
-    const requestUrl = new URL(
-      request.url ?? "/",
-      `${redirect.protocol}//${redirect.hostname}:${redirect.port}`,
-    );
-    if (request.method !== "GET" || requestUrl.pathname !== redirect.path) {
-      response.writeHead(404);
-      response.end();
-      return;
-    }
-
-    const receivedState = requestUrl.searchParams.get("state");
-    if (!receivedState || !sameSecret(expectedState, receivedState)) {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("Invalid authorization state.");
-      return;
-    }
-
-    if (requestUrl.searchParams.has("error")) {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("Bank authorization was denied.");
-      reject(new Error("Bank authorization was denied"));
-      return;
-    }
-
-    const code = requestUrl.searchParams.get("code");
-    if (!code) {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("Authorization code was not provided.");
-      return;
-    }
-
-    response.writeHead(200, { "content-type": "text/plain" });
-    response.end("Bank authorization complete. You may close this window.");
-    resolve(code);
-  };
-  const server = createHttpsServer(
-    await tlsOptionsProvider(),
-    handleCallback,
-  );
-
-  const { promise: listening, resolve: markListening, reject: failListening } =
-    Promise.withResolvers<void>();
-  server.once("error", failListening);
-  server.listen(redirect.port, redirect.hostname, () => markListening());
-  try {
-    await listening;
-  } catch (error) {
-    server.close();
-    throw error;
-  }
-
-  const timeout = setTimeout(() => {
-    reject(new Error("Bank authorization timed out"));
-  }, CALLBACK_TIMEOUT_MS);
-  timeout.unref();
-
-  let closed = false;
-  const close = async (): Promise<void> => {
-    if (closed) return;
-    closed = true;
-    clearTimeout(timeout);
-    if (!server.listening) return;
-    const { promise: closedPromise, resolve: markClosed, reject: failClosed } =
-      Promise.withResolvers<void>();
-    server.close((error) => {
-      if (error) failClosed(error);
-      else markClosed();
+  tlsOptionsProvider: CallbackTlsOptionsProvider = loadCallbackTlsOptionsEffect,
+): Effect.Effect<CallbackListener, unknown> {
+  return Effect.gen(function* () {
+    let timeout: NodeJS.Timeout | undefined;
+    const tlsOptions = yield* tlsOptionsProvider();
+    let resumeCallback: ((effect: Effect.Effect<string, unknown>) => void) | undefined;
+    const wait = Effect.async<string, unknown>((resume) => {
+      resumeCallback = resume;
+      timeout = setTimeout(
+        () => resume(Effect.fail(new Error("Bank authorization timed out"))),
+        CALLBACK_TIMEOUT_MS,
+      );
+      timeout.unref();
+      return Effect.sync(() => clearTimeout(timeout));
     });
-    await closedPromise;
-  };
+    const handleCallback = (
+      request: IncomingMessage,
+      response: ServerResponse,
+    ): void => {
+      const requestUrl = new URL(
+        request.url ?? "/",
+        `${redirect.protocol}//${redirect.hostname}:${redirect.port}`,
+      );
+      if (request.method !== "GET" || requestUrl.pathname !== redirect.path) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      const receivedState = requestUrl.searchParams.get("state");
+      if (!receivedState || !sameSecret(expectedState, receivedState)) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end("Invalid authorization state.");
+        return;
+      }
+      if (requestUrl.searchParams.has("error")) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end("Bank authorization was denied.");
+        resumeCallback?.(Effect.fail(new Error("Bank authorization was denied")));
+        return;
+      }
+      const code = requestUrl.searchParams.get("code");
+      if (!code) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end("Authorization code was not provided.");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("Bank authorization complete. You may close this window.");
+      resumeCallback?.(Effect.succeed(code));
+    };
+    const server = yield* Effect.try({
+      try: () => createHttpsServer(tlsOptions, handleCallback),
+      catch: (error) => error,
+    });
+    yield* Effect.async<void, unknown>((resume) => {
+      server.once("error", (error) => resume(Effect.fail(error)));
+      server.listen(redirect.port, redirect.hostname, () =>
+        resume(Effect.succeed(undefined)),
+      );
+      return Effect.sync(() => {
+        if (!server.listening) server.close();
+      });
+    });
 
-  return { wait: codePromise, close };
+    let closed = false;
+    const close = Effect.suspend(() => {
+      if (closed) return Effect.void;
+      closed = true;
+      clearTimeout(timeout);
+      return Effect.async<void, unknown>((resume) => {
+        if (!server.listening) {
+          resume(Effect.succeed(undefined));
+          return;
+        }
+        server.close((error) => {
+          if (error) resume(Effect.fail(error));
+          else resume(Effect.succeed(undefined));
+        });
+      });
+    });
+    return { wait, close };
+  });
 }
 
 function validateAuthorizationUrl(value: unknown): asserts value is string {
@@ -378,10 +431,15 @@ function sameSecret(expected: string, received: string): boolean {
   );
 }
 
-export function launchBrowser(url: string): void {
-  const browser = spawn("/usr/bin/open", [url], {
-    stdio: "ignore",
-    detached: true,
+export function launchBrowser(url: string): Effect.Effect<void, unknown> {
+  return Effect.try({
+    try: () => {
+      const browser = spawn("/usr/bin/open", [url], {
+        stdio: "ignore",
+        detached: true,
+      });
+      browser.unref();
+    },
+    catch: (error) => error,
   });
-  browser.unref();
 }

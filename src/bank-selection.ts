@@ -1,9 +1,12 @@
+import { Effect } from "effect";
+
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { elicitFormString } from "./elicitation.js";
 
 export interface BankCatalogClient {
-  listBanks(country?: string): Promise<unknown>;
+  listBanks(country?: string): Effect.Effect<unknown, unknown>;
 }
+
 
 export type BankChoice = { name: string; country: string };
 
@@ -39,13 +42,14 @@ export type BankSelectionResult =
     }
   | { status: "no_banks"; country: string; message: string };
 
-export async function resolveBankSelection(options: {
+export function resolveBankSelection(options: {
   client: BankCatalogClient;
   mcpServer: McpServer["server"];
   applicationCountries: readonly string[];
   country?: string;
   aspspName?: string;
-}): Promise<BankSelectionResult> {
+}): Effect.Effect<BankSelectionResult, unknown> {
+  return Effect.gen(function* () {
   let country = options.country?.trim().toUpperCase();
   const applicationCountries = normalizeCountryCodes(
     options.applicationCountries,
@@ -57,7 +61,7 @@ export async function resolveBankSelection(options: {
   let selectedBank: BankChoice | undefined;
 
   if (!country && (requestedName || applicationCountries.length !== 1)) {
-    allBanks = extractBankChoices(await options.client.listBanks());
+    allBanks = extractBankChoices(yield* options.client.listBanks());
     catalogBanks = allBanks.filter(
       (bank) =>
         /^[A-Z]{2}$/.test(bank.country) &&
@@ -83,7 +87,7 @@ export async function resolveBankSelection(options: {
       selectedBank = matches[0];
       country = selectedBank.country;
     } else if (matches.length > 1) {
-      const choice = await promptForBank(
+      const choice = yield* promptForBank(
         options.mcpServer,
         matches,
         `Enable Banking lists "${requestedName}" in multiple countries. Choose the bank and country to authorize.`,
@@ -109,7 +113,7 @@ export async function resolveBankSelection(options: {
     if (supportedCountries.length === 1) {
       country = supportedCountries[0];
     } else {
-      const choice = await promptForCountry(
+      const choice = yield* promptForCountry(
         options.mcpServer,
         supportedCountries,
       );
@@ -120,9 +124,9 @@ export async function resolveBankSelection(options: {
     }
   }
   if (!country && selectedBank) country = selectedBank.country;
-  if (!country) throw new Error("No country was selected");
+  if (!country) return yield* Effect.fail(new Error("No country was selected"));
   if (!/^[A-Z]{2}$/.test(country)) {
-    throw new Error("country must be a two-letter ISO 3166-1 code");
+    return yield* Effect.fail(new Error("country must be a two-letter ISO 3166-1 code"));
   }
   if (
     applicationCountrySet.size > 0 &&
@@ -141,7 +145,7 @@ export async function resolveBankSelection(options: {
       catalogBanks && catalogBanks.length > 0
         ? catalogBanks.filter((bank) => bank.country === country)
         : extractBankChoices(
-            await options.client.listBanks(country),
+            yield* options.client.listBanks(country),
             country,
           );
     if (banks.length === 0) {
@@ -157,7 +161,7 @@ export async function resolveBankSelection(options: {
         (bank) => bank.name.toLowerCase() === requestedName.toLowerCase(),
       );
       if (!selectedBank) {
-        const choice = await promptForBank(
+        const choice = yield* promptForBank(
           options.mcpServer,
           banks,
           `"${requestedName}" is not an exact match for a personal AIS bank in ${country}. Choose an available bank to continue.`,
@@ -170,7 +174,7 @@ export async function resolveBankSelection(options: {
     } else if (banks.length === 1) {
       selectedBank = banks[0];
     } else {
-      const choice = await promptForBank(
+      const choice = yield* promptForBank(
         options.mcpServer,
         banks,
         `Choose the personal bank (ASPSP) in ${country} for read-only account access.`,
@@ -184,9 +188,10 @@ export async function resolveBankSelection(options: {
 
   /* c8 ignore next 3 -- All non-selected choices return a required-input result before this invariant. */
   if (!selectedBank) {
-    throw new Error("No personal AIS bank was selected");
+    return yield* Effect.fail(new Error("No personal AIS bank was selected"));
   }
   return { status: "selected", country, bank: selectedBank };
+  });
 }
 
 function normalizeCountryCodes(countries: readonly string[]): string[] {
@@ -228,36 +233,38 @@ function extractBankChoices(
   });
 }
 
-async function promptForChoice(
+function promptForChoice(
   mcpServer: McpServer["server"],
   field: string,
   title: string,
   message: string,
   choices: Array<{ value: string; title: string }>,
-): Promise<ChoiceResult> {
-  if (choices.length === 0) return { status: "invalid" };
-  const result = await elicitFormString(mcpServer, field, message, {
-    type: "string",
-    title,
-    oneOf: choices.map(({ value, title: choiceTitle }) => ({
-      const: value,
-      title: choiceTitle,
-    })),
+): Effect.Effect<ChoiceResult, unknown> {
+  if (choices.length === 0) return Effect.succeed({ status: "invalid" });
+  return Effect.gen(function* () {
+    const result = yield* elicitFormString(mcpServer, field, message, {
+      type: "string",
+      title,
+      oneOf: choices.map(({ value, title: choiceTitle }) => ({
+        const: value,
+        title: choiceTitle,
+      })),
+    });
+    if (result.status !== "accepted") {
+      return result.status === "declined"
+        ? { status: "declined" } as const
+        : result;
+    }
+    return choices.some((choice) => choice.value === result.value)
+      ? { status: "selected", value: result.value } as const
+      : { status: "invalid" } as const;
   });
-  if (result.status !== "accepted") {
-    return result.status === "declined"
-      ? { status: "declined" }
-      : result;
-  }
-  return choices.some((choice) => choice.value === result.value)
-    ? { status: "selected", value: result.value }
-    : { status: "invalid" };
 }
 
-async function promptForCountry(
+function promptForCountry(
   mcpServer: McpServer["server"],
   supportedCountries: string[],
-): Promise<ChoiceResult> {
+): Effect.Effect<ChoiceResult, unknown> {
   if (supportedCountries.length > 0) {
     return promptForChoice(
       mcpServer,
@@ -271,50 +278,55 @@ async function promptForCountry(
     );
   }
 
-  const result = await elicitFormString(
-    mcpServer,
-    "country",
-    "Enter the two-letter country code where your personal bank account is held.",
-    {
-      type: "string",
-      title: "Country code",
-      minLength: 2,
-      maxLength: 2,
-    },
-  );
-  if (result.status !== "accepted") {
-    return result.status === "declined"
-      ? { status: "declined" }
-      : result;
-  }
-  const country = result.value.trim().toUpperCase();
-  return /^[A-Z]{2}$/.test(country)
-    ? { status: "selected", value: country }
-    : { status: "invalid" };
+  return Effect.gen(function* () {
+    const result = yield* elicitFormString(
+      mcpServer,
+      "country",
+      "Enter the two-letter country code where your personal bank account is held.",
+      {
+        type: "string",
+        title: "Country code",
+        minLength: 2,
+        maxLength: 2,
+      },
+    );
+    if (result.status !== "accepted") {
+      return result.status === "declined"
+        ? { status: "declined" } as const
+        : result;
+    }
+    const country = result.value.trim().toUpperCase();
+    return /^[A-Z]{2}$/.test(country)
+      ? { status: "selected", value: country } as const
+      : { status: "invalid" } as const;
+  });
 }
 
-async function promptForBank(
+function promptForBank(
   mcpServer: McpServer["server"],
   banks: BankChoice[],
   message: string,
-): Promise<BankChoiceResult> {
-  const choices = banks.map((bank, index) => ({
-    value: String(index),
-    title: bank.country ? `${bank.name} (${bank.country})` : bank.name,
-  }));
-  const result = await promptForChoice(
-    mcpServer,
-    "bank",
-    "Bank",
-    message,
-    choices,
-  );
-  if (result.status !== "selected") return result;
-  const index = Number(result.value);
-  const bank = Number.isInteger(index) ? banks[index] : undefined;
-  return bank ? { status: "selected", bank } : { status: "invalid" };
+): Effect.Effect<BankChoiceResult, unknown> {
+  return Effect.gen(function* () {
+    const choices = banks.map((bank, index) => ({
+      value: String(index),
+      title: bank.country ? `${bank.name} (${bank.country})` : bank.name,
+    }));
+    const result = yield* promptForChoice(
+      mcpServer,
+      "bank",
+      "Bank",
+      message,
+      choices,
+    );
+    if (result.status !== "selected") return result;
+    const index = Number(result.value);
+    const bank = Number.isInteger(index) ? banks[index] : undefined;
+    return bank
+      ? { status: "selected", bank } as const
+      : { status: "invalid" } as const;
+  });
 }
-
 function countrySelectionRequired(
   countries: string[],
   result: ChoiceResult,

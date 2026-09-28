@@ -1,20 +1,14 @@
+import { Effect } from "effect";
 import { Entry } from "@napi-rs/keyring";
-import { spawn } from "node:child_process";
 
 export interface SecretStore {
-  get(): Promise<string | undefined>;
-  set(value: string): Promise<void>;
-  clear(): Promise<void>;
+  get(): Effect.Effect<string | undefined, unknown>;
+  set(value: string): Effect.Effect<void, unknown>;
+  clear(): Effect.Effect<void, unknown>;
 }
 
 export interface SessionStore extends SecretStore {}
 
-type SecurityResult = {
-  code: number;
-  stdout: string;
-  stderr: string;
-};
-type SecurityRunner = (args: string[]) => Promise<SecurityResult>;
 export type NativeKeyringEntry = {
   getPassword(): string | null;
   setPassword(value: string): void;
@@ -25,400 +19,292 @@ export type NativeKeyringEntryFactory = (
   account: string,
 ) => NativeKeyringEntry;
 
-const SECURITY_COMMAND = "/usr/bin/security";
+type CredentialSlot = "session" | "application" | "controlPanel";
+type CredentialBundle = Partial<Record<CredentialSlot, string>>;
+type EntryCandidate = {
+  service: string;
+  slot?: CredentialSlot;
+  entry: NativeKeyringEntry;
+};
+
 const DEFAULT_ACCOUNT = process.env.USER?.trim() || "default";
-export const DEFAULT_SESSION_SERVICE = "enable-banking-mcp";
-export const DEFAULT_APPLICATION_SERVICE = "enable-banking-mcp.application";
-const NATIVE_SERVICE_SUFFIX = ".native";
+const BUNDLE_PREFIX = "enable-banking-mcp:credential-bundle:v1:";
+const DEFAULT_CREDENTIAL_SERVICE = "enable-banking-mcp.credentials.native";
+const CREDENTIAL_CANDIDATES: ReadonlyArray<{
+  service: string;
+  slot?: CredentialSlot;
+}> = [
+  { service: DEFAULT_CREDENTIAL_SERVICE },
+  { service: "enable-banking-mcp.control-panel.native", slot: "controlPanel" },
+  { service: "enable-banking-mcp.application.native", slot: "application" },
+  { service: "enable-banking-mcp.native", slot: "session" },
+  { service: "enable-banking-mcp.control-panel", slot: "controlPanel" },
+  { service: "enable-banking-mcp.application", slot: "application" },
+  { service: "enable-banking-mcp", slot: "session" },
+  { service: "enable-banking-mcp.control-panel.pending" },
+  { service: "enable-banking-mcp.control-panel.retired" },
+  { service: "enable-banking-mcp.application.pending" },
+  { service: "enable-banking-mcp.application.retired" },
+  { service: "enable-banking-mcp.pending" },
+  { service: "enable-banking-mcp.retired" },
+];
+
 let nativeKeyringEntryFactory: NativeKeyringEntryFactory = (
   serviceName,
   username,
 ) => new Entry(serviceName, username);
+let defaultVault: MacKeychainCredentialVault | undefined;
 
 // Allows isolated runtimes to inject an in-memory native keyring implementation.
 export function setNativeKeyringEntryFactory(
   factory: NativeKeyringEntryFactory,
 ): void {
   nativeKeyringEntryFactory = factory;
+  defaultVault = undefined;
 }
 
-function runSecurity(args: string[]): Promise<SecurityResult> {
-  const { promise, resolve, reject } = Promise.withResolvers<SecurityResult>();
-  const child = spawn(SECURITY_COMMAND, args, {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-
-  if (!child.stdout || !child.stderr) {
-    child.kill();
-    reject(new Error("Required local credential command failed"));
-    return promise;
+function parseBundle(value: string): CredentialBundle {
+  if (!value.startsWith(BUNDLE_PREFIX)) {
+    throw new Error("Stored Enable Banking credential vault is invalid");
   }
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  child.once("error", reject);
-  child.once("close", (code) => {
-    resolve({ code: code ?? 1, stdout, stderr });
-  });
-  return promise;
-}
-
-const ENCODED_SECRET_PREFIX = "enable-banking-mcp:v1:";
-const CHUNK_INDEX_PREFIX = "enable-banking-mcp:chunks:v1:";
-const CHUNK_INDEX_V2_PREFIX = "enable-banking-mcp:chunks:v2:";
-const CHUNK_SERVICE_SUFFIX = ".part.";
-const RETIRED_SERVICE_SUFFIX = ".retired";
-const PENDING_SERVICE_SUFFIX = ".pending";
-const MAX_KEYCHAIN_CHUNKS = 256;
-
-type ChunkGeneration = { id: string; count: number };
-type ChunkManifest = { active: ChunkGeneration; retired: ChunkGeneration[] };
-
-function chunkService(service: string, index: number): string {
-  return `${service}${CHUNK_SERVICE_SUFFIX}${index}`;
-}
-
-function generationChunkService(
-  service: string,
-  generation: ChunkGeneration,
-  index: number,
-): string {
-  return generation.id === "legacy"
-    ? chunkService(service, index)
-    : `${service}${CHUNK_SERVICE_SUFFIX}${generation.id}.${index}`;
-}
-
-function parseManifest(value: string, label: string): ChunkManifest | undefined {
-  if (value.startsWith(CHUNK_INDEX_V2_PREFIX)) {
-    const [activeText, ...retiredTexts] = value
-      .slice(CHUNK_INDEX_V2_PREFIX.length)
-      .split(";");
-    const parseGeneration = (text: string | undefined): ChunkGeneration => {
-      const match = text?.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
-      const count = match ? Number(match[2]) : NaN;
-      if (
-        !match ||
-        !Number.isInteger(count) ||
-        count > MAX_KEYCHAIN_CHUNKS
-      ) {
-        throw new Error(`Stored Enable Banking ${label} is invalid`);
-      }
-      return { id: match[1], count };
-    };
-    return {
-      active: parseGeneration(activeText),
-      retired: retiredTexts.filter(Boolean).map(parseGeneration),
-    };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.slice(BUNDLE_PREFIX.length));
+  } catch {
+    throw new Error("Stored Enable Banking credential vault is invalid");
   }
-  if (value.startsWith(CHUNK_INDEX_PREFIX)) {
-    const count = Number(value.slice(CHUNK_INDEX_PREFIX.length));
-    if (!Number.isInteger(count) || count < 1 || count > MAX_KEYCHAIN_CHUNKS) {
-      throw new Error(`Stored Enable Banking ${label} is invalid`);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Stored Enable Banking credential vault is invalid");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.version !== 1) {
+    throw new Error("Stored Enable Banking credential vault is invalid");
+  }
+  const bundle: CredentialBundle = {};
+  for (const slot of ["session", "application", "controlPanel"] as const) {
+    const valueForSlot = record[slot];
+    if (valueForSlot === undefined) continue;
+    if (typeof valueForSlot !== "string" || !valueForSlot.trim()) {
+      throw new Error("Stored Enable Banking credential vault is invalid");
     }
-    return {
-      active: { id: "legacy", count },
-      retired: [],
-    };
+    bundle[slot] = valueForSlot;
   }
-  return undefined;
+  return bundle;
 }
 
-function decodeStoredSecret(value: string, label: string): string {
-  // Keep pre-v1 raw Keychain records readable; the next write upgrades them.
-  if (!value.startsWith(ENCODED_SECRET_PREFIX)) {
-    return value;
+
+function mergeBundle(target: CredentialBundle, source: CredentialBundle): void {
+  for (const slot of ["session", "application", "controlPanel"] as const) {
+    if (target[slot] === undefined && source[slot] !== undefined) {
+      target[slot] = source[slot];
+    }
   }
-  const encoded = value.slice(ENCODED_SECRET_PREFIX.length);
-  if (
-    !encoded ||
-    encoded.length % 4 !== 0 ||
-    !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
+}
+
+export class MacKeychainCredentialVault {
+  private readonly candidates: EntryCandidate[];
+  private activeEntry: NativeKeyringEntry | undefined;
+  private bundle: CredentialBundle = {};
+  private initialized = false;
+
+  constructor(
+    entryFactory: NativeKeyringEntryFactory = nativeKeyringEntryFactory,
+    account = DEFAULT_ACCOUNT,
   ) {
-    throw new Error(`Stored Enable Banking ${label} is invalid`);
+    this.candidates = CREDENTIAL_CANDIDATES.map(({ service, slot }) => ({
+      service,
+      ...(slot ? { slot } : {}),
+      entry: entryFactory(service, account),
+    }));
   }
-  const decoded = Buffer.from(encoded, "base64");
-  if (decoded.toString("base64") !== encoded) {
-    throw new Error(`Stored Enable Banking ${label} is invalid`);
+
+  private initialize(): void {
+    if (this.initialized) return;
+    const found = this.candidates.map((candidate) => ({
+      ...candidate,
+      value: candidate.entry.getPassword(),
+    }));
+    const existing = found.filter(
+      (candidate): candidate is EntryCandidate & { value: string } =>
+        candidate.value !== null,
+    );
+    const storedBundle = existing.find((candidate) =>
+      candidate.value.startsWith(BUNDLE_PREFIX),
+    );
+    const selected = storedBundle ?? existing[0];
+    if (!selected) {
+      this.activeEntry = this.candidates[0].entry;
+      this.bundle = {};
+      this.initialized = true;
+      return;
+    }
+
+    const merged: CredentialBundle = {};
+    for (const candidate of existing) {
+      if (
+        candidate.service.endsWith(".pending") ||
+        candidate.service.endsWith(".retired") ||
+        candidate.value.startsWith("enable-banking-mcp:chunks:v1:") ||
+        candidate.value.startsWith("enable-banking-mcp:chunks:v2:")
+      ) {
+        throw new Error(
+          "Legacy chunked Enable Banking Keychain records must be cleared before storing credentials",
+        );
+      }
+      if (candidate.value.startsWith(BUNDLE_PREFIX)) {
+        mergeBundle(merged, parseBundle(candidate.value));
+      } else if (candidate.slot && merged[candidate.slot] === undefined) {
+        const legacyPrefix = "enable-banking-mcp:v1:";
+        let legacyValue = candidate.value;
+        if (legacyValue.startsWith(legacyPrefix)) {
+          const encoded = legacyValue.slice(legacyPrefix.length);
+          if (
+            !encoded ||
+            encoded.length % 4 !== 0 ||
+            !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
+          ) {
+            throw new Error("Stored Enable Banking credential vault is invalid");
+          }
+          const decoded = Buffer.from(encoded, "base64");
+          if (decoded.toString("base64") !== encoded) {
+            throw new Error("Stored Enable Banking credential vault is invalid");
+          }
+          legacyValue = decoded.toString("utf8");
+        }
+        if (!legacyValue.trim()) {
+          throw new Error("Stored Enable Banking credential vault is invalid");
+        }
+        merged[candidate.slot] = legacyValue;
+      } else if (!candidate.slot) {
+        throw new Error("Stored Enable Banking credential vault is invalid");
+      }
+    }
+
+    this.activeEntry = selected.entry;
+    if (
+      !selected.value.startsWith(BUNDLE_PREFIX) ||
+      existing.some((candidate) => candidate.entry !== selected.entry)
+    ) {
+      selected.entry.setPassword(
+        `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...merged })}`,
+      );
+    }
+
+    const cleanupErrors: unknown[] = [];
+    for (const candidate of existing) {
+      if (candidate.entry === selected.entry) continue;
+      try {
+        candidate.entry.deletePassword();
+        if (candidate.entry.getPassword() !== null) {
+          cleanupErrors.push(
+            new Error(
+              `Duplicate Enable Banking Keychain item remains: ${candidate.service}`,
+            ),
+          );
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    if (cleanupErrors.length) {
+      throw new AggregateError(
+        cleanupErrors,
+        "Unable to remove duplicate Enable Banking Keychain entries",
+      );
+    }
+    this.bundle = merged;
+    this.initialized = true;
   }
-  return decoded.toString("utf8");
+
+  get(slot: CredentialSlot): Effect.Effect<string | undefined, unknown> {
+    return Effect.try({
+      try: () => {
+        this.initialize();
+        return this.bundle[slot];
+      },
+      catch: (error) => error,
+    });
+  }
+
+  set(slot: CredentialSlot, value: string): Effect.Effect<void, unknown> {
+    return Effect.try({
+      try: () => {
+        const normalized = value.trim();
+        if (!normalized) {
+          throw new Error(`Cannot store an empty Enable Banking ${slot}`);
+        }
+        this.initialize();
+        if (!this.activeEntry) {
+          throw new Error("Enable Banking Keychain entry is unavailable");
+        }
+        const next = { ...this.bundle, [slot]: normalized };
+        // initialize() has checked every known app-owned service for an entry.
+        this.activeEntry.setPassword(
+          `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
+        );
+        this.bundle = next;
+      },
+      catch: (error) => error,
+    });
+  }
+
+  clear(slot: CredentialSlot): Effect.Effect<void, unknown> {
+    return Effect.try({
+      try: () => {
+        this.initialize();
+        if (this.bundle[slot] === undefined) return;
+        const next = { ...this.bundle };
+        delete next[slot];
+        if (Object.keys(next).length === 0) {
+          const entry = this.activeEntry;
+          if (!entry) {
+            throw new Error("Enable Banking Keychain entry is unavailable");
+          }
+          entry.deletePassword();
+          if (entry.getPassword() !== null) {
+            throw new Error("Unable to remove Enable Banking Keychain item");
+          }
+          this.bundle = {};
+          this.initialized = false;
+          this.activeEntry = undefined;
+          return;
+        }
+        this.activeEntry?.setPassword(
+          `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
+        );
+        this.bundle = next;
+      },
+      catch: (error) => error,
+    });
+  }
+}
+
+function getDefaultVault(): MacKeychainCredentialVault {
+  defaultVault ??= new MacKeychainCredentialVault();
+  return defaultVault;
 }
 
 export class MacKeychainSecretStore implements SecretStore {
-  private readonly nativeEntry: NativeKeyringEntry;
-
   constructor(
-    private readonly service: string,
-    private readonly account = DEFAULT_ACCOUNT,
-    private readonly label = "secret",
-    private readonly securityRunner: SecurityRunner = runSecurity,
-    nativeEntryFactory: NativeKeyringEntryFactory = nativeKeyringEntryFactory,
-  ) {
-    // A distinct service avoids inheriting ACLs from legacy `security` items.
-    this.nativeEntry = nativeEntryFactory(
-      `${service}${NATIVE_SERVICE_SUFFIX}`,
-      account,
-    );
+    private readonly slot: CredentialSlot,
+    private readonly vault = getDefaultVault(),
+  ) {}
+
+  get(): Effect.Effect<string | undefined, unknown> {
+    return this.vault.get(this.slot);
   }
 
-  private async readRaw(service: string): Promise<string | undefined> {
-    const result = await this.securityRunner([
-      "find-generic-password",
-      "-a",
-      this.account,
-      "-s",
-      service,
-      "-w",
-    ]);
-    if (result.code !== 0) {
-      if (
-        result.code === 44 ||
-        /specified item could not be found/i.test(result.stderr)
-      ) {
-        return undefined;
-      }
-      throw new Error(`Unable to read the Enable Banking ${this.label} from Keychain`);
-    }
-    return result.stdout.trim();
+  set(value: string): Effect.Effect<void, unknown> {
+    return this.vault.set(this.slot, value);
   }
 
-  private async deleteRaw(service: string): Promise<void> {
-    const result = await this.securityRunner([
-      "delete-generic-password",
-      "-a",
-      this.account,
-      "-s",
-      service,
-    ]);
-    if (
-      result.code !== 0 &&
-      result.code !== 44 &&
-      !/specified item could not be found/i.test(result.stderr)
-    ) {
-      throw new Error(`Unable to clear the Enable Banking ${this.label} from Keychain`);
-    }
-  }
-
-  private async readManifest(): Promise<ChunkManifest | undefined> {
-    const value = await this.readRaw(this.service);
-    return value === undefined ? undefined : parseManifest(value, this.label);
-  }
-
-  private async deleteGeneration(generation: ChunkGeneration): Promise<void> {
-    for (let index = 0; index < generation.count; index += 1) {
-      await this.deleteRaw(
-        generationChunkService(this.service, generation, index),
-      );
-    }
-  }
-
-  private async recoverPendingWrite(): Promise<void> {
-    const pendingService = `${this.service}${PENDING_SERVICE_SUFFIX}`;
-    const pendingValue = await this.readRaw(pendingService);
-    if (pendingValue === undefined) return;
-    const match = pendingValue.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
-    const count = match ? Number(match[2]) : NaN;
-    if (
-      !match ||
-      !Number.isInteger(count) ||
-      count > MAX_KEYCHAIN_CHUNKS
-    ) {
-      throw new Error(`Stored Enable Banking ${this.label} is invalid`);
-    }
-    const pending = { id: match[1], count };
-    const manifest = await this.readManifest();
-    if (manifest?.active.id !== pending.id) {
-      await this.deleteGeneration(pending);
-    }
-    await this.deleteRaw(pendingService);
-  }
-
-  private async recoverRetiredWrite(): Promise<void> {
-    const retiredService = `${this.service}${RETIRED_SERVICE_SUFFIX}`;
-    const retiredValue = await this.readRaw(retiredService);
-    const manifest = await this.readManifest().catch((error: unknown) => {
-      if (retiredValue !== undefined) throw error;
-      return undefined;
-    });
-    if (retiredValue !== undefined) {
-      const match = retiredValue.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
-      const count = match ? Number(match[2]) : NaN;
-      if (
-        !match ||
-        !Number.isInteger(count) ||
-        count > MAX_KEYCHAIN_CHUNKS
-      ) {
-        throw new Error(`Stored Enable Banking ${this.label} is invalid`);
-      }
-      const retired = { id: match[1], count };
-      if (manifest?.active.id !== retired.id) {
-        await this.deleteGeneration(retired);
-      }
-      await this.deleteRaw(retiredService);
-    }
-    if (manifest?.retired.length) {
-      for (const generation of manifest.retired) {
-        await this.deleteGeneration(generation);
-      }
-    }
-  }
-
-  private async readLegacy(): Promise<string | undefined> {
-    const value = await this.readRaw(this.service);
-    if (value === undefined) return undefined;
-    const manifest = parseManifest(value, this.label);
-    if (manifest === undefined) return decodeStoredSecret(value, this.label);
-    const chunks = await Promise.all(
-      Array.from({ length: manifest.active.count }, (_, index) =>
-        this.readRaw(
-          generationChunkService(this.service, manifest.active, index),
-        ),
-      ),
-    );
-    const encoded = chunks
-      .map((chunk) => {
-        if (chunk === undefined) {
-          throw new Error(`Stored Enable Banking ${this.label} is invalid`);
-        }
-        return chunk;
-      })
-      .join("");
-    if (!encoded.startsWith(ENCODED_SECRET_PREFIX)) {
-      throw new Error(`Stored Enable Banking ${this.label} is invalid`);
-    }
-    return decodeStoredSecret(encoded, this.label);
-  }
-
-  async get(): Promise<string | undefined> {
-    const value = this.nativeEntry.getPassword();
-    return value === null ? this.readLegacy() : value;
-  }
-
-  async set(value: string): Promise<void> {
-    const normalized = value.trim();
-    if (!normalized) {
-      throw new Error(`Cannot store an empty Enable Banking ${this.label}`);
-    }
-    // Commit the new record first: legacy cleanup failure cannot hide it.
-    this.nativeEntry.setPassword(normalized);
-    await this.recoverPendingWrite();
-    await this.recoverRetiredWrite();
-    await this.clearLegacy();
-  }
-
-  private async clearLegacy(): Promise<void> {
-    const errors: unknown[] = [];
-    const attempt = async (operation: () => Promise<void>) => {
-      try {
-        await operation();
-      } catch (error) {
-        errors.push(error);
-      }
-    };
-    const value = await this.readRaw(this.service).catch((error: unknown) => {
-      errors.push(error);
-      return undefined;
-    });
-    let manifest: ChunkManifest | undefined;
-    if (value !== undefined) {
-      try {
-        manifest = parseManifest(value, this.label);
-      } catch {
-        // Malformed records are still removable below.
-      }
-    }
-    const malformedManifest =
-      value !== undefined &&
-      (value.startsWith(CHUNK_INDEX_PREFIX) ||
-        value.startsWith(CHUNK_INDEX_V2_PREFIX)) &&
-      manifest === undefined;
-    if (!malformedManifest) {
-      await attempt(() => this.recoverRetiredWrite());
-      await attempt(() => this.recoverPendingWrite());
-    }
-    if (manifest) {
-      await attempt(() => this.deleteGeneration(manifest.active));
-      for (const generation of manifest.retired) {
-        await attempt(() => this.deleteGeneration(generation));
-      }
-    } else if (value?.startsWith(CHUNK_INDEX_PREFIX)) {
-      // Malformed v1 indexes cannot identify their chunks; remove every bounded legacy slot.
-      for (let index = 0; index < MAX_KEYCHAIN_CHUNKS; index += 1) {
-        await attempt(() => this.deleteRaw(chunkService(this.service, index)));
-      }
-    } else if (value?.startsWith(CHUNK_INDEX_V2_PREFIX)) {
-      const generationEntries = value
-        .slice(CHUNK_INDEX_V2_PREFIX.length)
-        .split(";");
-      const generations = generationEntries
-        .map((item) => item.match(/^([a-zA-Z0-9-]+),/))
-        .filter((match): match is RegExpMatchArray => match !== null)
-        .map((match) => match[1]);
-      if (generations.length !== generationEntries.length) {
-        errors.push(new Error("Unable to identify every legacy chunk generation"));
-      }
-      for (const generation of generations) {
-        await attempt(async () => {
-          for (let index = 0; index < MAX_KEYCHAIN_CHUNKS; index += 1) {
-            await this.deleteRaw(
-              `${this.service}${CHUNK_SERVICE_SUFFIX}${generation}.${index}`,
-            );
-          }
-        });
-      }
-    }
-    if (errors.length === 0) {
-      await attempt(() =>
-        this.deleteRaw(`${this.service}${PENDING_SERVICE_SUFFIX}`),
-      );
-      await attempt(() =>
-        this.deleteRaw(`${this.service}${RETIRED_SERVICE_SUFFIX}`),
-      );
-      await attempt(() => this.deleteRaw(this.service));
-    }
-    if (errors.length) {
-      throw new AggregateError(
-        errors,
-        `Unable to clear legacy Enable Banking ${this.label} from Keychain`,
-      );
-    }
-  }
-
-  async clear(): Promise<void> {
-    const errors: unknown[] = [];
-    try {
-      this.nativeEntry.deletePassword();
-    } catch (error) {
-      errors.push(error);
-    }
-    try {
-      await this.clearLegacy();
-    } catch (error) {
-      errors.push(error);
-    }
-    if (errors.length) {
-      throw new AggregateError(
-        errors,
-        `Unable to clear the Enable Banking ${this.label} from Keychain`,
-      );
-    }
+  clear(): Effect.Effect<void, unknown> {
+    return this.vault.clear(this.slot);
   }
 }
 
-export class MacKeychainSessionStore
-  extends MacKeychainSecretStore
-  implements SessionStore
-{
-  constructor(
-    service = DEFAULT_SESSION_SERVICE,
-    account = DEFAULT_ACCOUNT,
-  ) {
-    super(service, account, "session");
+export class MacKeychainSessionStore extends MacKeychainSecretStore implements SessionStore {
+  constructor(vault = getDefaultVault()) {
+    super("session", vault);
   }
 }

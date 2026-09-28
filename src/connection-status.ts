@@ -1,7 +1,8 @@
+import { Effect, Either } from "effect";
+
 import type { ApplicationEnvironment } from "./application-store.js";
 import {
   isTerminalSessionError,
-  type ApplicationResponse,
   type EnableBankingClient,
 } from "./enable-banking.js";
 import type { ControlPanelAuth } from "./control-panel.js";
@@ -34,9 +35,10 @@ export interface ConnectionStatusInput {
   now?: number;
 }
 
-export async function inspectConnectionStatus(
+export function inspectConnectionStatus(
   input: ConnectionStatusInput,
-): Promise<ConnectionStatus> {
+): Effect.Effect<ConnectionStatus, unknown> {
+  return Effect.gen(function* () {
   const controlPanelSession = !input.controlPanelAuth
     ? "not_stored"
     : input.controlPanelAuth.expiresAt !== undefined &&
@@ -53,8 +55,9 @@ export async function inspectConnectionStatus(
 
     let invalidSessionFound = false;
     for (const sessionId of input.sessionIds) {
-      try {
-        const session = await input.client.getSession(sessionId);
+      const sessionResult = yield* Effect.either(input.client.getSession(sessionId));
+      if (Either.isRight(sessionResult)) {
+        const session = sessionResult.right;
         if (
           typeof session !== "object" ||
           session === null ||
@@ -72,10 +75,9 @@ export async function inspectConnectionStatus(
             : {}),
           next_action: "No action required; the provider accepts the stored bank session.",
         };
-      } catch (error) {
-        if (!isTerminalSessionError(error)) {
-          return unavailable(input, controlPanelSession, "unknown");
-        }
+      } else if (!isTerminalSessionError(sessionResult.left)) {
+        return unavailable(input, controlPanelSession, "unknown");
+      } else {
         invalidSessionFound = true;
       }
     }
@@ -115,12 +117,11 @@ export async function inspectConnectionStatus(
     return unavailable(input, controlPanelSession, bankSession);
   }
 
-  let application: Pick<ApplicationResponse, "active" | "environment">;
-  try {
-    application = await input.client.getApplication();
-  } catch {
+  const applicationResult = yield* Effect.either(input.client.getApplication());
+  if (Either.isLeft(applicationResult)) {
     return unavailable(input, controlPanelSession, bankSession);
   }
+  const application = applicationResult.right;
   if (
     typeof application !== "object" ||
     application === null ||
@@ -168,6 +169,7 @@ export async function inspectConnectionStatus(
     next_action:
       "Use known country/bank context and provider bank lists first; ask only for a genuinely missing choice, then let the MCP agent continue.",
   };
+  });
 }
 
 

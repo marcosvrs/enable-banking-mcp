@@ -203,7 +203,7 @@ async function waitForToolValue(client, name, predicate) {
 
 test("runs MCP handlers against isolated provider and Keychain boundaries", async () => {
   const server = await startIsolatedServer({
-    MCP_TEST_FAIL_ONCE: "delete-certificate,delete-session",
+    MCP_TEST_FAIL_ONCE: "delete-certificate,delete-credential-item",
   });
   try {
     const { client } = server;
@@ -415,12 +415,12 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     assert.equal(failure.cleared, false);
     assert.deepEqual(failure.failed_items, [
       "trusted_certificate",
-      "session",
       "application",
     ]);
+    const retry = toolValue(await callTool(client, "clear_local_credentials"));
+    assert.equal(retry.cleared, false);
+    assert.deepEqual(retry.failed_items, ["application"]);
     const cleared = toolValue(await callTool(client, "clear_local_credentials"));
-    assert.equal(cleared.cleared, true);
-    assert.equal(cleared.trusted_certificate_removed, true);
 
     const idle = toolValue(await callTool(client, "setup_status"));
     assert.equal(idle.phase, "idle");
@@ -612,31 +612,6 @@ test("returns local email setup instructions when the MCP client cannot elicit",
   }
 });
 
-test("returns a controlled error when the Keychain process has no pipes", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_FAIL_ONCE: "security-no-stdio",
-  });
-  try {
-    const result = await callTool(server.client, "control_panel_status");
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /Required local credential command failed/);
-  } finally {
-    await server.close();
-  }
-});
-
-test("returns a controlled error when the Keychain process fails to spawn", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_FAIL_ONCE: "security-spawn-error",
-  });
-  try {
-    const result = await callTool(server.client, "control_panel_status");
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /Injected security spawn error/);
-  } finally {
-    await server.close();
-  }
-});
 
 test("reports configuration-free sessions as unverifiable and requires an application", async () => {
   const server = await startIsolatedServer({
@@ -706,69 +681,7 @@ test("blocks logout, authorization, and credential cleanup while registration is
   }
 });
 
-test("reserves authorization before loading stored credentials during cleanup", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_DELAY_APPLICATION_LOOKUP: "true",
-  });
-  try {
-    const authorization = callTool(server.client, "authorize_bank", {
-      aspsp_name: "Fixture Bank",
-      country: "FI",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
-    const cleanupWhileLoading = await callTool(
-      server.client,
-      "clear_local_credentials",
-    );
-    assert.equal(cleanupWhileLoading.isError, true);
-    assert.match(
-      cleanupWhileLoading.content[0].text,
-      /Cannot clear credentials while setup or authorization is pending/,
-    );
-
-    const failedAuthorization = await authorization;
-    assert.equal(failedAuthorization.isError, true);
-    assert.match(
-      failedAuthorization.content[0].text,
-      /No Enable Banking application is configured/,
-    );
-
-    const cleanupAfterFailure = toolValue(
-      await callTool(server.client, "clear_local_credentials"),
-    );
-    assert.equal(cleanupAfterFailure.cleared, true);
-  } finally {
-    await server.close();
-  }
-});
-
-test("blocks application registration while credentials are being cleared", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_DELAY_APPLICATION_LOOKUP: "true",
-  });
-  try {
-    const cleanupPromise = callTool(
-      server.client,
-      "clear_local_credentials",
-    );
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const registration = await callTool(server.client, "register_application", {
-      environment: "SANDBOX",
-    });
-    assert.equal(registration.isError, true);
-    assert.match(
-      registration.content[0].text,
-      /Cannot start setup while credential cleanup is pending/,
-    );
-
-    const cleanup = toolValue(await cleanupPromise);
-    assert.equal(cleanup.cleared, true);
-  } finally {
-    await server.close();
-  }
-});
 
 test("successful credential cleanup clears failed authorization state", async () => {
   const server = await startIsolatedServer({

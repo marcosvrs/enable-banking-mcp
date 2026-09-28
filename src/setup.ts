@@ -1,3 +1,4 @@
+import { Cause, Effect } from "effect";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -112,12 +113,14 @@ export interface ApplicationSetupDependencies {
   controlPanelAuthStore?: ControlPanelAuthStore;
   authorizationFlow: BankAuthorizationFlow;
   openBrowser?: BrowserOpener;
-  generateKeyMaterial?: () => Promise<ApplicationKeyMaterial>;
-  trustCertificate?: (certificate: string) => Promise<void>;
+  generateKeyMaterial?: () => Effect.Effect<ApplicationKeyMaterial, unknown>;
+  trustCertificate?: (
+    certificate: string,
+  ) => Effect.Effect<void, unknown>;
   createBankClient?: (
     credentials: EnableBankingCredentials,
   ) => EnableBankingClient;
-  sleep?: (milliseconds: number) => Promise<void>;
+  sleep?: (milliseconds: number) => Effect.Effect<void, unknown>;
   now?: () => number;
 }
 
@@ -142,132 +145,190 @@ export class ApplicationSetupFlow {
     };
   }
 
-  async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.current.pending || this.credentialCleanupPending) {
-      throw new Error(
-        "Cannot clear credentials while setup or cleanup is pending",
+  withCredentialCleanup<T>(
+    operation: () => Effect.Effect<T, unknown>,
+  ): Effect.Effect<T, unknown> {
+    return Effect.gen(this, function* () {
+      if (this.current.pending || this.credentialCleanupPending) {
+        return yield* Effect.fail(
+          new Error("Cannot clear credentials while setup or cleanup is pending"),
+        );
+      }
+      this.credentialCleanupPending = true;
+      return yield* Effect.ensuring(
+        operation(),
+        Effect.sync(() => {
+          this.credentialCleanupPending = false;
+        }),
       );
-    }
-    this.credentialCleanupPending = true;
-    try {
-      return await operation();
-    } finally {
-      this.credentialCleanupPending = false;
-    }
+    });
   }
 
-  async getStatus(): Promise<SetupStatus> {
-    if (this.current.pending) return this.status;
-    const [application, session] = await Promise.all([
-      this.dependencies.applicationStore.get(),
-      this.dependencies.sessionStore.get(),
-    ]);
-    if (application && session) {
-      return {
-        phase: "complete",
-        pending: false,
-        appId: application.appId,
-        sessionStored: true,
-        message: "Enable Banking setup is complete",
-      };
-    }
-    if (this.current.phase === "complete") {
-      return application || session
-        ? {
-            phase: "idle",
-            pending: false,
-            ...(application?.appId ? { appId: application.appId } : {}),
-            ...(session ? { sessionStored: true } : {}),
-            message: "Enable Banking setup is incomplete",
-          }
-        : { phase: "idle", pending: false };
-    }
-    if (
-      application &&
-      !session &&
-      (this.current.phase === "idle" || this.current.phase === "account_link")
-    ) {
+  getStatus(): Effect.Effect<SetupStatus, unknown> {
+    return Effect.gen(this, function* () {
+      if (this.current.pending) return this.status;
+      const [application, session] = yield* Effect.all([
+        this.dependencies.applicationStore.get(),
+        this.dependencies.sessionStore.get(),
+      ]);
+      if (application && session) {
+        return {
+          phase: "complete" as const,
+          pending: false,
+          appId: application.appId,
+          sessionStored: true,
+          message: "Enable Banking setup is complete",
+        };
+      }
+      if (this.current.phase === "complete") {
+        return application || session
+          ? {
+              phase: "idle" as const,
+              pending: false,
+              ...(application?.appId ? { appId: application.appId } : {}),
+              ...(session ? { sessionStored: true } : {}),
+              message: "Enable Banking setup is incomplete",
+            }
+          : { phase: "idle" as const, pending: false };
+      }
       if (
-        application.environment === "PRODUCTION" &&
-        this.dependencies.createBankClient &&
-        application.appId &&
-        application.privateKey
+        application &&
+        !session &&
+        (this.current.phase === "idle" || this.current.phase === "account_link")
       ) {
-        try {
-          const providerApplication = await this.dependencies
-            .createBankClient({
-              appId: application.appId,
-              privateKey: application.privateKey,
-            })
-            .getApplication();
+        if (
+          application.environment === "PRODUCTION" &&
+          this.dependencies.createBankClient &&
+          application.appId &&
+          application.privateKey
+        ) {
+          const createBankClient = this.dependencies.createBankClient;
+          const providerApplication = yield* Effect.try({
+            try: () =>
+              createBankClient({
+                appId: application.appId,
+                privateKey: application.privateKey,
+              }),
+            catch: (error) => error,
+          })
+            .pipe(Effect.flatMap((client) => client.getApplication()))
+            .pipe(Effect.catchAllCause(() => Effect.succeed(undefined)));
+          if (!providerApplication) {
+            return {
+              ...applicationStatus(application),
+              message:
+                "Production application status could not be verified; the MCP agent should resume connect_bank to check activation.",
+            };
+          }
           const status = applicationStatus(application, providerApplication.active);
-          if (
-            this.current.phase === "account_link" &&
-            providerApplication.active
-          ) {
+          if (this.current.phase === "account_link" && providerApplication.active) {
             this.current = status;
           }
           return status;
-        } catch {
-          return {
-            ...applicationStatus(application),
-            message:
-              "Production application status could not be verified; the MCP agent should resume connect_bank to check activation.",
-          };
         }
+        return applicationStatus(application);
       }
-      return applicationStatus(application);
-    }
-    return this.status;
+      return this.status;
+    });
   }
 
-  async registerApplication(
+  registerApplication(
     options: ApplicationRegistrationOptions,
-  ): Promise<SetupStartResult> {
-    const previous = this.reserve();
-    try {
-      const normalized = normalizeApplicationRegistrationOptions(options);
-      await this.ensureStoresAvailable();
-      void this.runApplicationRegistration(normalized);
+  ): Effect.Effect<SetupStartResult, unknown> {
+    return Effect.gen(this, function* () {
+      const previous = yield* Effect.sync(() => this.reserve());
+      const normalized = yield* Effect.try({
+        try: () => normalizeApplicationRegistrationOptions(options),
+        catch: (error) => error,
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* this.ensureStoresAvailable().pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* Effect.forkDaemon(this.runApplicationRegistration(normalized));
       return {
         status: "started",
         phase: "control_panel_auth",
         message: this.current.message ?? "Enable Banking application setup started",
       };
-    } catch (error) {
-      this.current = previous;
-      throw error;
-    }
+    });
   }
 
-  async start(options: SetupOptions): Promise<SetupStartResult> {
-    const previous = this.reserve();
-    try {
-      const normalized = normalizeSetupOptions(options);
-      await this.ensureStoresAvailable();
-      void this.run(normalized);
+  start(options: SetupOptions): Effect.Effect<SetupStartResult, unknown> {
+    return Effect.gen(this, function* () {
+      const previous = yield* Effect.sync(() => this.reserve());
+      const normalized = yield* Effect.try({
+        try: () => normalizeSetupOptions(options),
+        catch: (error) => error,
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* this.ensureStoresAvailable().pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* Effect.forkDaemon(this.run(normalized));
       return {
         status: "started",
         phase: "control_panel_auth",
         message: this.current.message ?? "Enable Banking setup started",
       };
-    } catch (error) {
-      this.current = previous;
-      throw error;
-    }
+    });
   }
 
-  private async ensureStoresAvailable(): Promise<void> {
-    if (await this.dependencies.applicationStore.get()) {
-      throw new Error(
-        "An Enable Banking application is already stored; call connect_bank or authorize_bank instead",
-      );
-    }
-    if (await this.dependencies.sessionStore.get()) {
-      throw new Error(
-        "An Enable Banking session is already stored; call connect_bank or clear it before starting setup",
-      );
-    }
+  private ensureStoresAvailable(): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* () {
+      if (yield* this.dependencies.applicationStore.get()) {
+        return yield* Effect.fail(
+          new Error(
+            "An Enable Banking application is already stored; call connect_bank or authorize_bank instead",
+          ),
+        );
+      }
+      if (yield* this.dependencies.sessionStore.get()) {
+        return yield* Effect.fail(
+          new Error(
+            "An Enable Banking session is already stored; call connect_bank or clear it before starting setup",
+          ),
+        );
+      }
+    });
   }
 
   private reserve(): SetupStatus {
@@ -287,159 +348,199 @@ export class ApplicationSetupFlow {
     return previous;
   }
 
-  private async runApplicationRegistration(
+  private runApplicationRegistration(
     options: NormalizedApplicationRegistrationOptions,
-  ): Promise<void> {
-    let application: StoredApplication | undefined;
-    try {
-      application = await this.createApplication(options);
-      await (this.dependencies.trustCertificate ?? trustCertificate)(
-        application.certificate,
-      );
-      if (options.environment === "PRODUCTION") {
-        this.update({
-          phase: "account_link",
-          pending: false,
-          appId: application.appId,
-          dashboardUrl: APPLICATIONS_URL,
-          message:
-            "Application registered; the user must activate it in the dashboard. The MCP agent continues once any missing country or bank choice is known.",
-        });
-        (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
-      } else {
-        this.update({
-          phase: "application_ready",
-          pending: false,
-          appId: application.appId,
-          message:
-            "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
-        });
-      }
-    } catch (error) {
-      this.update({
-        phase: "failed",
-        pending: false,
-        ...(application?.appId ? { appId: application.appId } : {}),
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+  ): Effect.Effect<void, never> {
+    return Effect.gen(this, function* () {
+      let application: StoredApplication | undefined;
+      yield* this.createApplication(options)
+        .pipe(
+          Effect.tap((created) =>
+            Effect.sync(() => {
+              application = created;
+            }),
+          ),
+          Effect.flatMap((created) =>
+            (this.dependencies.trustCertificate ?? trustCertificate)(
+              created.certificate,
+            ).pipe(Effect.as(created)),
+          ),
+          Effect.tap((created) =>
+            Effect.sync(() => {
+              if (options.environment === "PRODUCTION") {
+                this.update({
+                  phase: "account_link",
+                  pending: false,
+                  appId: created.appId,
+                  dashboardUrl: APPLICATIONS_URL,
+                  message:
+                    "Application registered; the user must activate it in the dashboard. The MCP agent continues once any missing country or bank choice is known.",
+                });
+              } else {
+                this.update({
+                  phase: "application_ready",
+                  pending: false,
+                  appId: created.appId,
+                  message:
+                    "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
+                });
+              }
+            }),
+          ),
+          Effect.flatMap(() =>
+            options.environment === "PRODUCTION"
+              ? (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL)
+              : Effect.void,
+          ),
+          Effect.catchAllCause((cause) =>
+            Effect.sync(() => {
+              const error = Cause.squash(cause);
+              this.update({
+                phase: "failed",
+                pending: false,
+                ...(application?.appId ? { appId: application.appId } : {}),
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }),
+          ),
+        );
+    });
   }
 
-  private async run(options: NormalizedSetupOptions): Promise<void> {
-    let application: StoredApplication | undefined;
-    try {
-      application = await this.createApplication(options);
-      await (this.dependencies.trustCertificate ?? trustCertificate)(
-        application.certificate,
-      );
-
-      const client = (
-        this.dependencies.createBankClient ??
-        ((credentials) => new EnableBankingClient(credentials))
-      )({
-        appId: application.appId,
-        privateKey: application.privateKey,
-      });
-      if (options.environment === "PRODUCTION") {
-        this.update({
-          phase: "account_link",
-          appId: application.appId,
-          dashboardUrl: APPLICATIONS_URL,
-          message:
-            "The user must link the application to their own bank in the dashboard; setup continues automatically when activation is detected.",
+  private run(options: NormalizedSetupOptions): Effect.Effect<void, never> {
+    return Effect.gen(this, function* () {
+      let application: StoredApplication | undefined;
+      const workflow = Effect.gen(this, function* () {
+        const storedApplication = yield* this.createApplication(options);
+        application = storedApplication;
+        yield* (this.dependencies.trustCertificate ?? trustCertificate)(
+          storedApplication.certificate,
+        );
+        const createBankClient =
+          this.dependencies.createBankClient ??
+          ((credentials: EnableBankingCredentials) =>
+            new EnableBankingClient(credentials));
+        const client = yield* Effect.try({
+          try: () =>
+            createBankClient({
+              appId: storedApplication.appId,
+              privateKey: storedApplication.privateKey,
+            }),
+          catch: (error) => error,
         });
-        (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
-        const activated = await waitForActivation(
+        if (options.environment === "PRODUCTION") {
+          this.update({
+            phase: "account_link",
+            appId: storedApplication.appId,
+            dashboardUrl: APPLICATIONS_URL,
+            message:
+              "The user must link the application to their own bank in the dashboard; setup continues automatically when activation is detected.",
+          });
+          yield* (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
+          const activated = yield* waitForActivation(
+            client,
+            this.dependencies.sleep,
+            this.dependencies.now,
+          );
+          if (!activated) {
+            this.update({
+              phase: "account_link",
+              pending: false,
+              appId: storedApplication.appId,
+              dashboardUrl: APPLICATIONS_URL,
+              message:
+                "The application is still inactive. After dashboard account linking, the MCP agent should resume connect_bank to continue setup.",
+            });
+            return;
+          }
+        }
+        const aspspName = yield* resolveAspspName(client, options);
+        this.update({
+          phase: "bank_authorization",
+          appId: storedApplication.appId,
+          message: "Opening the bank authorization page",
+        });
+        const authorization = yield* this.dependencies.authorizationFlow.start(
           client,
+          {
+            aspspName,
+            country: options.country,
+            redirectUrl: options.redirectUrl,
+            validUntil: options.validUntil,
+            accessProfile: options.accessProfile,
+          },
+        );
+        this.update({
+          phase: "bank_authorization",
+          appId: storedApplication.appId,
+          authorizationUrl: authorization.authorization_url,
+          message:
+            "Bank consent is open; the callback stores the session automatically after the user completes bank sign-in and consent.",
+        });
+        yield* waitForSession(
+          this.dependencies.sessionStore,
+          this.dependencies.authorizationFlow,
           this.dependencies.sleep,
           this.dependencies.now,
         );
-        if (!activated) {
-          this.update({
-            phase: "account_link",
-            pending: false,
-            appId: application.appId,
-            dashboardUrl: APPLICATIONS_URL,
-            message:
-              "The application is still inactive. After dashboard account linking, the MCP agent should resume connect_bank to continue setup.",
-          });
-          return;
-        }
-
-      }
-      const aspspName = await resolveAspspName(client, options);
-      this.update({
-        phase: "bank_authorization",
-        appId: application.appId,
-        message: "Opening the bank authorization page",
+        this.update({
+          phase: "complete",
+          pending: false,
+          appId: storedApplication.appId,
+          sessionStored: true,
+          message: "Enable Banking setup is complete",
+        });
       });
-      const authorization = await this.dependencies.authorizationFlow.start(client, {
-        aspspName,
-        country: options.country,
-        redirectUrl: options.redirectUrl,
-        validUntil: options.validUntil,
-        accessProfile: options.accessProfile,
-      });
-      this.update({
-        phase: "bank_authorization",
-        appId: application.appId,
-        authorizationUrl: authorization.authorization_url,
-        message:
-          "Bank consent is open; the callback stores the session automatically after the user completes bank sign-in and consent.",
-      });
-      await waitForSession(
-        this.dependencies.sessionStore,
-        this.dependencies.authorizationFlow,
-        this.dependencies.sleep,
-        this.dependencies.now,
+      yield* workflow.pipe(
+        Effect.catchAllCause((cause) =>
+          Effect.sync(() => {
+            const error = Cause.squash(cause);
+            this.current = {
+              phase: "failed",
+              pending: false,
+              ...(application?.appId ? { appId: application.appId } : {}),
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }),
+        ),
       );
-      this.update({
-        phase: "complete",
-        pending: false,
-        appId: application.appId,
-        sessionStored: true,
-        message: "Enable Banking setup is complete",
-      });
-    } catch (error) {
-      this.current = {
-        phase: "failed",
-        pending: false,
-        ...(application?.appId ? { appId: application.appId } : {}),
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+    });
   }
 
-  private async createApplication(
+  private createApplication(
     options: NormalizedApplicationRegistrationOptions,
-  ): Promise<StoredApplication> {
-    const keyMaterial = await (this.dependencies.generateKeyMaterial ??
-      generateKeyMaterial)();
-    const existingAuth = await this.dependencies.controlPanelAuthStore?.get();
-    const controlPanelAuth = await this.dependencies.controlPanelAuth.authenticate(
-      options.controlPanelEmail,
-      existingAuth,
-    );
-    if (controlPanelAuth !== existingAuth) {
-      await this.dependencies.controlPanelAuthStore?.set(controlPanelAuth);
-    }
-    this.update({
-      phase: "registering_application",
-      message: "Registering the Enable Banking application",
+  ): Effect.Effect<StoredApplication, unknown> {
+    return Effect.gen(this, function* () {
+      const keyMaterial = yield* (this.dependencies.generateKeyMaterial ??
+        generateKeyMaterial)();
+      const existingAuth = yield* (this.dependencies.controlPanelAuthStore?.get() ??
+        Effect.succeed(undefined));
+      const controlPanelAuth = yield* this.dependencies.controlPanelAuth.authenticate(
+        options.controlPanelEmail,
+        existingAuth,
+      );
+      if (controlPanelAuth !== existingAuth) {
+        yield* (this.dependencies.controlPanelAuthStore?.set(controlPanelAuth) ??
+          Effect.void);
+      }
+      this.update({
+        phase: "registering_application",
+        message: "Registering the Enable Banking application",
+      });
+      const registration = yield* this.dependencies.controlPanelClient.registerApplication(
+        controlPanelAuth,
+        createRegistrationRequest(options, keyMaterial.certificate),
+      );
+      const application = {
+        appId: registration.app_id,
+        privateKey: keyMaterial.privateKey,
+        certificate: keyMaterial.certificate,
+        environment: options.environment,
+        redirectUrls: [options.redirectUrl],
+      };
+      yield* this.dependencies.applicationStore.set(application);
+      return application;
     });
-    const registration = await this.dependencies.controlPanelClient.registerApplication(
-      controlPanelAuth,
-      createRegistrationRequest(options, keyMaterial.certificate),
-    );
-    const application = {
-      appId: registration.app_id,
-      privateKey: keyMaterial.privateKey,
-      certificate: keyMaterial.certificate,
-      environment: options.environment,
-      redirectUrls: [options.redirectUrl],
-    };
-    await this.dependencies.applicationStore.set(application);
-    return application;
   }
 
   private update(update: Partial<SetupStatus>): void {
@@ -574,23 +675,28 @@ function createRegistrationRequest(
   };
 }
 
-async function resolveAspspName(
+function resolveAspspName(
   client: EnableBankingClient,
   options: NormalizedSetupOptions,
-): Promise<string> {
-  const names = extractAspspNames(await client.listBanks(options.country));
-  const requestedName = options.aspspName.toLowerCase();
-  const match = names.find((name) => name === options.aspspName) ??
-    names.find((name) => name.toLowerCase() === requestedName);
-  if (match) return match;
+): Effect.Effect<string, unknown> {
+  return Effect.gen(function* () {
+    const names = extractAspspNames(yield* client.listBanks(options.country));
+    const requestedName = options.aspspName.toLowerCase();
+    const match =
+      names.find((name) => name === options.aspspName) ??
+      names.find((name) => name.toLowerCase() === requestedName);
+    if (match) return match;
 
-  const available =
-    names.length > 0
-      ? ` Available ASPSPs: ${names.join(", ")}.`
-      : " No ASPSPs were returned for this country.";
-  throw new Error(
-    `ASPSP "${options.aspspName}" is not available in ${options.environment} for ${options.country}.${available}`,
-  );
+    const available =
+      names.length > 0
+        ? ` Available ASPSPs: ${names.join(", ")}.`
+        : " No ASPSPs were returned for this country.";
+    return yield* Effect.fail(
+      new Error(
+        `ASPSP "${options.aspspName}" is not available in ${options.environment} for ${options.country}.${available}`,
+      ),
+    );
+  });
 }
 
 function extractAspspNames(response: unknown): string[] {
@@ -604,133 +710,176 @@ function extractAspspNames(response: unknown): string[] {
   });
 }
 
-async function waitForActivation(
+function waitForActivation(
   client: EnableBankingClient,
-  configuredSleep?: (milliseconds: number) => Promise<void>,
+  configuredSleep?: (milliseconds: number) => Effect.Effect<void, unknown>,
   configuredNow: () => number = Date.now,
-): Promise<boolean> {
-  const deadline = configuredNow() + ACTIVATION_TIMEOUT_MS;
-  while (configuredNow() < deadline) {
-    const application = await client.getApplication();
-    if (application.active) return true;
-    await (configuredSleep ?? sleep)(ACTIVATION_POLL_MS);
-  }
-  return false;
+): Effect.Effect<boolean, unknown> {
+  return Effect.gen(function* () {
+    const deadline = configuredNow() + ACTIVATION_TIMEOUT_MS;
+    while (configuredNow() < deadline) {
+      const application = yield* client.getApplication();
+      if (application.active) return true;
+      yield* (configuredSleep ?? Effect.sleep)(ACTIVATION_POLL_MS);
+    }
+    return false;
+  });
 }
 
-async function waitForSession(
+function waitForSession(
   sessionStore: SessionStore,
   authorizationFlow: BankAuthorizationFlow,
-  configuredSleep?: (milliseconds: number) => Promise<void>,
+  configuredSleep?: (milliseconds: number) => Effect.Effect<void, unknown>,
   configuredNow: () => number = Date.now,
-): Promise<void> {
-  const deadline = configuredNow() + SESSION_TIMEOUT_MS;
-  while (configuredNow() < deadline) {
-    if (await sessionStore.get()) return;
-    const status = authorizationFlow.status;
-    if (!status.pending) {
-      throw new Error(status.lastError ?? "Bank authorization ended without a session");
+): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    const deadline = configuredNow() + SESSION_TIMEOUT_MS;
+    while (configuredNow() < deadline) {
+      if (yield* sessionStore.get()) return;
+      const status = authorizationFlow.status;
+      if (!status.pending) {
+        return yield* Effect.fail(
+          new Error(
+            status.lastError ?? "Bank authorization ended without a session",
+          ),
+        );
+      }
+      yield* (configuredSleep ?? Effect.sleep)(SESSION_POLL_MS);
     }
-    await (configuredSleep ?? sleep)(SESSION_POLL_MS);
-  }
-  throw new Error("Bank authorization did not complete before setup timed out");
+    return yield* Effect.fail(
+      new Error("Bank authorization did not complete before setup timed out"),
+    );
+  });
 }
 
-export async function generateKeyMaterial(): Promise<ApplicationKeyMaterial> {
-  const directory = await mkdtemp(join(tmpdir(), "enable-banking-mcp-"));
-  const keyPath = join(directory, "localhost.key");
-  const certificatePath = join(directory, "localhost.crt");
-  try {
-    await runCommand(OPENSSL_COMMAND, [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:4096",
-      "-nodes",
-      "-sha256",
-      "-days",
-      CERTIFICATE_DAYS,
-      "-subj",
-      "/CN=localhost",
-      "-addext",
-      "subjectAltName=DNS:localhost,IP:127.0.0.1",
-      "-addext",
-      "basicConstraints=critical,CA:TRUE",
-      "-addext",
-      "keyUsage=critical,keyCertSign,digitalSignature,keyEncipherment",
-      "-addext",
-      "extendedKeyUsage=serverAuth",
-      "-keyout",
-      keyPath,
-      "-out",
-      certificatePath,
-    ]);
-    return {
-      privateKey: await readFile(keyPath, "utf8"),
-      certificate: await readFile(certificatePath, "utf8"),
-    };
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+export function generateKeyMaterial(): Effect.Effect<
+  ApplicationKeyMaterial,
+  unknown
+> {
+  return Effect.gen(function* () {
+    const directory = yield* Effect.tryPromise({
+      try: () => mkdtemp(join(tmpdir(), "enable-banking-mcp-")),
+      catch: (error) => error,
+    });
+    const keyPath = join(directory, "localhost.key");
+    const certificatePath = join(directory, "localhost.crt");
+    const material = Effect.gen(function* () {
+      yield* runCommand(OPENSSL_COMMAND, [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:4096",
+        "-nodes",
+        "-sha256",
+        "-days",
+        CERTIFICATE_DAYS,
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,digitalSignature,keyEncipherment",
+        "-addext",
+        "extendedKeyUsage=serverAuth",
+        "-keyout",
+        keyPath,
+        "-out",
+        certificatePath,
+      ]);
+      const privateKey = yield* Effect.tryPromise({
+        try: () => readFile(keyPath, "utf8"),
+        catch: (error) => error,
+      });
+      const certificate = yield* Effect.tryPromise({
+        try: () => readFile(certificatePath, "utf8"),
+        catch: (error) => error,
+      });
+      return { privateKey, certificate };
+    });
+    return yield* Effect.ensuring(
+      material,
+      Effect.orDie(Effect.tryPromise({
+        try: () => rm(directory, { recursive: true, force: true }),
+        catch: (error) => error,
+      })),
+    );
+  });
 }
 
-export async function trustCertificate(certificate: string): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), "enable-banking-mcp-cert-"));
-  const certificatePath = join(directory, "localhost.crt");
-  try {
-    await writeFile(certificatePath, certificate, { mode: 0o600 });
+export function trustCertificate(
+  certificate: string,
+): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    const directory = yield* Effect.tryPromise({
+      try: () => mkdtemp(join(tmpdir(), "enable-banking-mcp-cert-")),
+      catch: (error) => error,
+    });
+    const certificatePath = join(directory, "localhost.crt");
+    const trust = Effect.gen(function* () {
+      yield* Effect.tryPromise({
+        try: () => writeFile(certificatePath, certificate, { mode: 0o600 }),
+        catch: (error) => error,
+      });
+      const keychainPath = join(
+        homedir(),
+        "Library",
+        "Keychains",
+        "login.keychain-db",
+      );
+      yield* runCommand(SECURITY_COMMAND, [
+        "add-trusted-cert",
+        "-r",
+        "trustRoot",
+        "-p",
+        "ssl",
+        "-k",
+        keychainPath,
+        certificatePath,
+      ]);
+    });
+    yield* Effect.ensuring(
+      trust,
+      Effect.orDie(Effect.tryPromise({
+        try: () => rm(directory, { recursive: true, force: true }),
+        catch: (error) => error,
+      })),
+    );
+  });
+}
+
+export function removeTrustedCertificate(
+  certificate: string,
+): Effect.Effect<void, unknown> {
+  return Effect.gen(function* () {
+    const fingerprint = yield* Effect.try({
+      try: () =>
+        new X509Certificate(certificate).fingerprint.replaceAll(":", ""),
+      catch: () => new Error("Stored localhost certificate is invalid"),
+    });
     const keychainPath = join(
       homedir(),
       "Library",
       "Keychains",
       "login.keychain-db",
     );
-    await runCommand(SECURITY_COMMAND, [
-      "add-trusted-cert",
-      "-r",
-      "trustRoot",
-      "-p",
-      "ssl",
-      "-k",
+    const result = yield* runCommand(SECURITY_COMMAND, [
+      "delete-certificate",
+      "-Z",
+      fingerprint,
+      "-t",
       keychainPath,
-      certificatePath,
     ]);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-}
-
-export async function removeTrustedCertificate(
-  certificate: string,
-): Promise<void> {
-  let fingerprint: string;
-  try {
-    fingerprint = new X509Certificate(certificate).fingerprint.replaceAll(
-      ":",
-      "",
-    );
-  } catch {
-    throw new Error("Stored localhost certificate is invalid");
-  }
-  const keychainPath = join(
-    homedir(),
-    "Library",
-    "Keychains",
-    "login.keychain-db",
-  );
-  const result = await runCommand(SECURITY_COMMAND, [
-    "delete-certificate",
-    "-Z",
-    fingerprint,
-    "-t",
-    keychainPath,
-  ]);
-  if (
-    result.code !== 0 &&
-    !/unable to delete certificate matching/i.test(result.stderr)
-  ) {
-    throw new Error("Unable to remove the localhost certificate trust");
-  }
+    if (
+      result.code !== 0 &&
+      !/unable to delete certificate matching/i.test(result.stderr)
+    ) {
+      return yield* Effect.fail(
+        new Error("Unable to remove the localhost certificate trust"),
+      );
+    }
+  });
 }
 
 export function callbackTlsFromApplication(
@@ -742,31 +891,41 @@ export function callbackTlsFromApplication(
   };
 }
 
-function sleep(milliseconds: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, milliseconds);
-  return promise;
-}
-
 type CommandResult = {
   code: number;
   stderr: string;
 };
 
+
 function runCommand(
   command: string,
   args: string[],
-): Promise<CommandResult> {
-  const { promise, resolve, reject } = Promise.withResolvers<CommandResult>();
-  const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
-  let stderr = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-  child.once("error", () => reject(new Error("Required local setup command is unavailable")));
-  child.once("close", (code) => {
-    resolve({ code: code ?? 1, stderr });
-  });
-  return promise;
+): Effect.Effect<CommandResult, unknown> {
+  return Effect.try({
+    try: () => spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] }),
+    catch: (error) => error,
+  }).pipe(
+    Effect.flatMap((child) =>
+      Effect.async<CommandResult, unknown>((resume) => {
+        let stderr = "";
+        child.stderr.setEncoding("utf8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", () =>
+          resume(
+            Effect.fail(
+              new Error("Required local setup command is unavailable"),
+            ),
+          ),
+        );
+        child.once("close", (code) =>
+          resume(Effect.succeed({ code: code ?? 1, stderr })),
+        );
+        return Effect.sync(() => {
+          child.kill();
+        });
+      }),
+    ),
+  );
 }

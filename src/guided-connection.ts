@@ -1,3 +1,5 @@
+import { Effect } from "effect";
+
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DEFAULT_REDIRECT_URL } from "./authorization.js";
 import type { AccessProfile, BankAuthorizationFlow } from "./authorization.js";
@@ -36,33 +38,35 @@ export interface GuidedConnectionDependencies {
   resolveControlPanelEmail(
     environmentName: string,
     storedEmail?: string,
-  ): Promise<string | Record<string, string>>;
+  ): Effect.Effect<string | Record<string, string>, unknown>;
   assertNoEnvironmentCredentials(): void;
   getEnvironmentSessionId(): string | undefined;
   clearEnvironmentSession(sessionId: string | undefined): void;
-  readAuthorizedAccounts(): Promise<Record<string, unknown>>;
-  resolveCredentials(): Promise<EnableBankingCredentials>;
+  readAuthorizedAccounts(): Effect.Effect<Record<string, unknown>, unknown>;
+  resolveCredentials(): Effect.Effect<EnableBankingCredentials, unknown>;
   createBankClient(credentials: EnableBankingCredentials): EnableBankingClient;
   openBrowser(url: string): void;
   mcpServer: McpServer["server"];
 }
 
-export async function connectBank(
+export function connectBank(
   options: ConnectBankOptions,
   dependencies: GuidedConnectionDependencies,
-): Promise<unknown> {
-  const [storedSession, application] = await Promise.all([
+): Effect.Effect<unknown, unknown> {
+  return Effect.gen(function* () {
+  const [storedSession, application] = yield* Effect.all([
     dependencies.sessionStore.get(),
     dependencies.applicationStore.get(),
   ]);
   const environmentSessionId = dependencies.getEnvironmentSessionId();
-  const connected = await recoverConfiguredSession<Record<string, unknown>>({
+  const connected = yield* recoverConfiguredSession<Record<string, unknown>>({
     storedSession,
     environmentSessionId,
-    read: async () => ({
-      status: "connected",
-      ...(await dependencies.readAuthorizedAccounts()),
-    }),
+    read: () =>
+      Effect.map(dependencies.readAuthorizedAccounts(), (accounts) => ({
+        status: "connected",
+        ...accounts,
+      })),
     clearStoredSession: () => dependencies.sessionStore.clear(),
     clearEnvironmentSession: () =>
       dependencies.clearEnvironmentSession(environmentSessionId),
@@ -91,15 +95,15 @@ export async function connectBank(
 
   if (!application) {
     dependencies.assertNoEnvironmentCredentials();
-    const storedAuth = await dependencies.controlPanelAuthStore.get();
-    const email = await dependencies.resolveControlPanelEmail(
+    const storedAuth = yield* dependencies.controlPanelAuthStore.get();
+    const email = yield* dependencies.resolveControlPanelEmail(
       CONTROL_PANEL_EMAIL_ENV,
       storedAuth?.email,
     );
     if (typeof email !== "string") return email;
     const controlPanelEmail = email;
     if (!options.country || !options.aspspName) {
-      const started = await dependencies.setupFlow.registerApplication({
+      const started = yield* dependencies.setupFlow.registerApplication({
         controlPanelEmail,
         appName: options.appName,
         environment: options.environment,
@@ -117,7 +121,7 @@ export async function connectBank(
       };
     }
 
-    const started = await dependencies.setupFlow.start({
+    const started = yield* dependencies.setupFlow.start({
       controlPanelEmail,
       appName: options.appName,
       environment: options.environment,
@@ -158,10 +162,9 @@ export async function connectBank(
     };
   }
 
-  const client = dependencies.createBankClient(
-    await dependencies.resolveCredentials(),
-  );
-  const applicationInfo = await client.getApplication();
+  const credentials = yield* dependencies.resolveCredentials();
+  const client = dependencies.createBankClient(credentials);
+  const applicationInfo = yield* client.getApplication();
   if (application.environment === "PRODUCTION" && !applicationInfo.active) {
     dependencies.openBrowser(APPLICATIONS_URL);
     return {
@@ -173,7 +176,7 @@ export async function connectBank(
     };
   }
 
-  const selection = await resolveBankSelection({
+  const selection = yield* resolveBankSelection({
     client,
     mcpServer: dependencies.mcpServer,
     applicationCountries: applicationInfo.countries,
@@ -183,7 +186,7 @@ export async function connectBank(
   if (selection.status !== "selected") return selection;
 
   const redirectUrl = application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL;
-  const authorization = await dependencies.authorizationFlow.start(client, {
+  const authorization = yield* dependencies.authorizationFlow.start(client, {
     aspspName: selection.bank.name,
     country: selection.country,
     redirectUrl,
@@ -197,4 +200,5 @@ export async function connectBank(
     message:
       "Bank consent is open; after the user completes sign-in and explicit consent, the MCP agent should call connect_bank itself to verify the session and return authorized accounts.",
   };
+  });
 }
