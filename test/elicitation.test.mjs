@@ -1,10 +1,16 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import test from "node:test";
-import { elicitFormString } from "../dist/elicitation.js";
+import { elicitFormString as elicitFormStringEffect } from "../dist/elicitation.js";
+
+function elicitFormString(...args) {
+  return Effect.runPromise(elicitFormStringEffect(...args));
+}
 
 async function runPrompt(
   capabilities,

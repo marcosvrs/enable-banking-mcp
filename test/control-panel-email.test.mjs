@@ -1,6 +1,12 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveControlPanelEmailInput } from "../dist/control-panel-email.js";
+import { resolveControlPanelEmailInput as resolveControlPanelEmailInputEffect } from "../dist/control-panel-email.js";
+
+function resolveControlPanelEmailInput(...args) {
+  return Effect.runPromise(resolveControlPanelEmailInputEffect(...args));
+}
 
 function peer(capabilities, response) {
   const requests = [];

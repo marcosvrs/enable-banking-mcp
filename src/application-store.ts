@@ -1,8 +1,5 @@
-import {
-  DEFAULT_APPLICATION_SERVICE,
-  MacKeychainSecretStore,
-  type SecretStore,
-} from "./session-store.js";
+import { Effect } from "effect";
+import { MacKeychainSecretStore, type SecretStore } from "./session-store.js";
 
 export type ApplicationEnvironment = "PRODUCTION" | "SANDBOX";
 
@@ -15,45 +12,50 @@ export interface StoredApplication {
 }
 
 export interface ApplicationStore {
-  get(): Promise<StoredApplication | undefined>;
-  set(application: StoredApplication): Promise<void>;
-  clear(): Promise<void>;
+  get(): Effect.Effect<StoredApplication | undefined, unknown>;
+  set(application: StoredApplication): Effect.Effect<void, unknown>;
+  clear(): Effect.Effect<void, unknown>;
 }
 
 export class MacKeychainApplicationStore implements ApplicationStore {
   constructor(
     private readonly secretStore: SecretStore = new MacKeychainSecretStore(
-      DEFAULT_APPLICATION_SERVICE,
-      undefined,
-      "application credentials",
+      "application",
     ),
   ) {}
 
-  async get(): Promise<StoredApplication | undefined> {
-    const raw = await this.secretStore.get();
-    if (!raw) return undefined;
+  get(): Effect.Effect<StoredApplication | undefined, unknown> {
+    return Effect.gen(this, function* (this: MacKeychainApplicationStore) {
+      const raw = yield* this.secretStore.get();
+      if (!raw) return undefined;
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      throw new Error("Stored Enable Banking application credentials are invalid");
-    }
-    if (!isStoredApplication(parsed)) {
-      throw new Error("Stored Enable Banking application credentials are invalid");
-    }
-    return parsed;
+      const parsed = yield* Effect.try({
+        try: () => JSON.parse(raw) as unknown,
+        catch: () =>
+          new Error("Stored Enable Banking application credentials are invalid"),
+      });
+      if (!isStoredApplication(parsed)) {
+        return yield* Effect.fail(
+          new Error("Stored Enable Banking application credentials are invalid"),
+        );
+      }
+      return parsed;
+    });
   }
 
-  async set(application: StoredApplication): Promise<void> {
-    if (!isStoredApplication(application)) {
-      throw new Error("Enable Banking application credentials are invalid");
-    }
-    await this.secretStore.set(JSON.stringify(application));
+  set(application: StoredApplication): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* (this: MacKeychainApplicationStore) {
+      if (!isStoredApplication(application)) {
+        return yield* Effect.fail(
+          new Error("Enable Banking application credentials are invalid"),
+        );
+      }
+      yield* this.secretStore.set(JSON.stringify(application));
+    });
   }
 
-  async clear(): Promise<void> {
-    await this.secretStore.clear();
+  clear(): Effect.Effect<void, unknown> {
+    return this.secretStore.clear();
   }
 }
 

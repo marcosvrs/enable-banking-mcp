@@ -1,7 +1,30 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EnableBankingApiError } from "../dist/enable-banking.js";
-import { inspectConnectionStatus } from "../dist/connection-status.js";
+import { inspectConnectionStatus as inspectConnectionStatusEffect } from "../dist/connection-status.js";
+
+function inspectConnectionStatus(input) {
+  const client = input.client
+    ? {
+        ...input.client,
+        getApplication: () =>
+          Effect.tryPromise({
+            try: () => input.client.getApplication(),
+            catch: (error) => error,
+          }),
+        getSession: (sessionId) =>
+          Effect.tryPromise({
+            try: () => input.client.getSession(sessionId),
+            catch: (error) => error,
+          }),
+      }
+    : undefined;
+  return Effect.runPromise(
+    inspectConnectionStatusEffect({ ...input, client }),
+  );
+}
 
 test("reports inactive Production app separately from expired Control Panel login", async () => {
   const status = await inspectConnectionStatus({

@@ -1,3 +1,5 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -5,20 +7,34 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import test from "node:test";
 import { EnableBankingApiError } from "../dist/enable-banking.js";
-import { connectBank } from "../dist/guided-connection.js";
-import { resolveControlPanelEmailInput } from "../dist/control-panel-email.js";
+import { connectBank as connectBankEffect } from "../dist/guided-connection.js";
+import { resolveControlPanelEmailInput as resolveControlPanelEmailInputEffect } from "../dist/control-panel-email.js";
+
+
+function connectBank(...args) {
+  return Effect.runPromise(
+    Effect.either(connectBankEffect(...args)),
+  ).then((result) => {
+    if (result._tag === "Left") throw result.left;
+    return result.right;
+  });
+}
 
 function memoryStore(value) {
   return {
     value,
-    async get() {
-      return this.value;
+    get() {
+      return Effect.sync(() => this.value);
     },
-    async set(next) {
-      this.value = next;
+    set(next) {
+      return Effect.sync(() => {
+        this.value = next;
+      });
     },
-    async clear() {
-      this.value = undefined;
+    clear() {
+      return Effect.sync(() => {
+        this.value = undefined;
+      });
     },
   };
 }
@@ -82,21 +98,21 @@ async function runConnection({
       get status() {
         return state.setupStatus;
       },
-      async registerApplication(registration) {
+      registerApplication(registration) {
         state.setupRegistrationCalls.push(registration);
-        return {
+        return Effect.succeed({
           status: "started",
           phase: "control_panel_auth",
           message: "Registration started",
-        };
+        });
       },
-      async start(setup) {
+      start(setup) {
         state.setupStartCalls.push(setup);
-        return {
+        return Effect.succeed({
           status: "started",
           phase: "control_panel_auth",
           message: "Combined setup started",
-        };
+        });
       },
     },
     authorizationFlow: {
@@ -104,29 +120,31 @@ async function runConnection({
         pending: authorizationPending,
         ...(authorizationLastError ? { lastError: authorizationLastError } : {}),
       },
-      async start(client, authorization) {
+      start(client, authorization) {
         state.authorizationCalls.push({ client, authorization });
-        return {
+        return Effect.succeed({
           status: "awaiting_user",
           authorization_url: "https://bank.example/authorize",
-        };
+        });
       },
     },
     controlPanelAuthStore: {
-      async get() {
+      get() {
         state.controlPanelReads += 1;
-        return storedEmail ? { email: storedEmail } : undefined;
+        return Effect.succeed(storedEmail ? { email: storedEmail } : undefined);
       },
     },
-    async resolveControlPanelEmail(environmentName, keychainEmail) {
+    resolveControlPanelEmail(environmentName, keychainEmail) {
       state.emailResolveCalls += 1;
-      const resolved = await resolveControlPanelEmailInput(
-        mcpServer.server,
-        environmentName,
-        environmentEmail,
-        keychainEmail,
+      return Effect.map(
+        resolveControlPanelEmailInputEffect(
+          mcpServer.server,
+          environmentName,
+          environmentEmail,
+          keychainEmail,
+        ),
+        (resolved) => resolved.status === "ready" ? resolved.email : resolved,
       );
-      return resolved.status === "ready" ? resolved.email : resolved;
     },
     assertNoEnvironmentCredentials() {
       state.environmentCredentialChecks += 1;
@@ -140,31 +158,47 @@ async function runConnection({
         state.environmentSessionId = undefined;
       }
     },
-    async readAuthorizedAccounts() {
+    readAuthorizedAccounts() {
       state.authorizedAccountReads += 1;
-      if (readAuthorizedAccounts) return readAuthorizedAccounts(state.authorizedAccountReads);
-      return { aspsp: { name: "Nordea", country: "FI" }, accounts: [{ uid: "account-1" }] };
+      return Effect.tryPromise({
+        try: async () => {
+          if (readAuthorizedAccounts) return readAuthorizedAccounts(state.authorizedAccountReads);
+          return { aspsp: { name: "Nordea", country: "FI" }, accounts: [{ uid: "account-1" }] };
+        },
+        catch: (error) => error,
+      });
     },
-    async resolveCredentials() {
-      if (credentialError) throw credentialError;
-      return { appId: "app-id", privateKey: "private-key" };
+    resolveCredentials() {
+      return credentialError
+        ? Effect.fail(credentialError)
+        : Effect.succeed({ appId: "app-id", privateKey: "private-key" });
     },
     createBankClient() {
       return {
-        async getApplication() {
-          state.applicationReads += 1;
-          if (applicationError) throw applicationError;
-          return applicationInfo;
+        getApplication() {
+          return Effect.tryPromise({
+            try: async () => {
+              state.applicationReads += 1;
+              if (applicationError) throw applicationError;
+              return applicationInfo;
+            },
+            catch: (error) => error,
+          });
         },
-        async listBanks(country) {
-          state.bankCalls.push(country);
-          if (bankListError) throw bankListError;
-          return {
-            aspsps:
-              country === undefined
-                ? globalBanks
-                : banksByCountry[country] ?? [],
-          };
+        listBanks(country) {
+          return Effect.tryPromise({
+            try: async () => {
+              state.bankCalls.push(country);
+              if (bankListError) throw bankListError;
+              return {
+                aspsps:
+                  country === undefined
+                    ? globalBanks
+                    : banksByCountry[country] ?? [],
+              };
+            },
+            catch: (error) => error,
+          });
         },
       };
     },
