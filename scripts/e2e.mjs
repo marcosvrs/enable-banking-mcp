@@ -298,6 +298,7 @@ async function runPackageSmoke(artifactRoot, packageTarball = null) {
         const result = await runCommand(
           "npx",
           publishedInspectorArgs(configPath, method),
+          { cwd: root },
         );
         try {
           requireSuccess(
