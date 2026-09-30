@@ -147,7 +147,7 @@ globalThis.fetch = async (input, init = {}) => {
         kid: "fixture-app-id",
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
-        active: applicationRequests > 3,
+        active: applicationRequests > 2,
         countries: ["IE"],
         services: ["AIS"],
       });

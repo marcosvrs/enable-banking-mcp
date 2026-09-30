@@ -99,7 +99,7 @@ export function inspectConnectionStatus(
         ? { application_environment: input.configuredEnvironment }
         : {}),
       phase: input.pendingPhase,
-      next_action: "The browser step is in progress. The MCP agent should monitor setup_status and resume connect_bank after any required user action; do not ask the user to repeat a tool call.",
+      next_action: "The active connect_bank request monitors this provider step and continues automatically. Complete any required interaction in the opened browser; do not rerun a tool.",
     };
   }
 
@@ -109,7 +109,7 @@ export function inspectConnectionStatus(
       application: "not_configured",
       bank_session: bankSession,
       control_panel_session: controlPanelSession,
-      next_action: "Start setup with connect_bank; the MCP agent should run follow-up calls and status checks itself.",
+      next_action: "Run connect_bank to open the MCP-owned onboarding form and start the guided workflow.",
     };
   }
 
@@ -144,7 +144,7 @@ export function inspectConnectionStatus(
       control_panel_session: controlPanelSession,
       ...environmentField,
       next_action:
-        "The user must link the application to their own bank in the dashboard; after that, the MCP agent should resume connect_bank itself.",
+        "Complete Production activation by linking an account in the Enable Banking dashboard. The active connect_bank request continues automatically when activation is detected.",
     };
   }
 
@@ -156,7 +156,7 @@ export function inspectConnectionStatus(
       control_panel_session: controlPanelSession,
       ...environmentField,
       next_action:
-        "Use known country/bank context and provider bank lists first; ask only for a genuinely missing choice, then let the MCP agent continue.",
+        "Run connect_bank; it collects the bank country and bank together through MCP form elicitation.",
     };
   }
 
@@ -167,7 +167,7 @@ export function inspectConnectionStatus(
     control_panel_session: controlPanelSession,
     ...environmentField,
     next_action:
-      "Use known country/bank context and provider bank lists first; ask only for a genuinely missing choice, then let the MCP agent continue.",
+      "Run connect_bank; it collects the bank country and bank together through MCP form elicitation.",
   };
   });
 }

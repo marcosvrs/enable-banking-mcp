@@ -136,7 +136,7 @@ export function resolveBankSelection(options: {
       status: "needs_country",
       supported_countries: applicationCountries,
       message:
-        "The country is not supported by this application. Choose a listed country and resume connect_bank.",
+        "The country is not supported by this application.",
     };
   }
 
@@ -337,7 +337,7 @@ function countrySelectionRequired(
       required_input: "country",
       supported_countries: countries,
       message:
-        "Country selection was declined; no bank authorization started. Resume connect_bank when ready.",
+        "Country selection was cancelled; no bank authorization started.",
     };
   }
   return {
@@ -345,10 +345,8 @@ function countrySelectionRequired(
     supported_countries: countries,
     message:
       result.status === "unsupported"
-        ? countries.length > 0
-          ? "This MCP client does not support form elicitation. Ask the user to choose a supported country from this list, then call connect_bank with its two-letter code."
-          : "This MCP client does not support form elicitation. Ask the user for the two-letter country code where the bank account is held, then resume connect_bank."
-        : "A valid supported country code is required. Ask the user to choose from supported_countries, then resume connect_bank.",
+        ? "This MCP client cannot collect a country through MCP form elicitation. No bank authorization started; use a client that supports MCP forms."
+        : "The MCP country form returned an invalid choice. No bank authorization started.",
   };
 }
 
@@ -364,7 +362,7 @@ function bankSelectionRequired(
       ...(country ? { country } : {}),
       banks,
       message:
-        "Bank selection was declined; no bank authorization started. Resume connect_bank when ready.",
+        "Bank selection was cancelled; no bank authorization started.",
     };
   }
   return {
@@ -373,7 +371,7 @@ function bankSelectionRequired(
     banks,
     message:
       result.status === "unsupported"
-        ? "This MCP client does not support form elicitation. Ask the user to choose a bank from the provider-listed options, then resume connect_bank with the selected bank and country."
-        : "A valid provider-listed bank choice is required. Ask the user to choose from banks, then resume connect_bank.",
+        ? "This MCP client cannot collect a bank choice through MCP form elicitation. No bank authorization started; use a client that supports MCP forms."
+        : "The MCP bank form returned an invalid choice. No bank authorization started.",
   };
 }

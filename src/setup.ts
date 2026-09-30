@@ -38,7 +38,6 @@ export const DEFAULT_PRODUCTION_TERMS_URL =
 const OPENSSL_COMMAND = "openssl";
 const SECURITY_COMMAND = "/usr/bin/security";
 const CERTIFICATE_DAYS = "825";
-const ACTIVATION_TIMEOUT_MS = 15 * 60 * 1000;
 const ACTIVATION_POLL_MS = 5_000;
 const SESSION_TIMEOUT_MS = 6 * 60 * 1000;
 const SESSION_POLL_MS = 1_000;
@@ -217,7 +216,7 @@ export class ApplicationSetupFlow {
             return {
               ...applicationStatus(application),
               message:
-                "Production application status could not be verified; the MCP agent should resume connect_bank to check activation.",
+                "Production application status could not be verified; connect_bank will keep monitoring before starting authorization.",
             };
           }
           const status = applicationStatus(application, providerApplication.active);
@@ -312,6 +311,50 @@ export class ApplicationSetupFlow {
     });
   }
 
+  runToCompletion(
+    options: SetupOptions,
+  ): Effect.Effect<SetupStatus, unknown> {
+    return Effect.gen(this, function* () {
+      const previous = yield* Effect.sync(() => this.reserve());
+      const normalized = yield* Effect.try({
+        try: () => normalizeSetupOptions(options),
+        catch: (error) => error,
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* this.ensureStoresAvailable().pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* this.run(normalized);
+      return this.status;
+    });
+  }
+
+  waitForCompletion(): Effect.Effect<SetupStatus, never> {
+    return Effect.gen(this, function* () {
+      while (this.current.pending) yield* Effect.sleep(500);
+      return this.status;
+    });
+  }
+
   private ensureStoresAvailable(): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
       if (yield* this.dependencies.applicationStore.get()) {
@@ -343,7 +386,7 @@ export class ApplicationSetupFlow {
       phase: "control_panel_auth",
       pending: true,
       message:
-        "Preparing Control Panel authentication; the MCP agent will monitor progress and resume setup. Complete an email link only if one is requested.",
+        "Waiting for Control Panel authentication; the MCP setup flow will receive the email callback and continue automatically.",
     };
     return previous;
   }
@@ -374,7 +417,7 @@ export class ApplicationSetupFlow {
                   appId: created.appId,
                   dashboardUrl: APPLICATIONS_URL,
                   message:
-                    "Application registered; the user must activate it in the dashboard. The MCP agent continues once any missing country or bank choice is known.",
+                    "Application registered; activate it in the dashboard, then use connect_bank to continue the separate bank-session flow.",
                 });
               } else {
                 this.update({
@@ -382,7 +425,7 @@ export class ApplicationSetupFlow {
                   pending: false,
                   appId: created.appId,
                   message:
-                    "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
+                    "Application registered; use connect_bank when ready to continue with bank authorization.",
                 });
               }
             }),
@@ -434,25 +477,10 @@ export class ApplicationSetupFlow {
             appId: storedApplication.appId,
             dashboardUrl: APPLICATIONS_URL,
             message:
-              "The user must link the application to their own bank in the dashboard; setup continues automatically when activation is detected.",
+              "Activate the Production application by linking an account in the Enable Banking dashboard; this flow continues automatically when activation is detected.",
           });
           yield* (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
-          const activated = yield* waitForActivation(
-            client,
-            this.dependencies.sleep,
-            this.dependencies.now,
-          );
-          if (!activated) {
-            this.update({
-              phase: "account_link",
-              pending: false,
-              appId: storedApplication.appId,
-              dashboardUrl: APPLICATIONS_URL,
-              message:
-                "The application is still inactive. After dashboard account linking, the MCP agent should resume connect_bank to continue setup.",
-            });
-            return;
-          }
+          yield* waitForActivation(client, this.dependencies.sleep);
         }
         const aspspName = yield* resolveAspspName(client, options);
         this.update({
@@ -560,8 +588,8 @@ function applicationStatus(
     appId: application.appId,
     ...(activationRequired ? { dashboardUrl: APPLICATIONS_URL } : {}),
     message: activationRequired
-      ? "Application registered; the user must activate it in the dashboard, then the MCP agent resumes setup."
-      : "Application registered; the MCP agent continues with bank consent once the country and bank are known.",
+      ? "Application registered; Production dashboard account linking is required before bank authorization."
+      : "Application registered; use connect_bank to start bank authorization.",
   };
 }
 
@@ -713,16 +741,12 @@ function extractAspspNames(response: unknown): string[] {
 function waitForActivation(
   client: EnableBankingClient,
   configuredSleep?: (milliseconds: number) => Effect.Effect<void, unknown>,
-  configuredNow: () => number = Date.now,
-): Effect.Effect<boolean, unknown> {
+): Effect.Effect<void, unknown> {
   return Effect.gen(function* () {
-    const deadline = configuredNow() + ACTIVATION_TIMEOUT_MS;
-    while (configuredNow() < deadline) {
-      const application = yield* client.getApplication();
-      if (application.active) return true;
+    while (true) {
+      if ((yield* client.getApplication()).active) return;
       yield* (configuredSleep ?? Effect.sleep)(ACTIVATION_POLL_MS);
     }
-    return false;
   });
 }
 

@@ -46,49 +46,38 @@ import { resolveControlPanelEmailInput } from "./control-panel-email.js";
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.4.0-beta.0",
+    version: "0.4.0-beta.1",
   },
   {
     instructions:
-      `MCP transport connectivity does not mean Enable Banking is authenticated.
-Use connect_bank as the primary guided setup. It reuses stored authentication
-and application state, opens required browser pages, and handles callbacks.
-Check conversation and stored/provider data before asking. If a bank is named
-without a country, search the global personal-AIS bank list and use an exact,
-unique match; if multiple matches remain, ask the user to select the bank and
-country. If a country is known and only one bank is listed, proceed with it.
-Never guess from device locale or location.
+      `connect_bank is the one-call onboarding workflow. For a new application,
+the MCP asks up front for the Control Panel email, bank country, and bank in
+one form elicitation. Do not infer these from chat, environment variables, or
+stored Control Panel identity. For an existing application it asks for bank
+country and bank together. It then owns registration, local email callback
+handling, Production activation monitoring, bank authorization callback, and
+retrieval of balances for authorized accounts. No other MCP server is used.
 
-When the client advertises MCP form elicitation, use it only for an unresolved
-Control Panel email, country, or bank choice. The user may decline. Never
-request passwords, OTPs, API keys, access tokens, bank credentials, or consent.
-If forms are unavailable, return provider choices so the agent can ask through
-its own UI. For Control Panel email fallback, request local
-ENABLE_BANKING_CONTROL_PANEL_EMAIL configuration; never pass an email through
-a tool argument or expose it in results. The email authenticates the Control Panel
-and is the data-protection contact for a Production application; it does not
-identify the user's bank or retrieve account data.
+The user must still perform provider-required actions: click the Control Panel
+email link; in Production, activate the application by linking an account in
+the Enable Banking dashboard; and complete the separate API bank sign-in,
+MFA, and explicit consent. Production activation does not create the API
+session. Do not promise that an email click alone can authorize bank data.
+The MCP opens the system browser and waits for callbacks and provider state;
+never ask the user to rerun a tool, copy a code, or tell the agent when a page
+is done. The user must also approve any local certificate-trust prompt.
 
-The agent owns MCP orchestration: perform all safe follow-up calls, status
-checks, and resumption yourself. Never ask the user to rerun an MCP tool, copy
-a URL or code, or repeat information already available. After required human
-browser actions, monitor setup_status or connection_status and resume
-connect_bank until the session is verified. The user alone completes a
-Control Panel email link when requested, Production dashboard account linking,
-bank sign-in/MFA and explicit consent, and any local certificate-trust prompt.
+Never request bank passwords, OTPs, API keys, access tokens, or consent through
+the model. If MCP form elicitation is unavailable or declined, connect_bank
+stops without starting setup; do not fall back to agent-owned forms or local
+email configuration. Never pass emails, tokens, private keys, or session IDs
+as tool arguments or expose them in results.
 
-Use connection_status only for status checks; it does not open a browser, start
-consent, modify stored sessions, or return account data. For first-run setup
-with a known country and bank, pass both to connect_bank or use
-setup_enable_banking; the combined flow handles registration, Production
-activation polling, consent callback, and session storage. If a bank is
-unknown, use provider bank lists and request only unresolved choices. The
-default access profile is balances; request transactions only when needed.
-This server is read-only for personal account information and never initiates
-payments. Use register_application and authorize_bank only for advanced
-control. Never pass emails, tokens, private keys, or session IDs as tool
-arguments. Control Panel email is read from local configuration or Keychain
-when available.`
+Use connection_status only for status checks; it does not start consent,
+modify stored sessions, or return account data. Use setup_enable_banking,
+register_application, and authorize_bank only for advanced explicit control;
+the primary onboarding path is connect_bank. This server is read-only for
+personal account information and never initiates payments.`
   },
 );
 
@@ -280,6 +269,43 @@ function authorizedAccounts(): Effect.Effect<Record<string, unknown>, unknown> {
     };
   });
 }
+function authorizedBalances(): Effect.Effect<Record<string, unknown>, unknown> {
+  return Effect.gen(function* () {
+    const { client, sessionId } = yield* sessionClient();
+    const session = yield* client.getSession(sessionId);
+    if (!Array.isArray(session.accounts)) {
+      return yield* Effect.fail(
+        new Error("Enable Banking session returned no authorized accounts"),
+      );
+    }
+    const balances = yield* Effect.all(
+      session.accounts.map((account) => {
+        if (
+          typeof account !== "object" ||
+          account === null ||
+          typeof (account as Record<string, unknown>).uid !== "string"
+        ) {
+          return Effect.fail(
+            new Error("Enable Banking session returned an invalid account UID"),
+          );
+        }
+        const accountId = (account as Record<string, string>).uid;
+        return Effect.map(client.getAccountBalances(accountId), (result) => ({
+          account_id: accountId,
+          balances: result,
+        }));
+      }),
+      { concurrency: "unbounded" },
+    );
+    return {
+      aspsp: session.aspsp,
+      accounts: session.accounts,
+      balances,
+      access: session.access,
+    };
+  });
+}
+
 function readConnectionStatus(): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
     const [application, storedSession, controlPanelAuth] = yield* Effect.all(
@@ -349,8 +375,6 @@ function connectBank(
     sessionStore,
     setupFlow,
     authorizationFlow,
-    controlPanelAuthStore,
-    resolveControlPanelEmail,
     assertNoEnvironmentCredentials,
     getEnvironmentSessionId: () =>
       process.env.ENABLE_BANKING_SESSION_ID?.trim(),
@@ -362,7 +386,7 @@ function connectBank(
         delete process.env.ENABLE_BANKING_SESSION_ID;
       }
     },
-    readAuthorizedAccounts: authorizedAccounts,
+    readAuthorizedBalances: authorizedBalances,
     resolveCredentials,
     createBankClient: (credentials) => new EnableBankingClient(credentials),
     openBrowser: launchBrowser,
@@ -491,7 +515,7 @@ server.registerTool(
   "connect_bank",
   {
     description:
-      "Primary personal AIS setup. Reuses stored sessions and credentials, opens provider pages, and handles callbacks. It elicits only a missing Control Panel email, country, or bank choice through MCP forms when supported; otherwise it returns choices for the agent to ask. The MCP agent owns follow-up calls and status checks. The user completes required sign-in/MFA and consent.",
+      "One-call personal AIS onboarding. The MCP requests the Control Panel email, bank country, and bank together using form elicitation, then owns registration, email callback handling, Production activation monitoring, bank authorization callback, and balance retrieval. The user must still complete provider-required email, dashboard account-linking, bank sign-in/MFA, and consent steps.",
     inputSchema: {
       app_name: z
         .string()
@@ -502,29 +526,17 @@ server.registerTool(
         .enum(["PRODUCTION", "SANDBOX"])
         .default("PRODUCTION")
         .describe("Application environment used when first-run registration is needed"),
-      country: z
-        .string()
-        .length(2)
-        .optional()
-        .describe("Two-letter country code used to list available banks"),
-      aspsp_name: z
-        .string()
-        .min(1)
-        .optional()
-        .describe("Exact bank name selected from connect_bank choices"),
       access_profile: z
         .enum(["balances", "balances_and_transactions"])
         .default("balances")
         .describe("Whether the consent may include transaction history"),
     },
   },
-  ({ app_name, environment, country, aspsp_name, access_profile }) =>
+  ({ app_name, environment, access_profile }) =>
     safely(
       connectBank({
         appName: app_name,
         environment,
-        country,
-        aspspName: aspsp_name,
         accessProfile: access_profile as AccessProfile,
       }),
     ),
@@ -534,7 +546,7 @@ server.registerTool(
   "setup_enable_banking",
   {
     description:
-      "Advanced combined registration and personal AIS setup when the bank and country are already known. Reads local Control Panel identity or uses MCP form elicitation when supported. Use connect_bank for provider-discovered missing bank/country choices; the MCP agent owns follow-up calls and status checks.",
+      "Advanced background setup for a known bank and country. The MCP continues registration, Production activation monitoring, callbacks, and session storage after returning its initial status. Use connect_bank for the one-call form, orchestration, and balance retrieval.",
     inputSchema: {
       app_name: z
         .string()
@@ -627,7 +639,7 @@ server.registerTool(
   "register_application",
   {
     description:
-      "Register a personal, noncommercial Enable Banking AIS application using local Control Panel identity, store credentials in macOS Keychain, and wait for dashboard activation. If no identity is stored, use MCP form elicitation when supported; the email is never a tool argument or result.",
+      "Advanced registration-only path. Registers the application and returns its initial status; Production account linking and API bank authorization remain separate. Use connect_bank for the primary one-call setup and balances.",
     inputSchema: {
       app_name: z
         .string()
@@ -695,7 +707,7 @@ server.registerTool(
   "setup_status",
   {
     description:
-      "Report setup progress without credentials. The MCP agent may poll this and must resume connect_bank itself after required human browser actions.",
+      "Report setup progress without credentials. Informational only; the active connect_bank or setup_enable_banking flow monitors provider callbacks and status itself.",
   },
   () => safely(setupFlow.getStatus()),
 );
