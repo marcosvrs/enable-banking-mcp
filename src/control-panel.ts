@@ -1,3 +1,5 @@
+import { Effect } from "effect";
+
 import { z } from "zod";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
@@ -73,143 +75,178 @@ export class ControlPanelClient {
       process.env.ENABLE_BANKING_FIREBASE_API_KEY?.trim(),
   ) {}
 
-  async requestEmailLogin(
+  requestEmailLogin(
     email: string,
     callbackPort: number,
     callbackPath: string,
-  ): Promise<void> {
-    const normalizedEmail = email.trim();
-    if (!normalizedEmail || !normalizedEmail.includes("@")) {
-      throw new Error("control_panel_email must be a valid email address");
-    }
-    if (
-      !Number.isInteger(callbackPort) ||
-      callbackPort < 1 ||
-      callbackPort > 65535
-    ) {
-      throw new Error("Control Panel callback port is invalid");
-    }
-    const callbackUrl = validateCallbackPath(callbackPath);
-    await this.request("/api/relyingparty/getOobConfirmationCode", {
-      body: {
-        requestType: "EMAIL_SIGNIN",
-        email: normalizedEmail,
-        continueUrl: `http://localhost:${callbackPort}${callbackUrl}`,
-        canHandleCodeInApp: true,
-      },
-    });
+  ): Effect.Effect<void, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const normalizedEmail = email.trim();
+        if (!normalizedEmail || !normalizedEmail.includes("@")) {
+          return yield* Effect.fail(
+            new Error("control_panel_email must be a valid email address"),
+          );
+        }
+        if (
+          !Number.isInteger(callbackPort) ||
+          callbackPort < 1 ||
+          callbackPort > 65535
+        ) {
+          return yield* Effect.fail(new Error("Control Panel callback port is invalid"));
+        }
+        const callbackUrl = validateCallbackPath(callbackPath);
+        yield* this.request("/api/relyingparty/getOobConfirmationCode", {
+          body: {
+            requestType: "EMAIL_SIGNIN",
+            email: normalizedEmail,
+            continueUrl: `http://localhost:${callbackPort}${callbackUrl}`,
+            canHandleCodeInApp: true,
+          },
+        });
+      }.bind(this),
+    );
   }
 
-  async completeEmailLogin(
+  completeEmailLogin(
     email: string,
     confirmationCode: string,
-  ): Promise<ControlPanelAuth> {
-    const result = await this.request<unknown>(
-      "/api/relyingparty/emailLinkSignin",
-      {
-        body: {
-          oobCode: confirmationCode,
+  ): Effect.Effect<ControlPanelAuth, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const result = yield* this.request<unknown>(
+          "/api/relyingparty/emailLinkSignin",
+          {
+            body: {
+              oobCode: confirmationCode,
+              email: email.trim(),
+            },
+          },
+        );
+        const parsed = ControlPanelLoginResponse.safeParse(result);
+        if (!parsed.success) {
+          return yield* Effect.fail(
+            new Error(
+              "Enable Banking Control Panel returned an invalid login response",
+            ),
+          );
+        }
+        const expiresIn = Number(parsed.data.expiresIn);
+        const expiresAt =
+          Number.isFinite(expiresIn) && expiresIn > 0
+            ? Date.now() + Math.max(0, expiresIn - 60) * 1000
+            : undefined;
+        return {
           email: email.trim(),
-        },
-      },
+          idToken: parsed.data.idToken,
+          refreshToken: parsed.data.refreshToken,
+          ...(parsed.data.localId ? { localId: parsed.data.localId } : {}),
+          ...(expiresAt ? { expiresAt } : {}),
+        };
+      }.bind(this),
     );
-    const parsed = ControlPanelLoginResponse.safeParse(result);
-    if (!parsed.success) {
-      throw new Error(
-        "Enable Banking Control Panel returned an invalid login response",
-      );
-    }
-    const expiresIn = Number(parsed.data.expiresIn);
-    const expiresAt =
-      Number.isFinite(expiresIn) && expiresIn > 0
-        ? Date.now() + Math.max(0, expiresIn - 60) * 1000
-        : undefined;
-    return {
-      email: email.trim(),
-      idToken: parsed.data.idToken,
-      refreshToken: parsed.data.refreshToken,
-      ...(parsed.data.localId ? { localId: parsed.data.localId } : {}),
-      ...(expiresAt ? { expiresAt } : {}),
-    };
   }
 
-  async refreshAuth(auth: ControlPanelAuth): Promise<ControlPanelAuth> {
-    const firebaseApiKey =
-      this.firebaseApiKey || CONTROL_PANEL_FIREBASE_WEB_KEY;
-    const headers = {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-    };
-    const body = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: auth.refreshToken,
-    });
-    const response = await this.fetchFn(
-      `${FIREBASE_SECURE_TOKEN_URL}?key=${encodeURIComponent(firebaseApiKey)}`,
-      {
-        method: "POST",
-        headers,
-        body: body.toString(),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      },
+  refreshAuth(
+    auth: ControlPanelAuth,
+  ): Effect.Effect<ControlPanelAuth, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const firebaseApiKey =
+          this.firebaseApiKey || CONTROL_PANEL_FIREBASE_WEB_KEY;
+        const headers = {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        };
+        const body = new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: auth.refreshToken,
+        });
+        const response = yield* Effect.tryPromise({
+          try: () =>
+            this.fetchFn(
+              `${FIREBASE_SECURE_TOKEN_URL}?key=${encodeURIComponent(firebaseApiKey)}`,
+              {
+                method: "POST",
+                headers,
+                body: body.toString(),
+                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+              },
+            ),
+          catch: (error) => error,
+        });
+        const raw = yield* Effect.tryPromise({
+          try: () => response.text(),
+          catch: (error) => error,
+        });
+        const result = parseJson(raw);
+        if (!response.ok) {
+          return yield* Effect.fail(
+            new ControlPanelApiError(
+              response.status,
+              extractErrorMessage(result) ||
+                response.statusText ||
+                "token refresh failed",
+            ),
+          );
+        }
+        const parsed = ControlPanelRefreshResponse.safeParse(result);
+        if (!parsed.success) {
+          return yield* Effect.fail(
+            new Error(
+              "Enable Banking Control Panel returned an invalid refresh response",
+            ),
+          );
+        }
+        const expiresIn = Number(parsed.data.expires_in);
+        const expiresAt =
+          Number.isFinite(expiresIn) && expiresIn > 0
+            ? Date.now() + Math.max(0, expiresIn - 60) * 1000
+            : undefined;
+        return {
+          email: auth.email,
+          idToken: parsed.data.id_token,
+          refreshToken: parsed.data.refresh_token ?? auth.refreshToken,
+          ...(parsed.data.user_id
+            ? { localId: parsed.data.user_id }
+            : auth.localId
+              ? { localId: auth.localId }
+              : {}),
+          ...(expiresAt ? { expiresAt } : {}),
+        };
+      }.bind(this),
     );
-    const raw = await response.text();
-    const result = parseJson(raw);
-    if (!response.ok) {
-      throw new ControlPanelApiError(
-        response.status,
-        extractErrorMessage(result) || response.statusText || "token refresh failed",
-      );
-    }
-    const parsed = ControlPanelRefreshResponse.safeParse(result);
-    if (!parsed.success) {
-      throw new Error(
-        "Enable Banking Control Panel returned an invalid refresh response",
-      );
-    }
-    const expiresIn = Number(parsed.data.expires_in);
-    const expiresAt =
-      Number.isFinite(expiresIn) && expiresIn > 0
-        ? Date.now() + Math.max(0, expiresIn - 60) * 1000
-        : undefined;
-    return {
-      email: auth.email,
-      idToken: parsed.data.id_token,
-      refreshToken: parsed.data.refresh_token ?? auth.refreshToken,
-      ...(parsed.data.user_id
-        ? { localId: parsed.data.user_id }
-        : auth.localId
-          ? { localId: auth.localId }
-          : {}),
-      ...(expiresAt ? { expiresAt } : {}),
-    };
   }
 
-  async registerApplication(
+  registerApplication(
     auth: ControlPanelAuth,
     request: ApplicationRegistrationRequest,
-  ): Promise<{ app_id: string }> {
-    const result = await this.requestAuthenticated<unknown>(
-      auth,
-      "/api/applications",
-      {
-        body: request,
-      },
+  ): Effect.Effect<{ app_id: string }, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const result = yield* this.requestAuthenticated<unknown>(
+          auth,
+          "/api/applications",
+          { body: request },
+        );
+        const parsed = ApplicationRegistrationResponse.safeParse(result);
+        if (!parsed.success) {
+          return yield* Effect.fail(
+            new Error(
+              "Enable Banking Control Panel returned an invalid application registration response",
+            ),
+          );
+        }
+        return parsed.data;
+      }.bind(this),
     );
-    const parsed = ApplicationRegistrationResponse.safeParse(result);
-    if (!parsed.success) {
-      throw new Error(
-        "Enable Banking Control Panel returned an invalid application registration response",
-      );
-    }
-    return parsed.data;
   }
 
-  private async requestAuthenticated<T = unknown>(
+  private requestAuthenticated<T = unknown>(
     auth: ControlPanelAuth,
     path: ControlPanelPath,
     options: ControlPanelRequestOptions = {},
-  ): Promise<T> {
+  ): Effect.Effect<T, unknown> {
     return this.request<T>(path, {
       ...options,
       headers: {
@@ -219,47 +256,60 @@ export class ControlPanelClient {
     });
   }
 
-  private async request<T = unknown>(
+  private request<T = unknown>(
     path: ControlPanelPath,
     options: ControlPanelRequestOptions = {},
-  ): Promise<T> {
-    const baseUrl = this.baseUrl.replace(/\/+$/, "");
-    const url = new URL(`${baseUrl}${path}`);
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      ...options.headers,
-    };
-    const init: RequestInit = {
-      method: "POST",
-      headers,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    };
-    if (options.body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      init.body = JSON.stringify(options.body);
-    }
+  ): Effect.Effect<T, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const baseUrl = this.baseUrl.replace(/\/+$/, "");
+        const url = new URL(`${baseUrl}${path}`);
+        const headers: Record<string, string> = {
+          Accept: "application/json",
+          ...options.headers,
+        };
+        const init: RequestInit = {
+          method: "POST",
+          headers,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        };
+        if (options.body !== undefined) {
+          headers["Content-Type"] = "application/json";
+          init.body = JSON.stringify(options.body);
+        }
 
-    const response = await this.fetchFn(url, init);
-    const raw = await response.text();
-    const body = parseJson(raw);
-    if (!response.ok) {
-      throw new ControlPanelApiError(
-        response.status,
-        extractErrorMessage(body) || response.statusText || "request failed",
-      );
-    }
-    return body as T;
+        const response = yield* Effect.tryPromise({
+          try: () => this.fetchFn(url, init),
+          catch: (error) => error,
+        });
+        const raw = yield* Effect.tryPromise({
+          try: () => response.text(),
+          catch: (error) => error,
+        });
+        const body = parseJson(raw);
+        if (!response.ok) {
+          return yield* Effect.fail(
+            new ControlPanelApiError(
+              response.status,
+              extractErrorMessage(body) || response.statusText || "request failed",
+            ),
+          );
+        }
+        return body as T;
+      }.bind(this),
+    );
   }
 }
 
 export type ControlPanelCallbackListener = {
   port: number;
   path: string;
-  wait: Promise<string>;
-  close: () => Promise<void>;
+  wait: Effect.Effect<string, unknown>;
+  close: Effect.Effect<void, unknown>;
 };
 
-export type ControlPanelCallbackListenerFactory = () => Promise<ControlPanelCallbackListener>;
+export type ControlPanelCallbackListenerFactory =
+  () => Effect.Effect<ControlPanelCallbackListener, unknown>;
 
 export class ControlPanelAuthFlow {
   private activeAuthenticationCount = 0;
@@ -271,212 +321,263 @@ export class ControlPanelAuthFlow {
       createControlPanelCallbackListener,
   ) {}
 
-  async withAuthentication<T>(
+  withAuthentication<T>(
     operation: (
       authenticate: (
         email: string,
         existingAuth?: ControlPanelAuth,
-      ) => Promise<ControlPanelAuth>,
-    ) => Promise<T>,
-  ): Promise<T> {
-    if (this.credentialCleanupPending) {
-      throw new Error("Control Panel credentials are being cleared");
-    }
-    if (this.activeAuthenticationCount > 0) {
-      throw new Error("Control Panel authentication is already in progress");
-    }
-    this.activeAuthenticationCount += 1;
-    let active = true;
-    try {
-      return await operation((email, existingAuth) => {
-        if (!active) {
-          throw new Error("Control Panel authentication reservation has ended");
-        }
-        return this.authenticateWhileReserved(email, existingAuth);
-      });
-    } finally {
-      active = false;
-      this.activeAuthenticationCount -= 1;
-    }
+      ) => Effect.Effect<ControlPanelAuth, unknown>,
+    ) => Effect.Effect<T, unknown>,
+  ): Effect.Effect<T, unknown> {
+    return Effect.acquireUseRelease(
+      Effect.gen(
+        function* (this: ControlPanelAuthFlow) {
+          if (this.credentialCleanupPending) {
+            return yield* Effect.fail(
+              new Error("Control Panel credentials are being cleared"),
+            );
+          }
+          if (this.activeAuthenticationCount > 0) {
+            return yield* Effect.fail(
+              new Error("Control Panel authentication is already in progress"),
+            );
+          }
+          this.activeAuthenticationCount += 1;
+          return { active: true };
+        }.bind(this),
+      ),
+      (reservation) =>
+        operation((email, existingAuth) =>
+          reservation.active
+            ? this.authenticateWhileReserved(email, existingAuth)
+            : Effect.fail(
+                new Error(
+                  "Control Panel authentication reservation has ended",
+                ),
+              ),
+        ),
+      (reservation) =>
+        Effect.sync(() => {
+          reservation.active = false;
+          this.activeAuthenticationCount -= 1;
+        }),
+    );
   }
 
-  async withCredentialCleanup<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.activeAuthenticationCount > 0 || this.credentialCleanupPending) {
-      throw new Error(
-        "Cannot clear credentials while Control Panel authentication or cleanup is pending",
-      );
-    }
-    this.credentialCleanupPending = true;
-    try {
-      return await operation();
-    } finally {
-      this.credentialCleanupPending = false;
-    }
+  withCredentialCleanup<T>(
+    operation: () => Effect.Effect<T, unknown>,
+  ): Effect.Effect<T, unknown> {
+    return Effect.acquireUseRelease(
+      Effect.gen(
+        function* (this: ControlPanelAuthFlow) {
+          if (
+            this.activeAuthenticationCount > 0 ||
+            this.credentialCleanupPending
+          ) {
+            return yield* Effect.fail(
+              new Error(
+                "Cannot clear credentials while Control Panel authentication or cleanup is pending",
+              ),
+            );
+          }
+          this.credentialCleanupPending = true;
+        }.bind(this),
+      ),
+      operation,
+      () =>
+        Effect.sync(() => {
+          this.credentialCleanupPending = false;
+        }),
+    );
   }
 
   authenticate(
     email: string,
     existingAuth?: ControlPanelAuth,
-  ): Promise<ControlPanelAuth> {
+  ): Effect.Effect<ControlPanelAuth, unknown> {
     return this.withAuthentication((authenticate) =>
       authenticate(email, existingAuth),
     );
   }
 
-  private async authenticateWhileReserved(
+  private authenticateWhileReserved(
     email: string,
     existingAuth?: ControlPanelAuth,
-  ): Promise<ControlPanelAuth> {
-    const normalizedEmail = email.trim();
-    if (
-      existingAuth &&
-      existingAuth.email.trim().toLowerCase() ===
-        normalizedEmail.toLowerCase()
-    ) {
-      if (
-        existingAuth.expiresAt !== undefined &&
-        existingAuth.expiresAt > Date.now()
-      ) {
-        return existingAuth;
-      }
+  ): Effect.Effect<ControlPanelAuth, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelAuthFlow) {
+        const normalizedEmail = email.trim();
+        if (
+          existingAuth &&
+          existingAuth.email.trim().toLowerCase() ===
+            normalizedEmail.toLowerCase()
+        ) {
+          if (
+            existingAuth.expiresAt !== undefined &&
+            existingAuth.expiresAt > Date.now()
+          ) {
+            return existingAuth;
+          }
 
-      try {
-        return await this.client.refreshAuth(existingAuth);
-      } catch (error) {
-        const refreshRejected =
-          error instanceof ControlPanelApiError &&
-          (error.status === 400 || error.status === 401);
-        if (!refreshRejected) throw error;
-      }
-    }
+          const refreshed = yield* Effect.catchAll(
+            this.client.refreshAuth(existingAuth),
+            (error) => {
+              const refreshRejected =
+                error instanceof ControlPanelApiError &&
+                (error.status === 400 || error.status === 401);
+              return refreshRejected
+                ? Effect.succeed(undefined)
+                : Effect.fail(error);
+            },
+          );
+          if (refreshed) return refreshed;
+        }
 
-    const listener = await this.listenerFactory();
-
-    const callbackResult = listener.wait.then(
-      (confirmationCode) => ({
-        status: "received" as const,
-        confirmationCode,
-      }),
-      (error: unknown) => ({ status: "failed" as const, error }),
+        const listener = yield* this.listenerFactory();
+        return yield* Effect.ensuring(
+          Effect.gen(
+            function* (this: ControlPanelAuthFlow) {
+              yield* this.client.requestEmailLogin(
+                normalizedEmail,
+                listener.port,
+                listener.path,
+              );
+              const confirmationCode = yield* listener.wait;
+              return yield* this.client.completeEmailLogin(
+                normalizedEmail,
+                confirmationCode,
+              );
+            }.bind(this),
+          ),
+          listener.close.pipe(Effect.orDie),
+        );
+      }.bind(this),
     );
-    try {
-      await this.client.requestEmailLogin(
-        normalizedEmail,
-        listener.port,
-        listener.path,
-      );
-      const result = await callbackResult;
-      if (result.status === "failed") throw result.error;
-      return await this.client.completeEmailLogin(
-        normalizedEmail,
-        result.confirmationCode,
-      );
-    } finally {
-      await listener.close();
-    }
   }
 }
 
-export async function createControlPanelCallbackListener(): Promise<ControlPanelCallbackListener> {
-  const callbackPath = "/callback";
-  const expectedState = randomBytes(32).toString("base64url");
-  const callbackUrl = `${callbackPath}?state=${encodeURIComponent(expectedState)}`;
-  const { promise: codePromise, resolve, reject } =
-    Promise.withResolvers<string>();
-  let settled = false;
-  const server = createServer((request, response) => {
-    let requestUrl: URL;
-    try {
-      requestUrl = new URL(request.url ?? "/", "http://localhost");
-    } catch {
-      response.writeHead(400);
-      response.end();
-      return;
-    }
-    if (request.method !== "GET" || requestUrl.pathname !== callbackPath) {
-      response.writeHead(404);
-      response.end();
-      return;
-    }
+export function createControlPanelCallbackListener():
+  Effect.Effect<ControlPanelCallbackListener, unknown> {
+  return Effect.gen(function* () {
+    const callbackPath = "/callback";
+    const expectedState = randomBytes(32).toString("base64url");
+    const callbackUrl = `${callbackPath}?state=${encodeURIComponent(expectedState)}`;
+    const { promise: codePromise, resolve, reject } =
+      Promise.withResolvers<string>();
+    void codePromise.catch(() => {});
+    let settled = false;
+    const server = createServer((request, response) => {
+      let requestUrl: URL;
+      try {
+        requestUrl = new URL(request.url ?? "/", "http://localhost");
+      } catch {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      if (request.method !== "GET" || requestUrl.pathname !== callbackPath) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
 
-    const receivedState = requestUrl.searchParams.get("state");
-    if (!receivedState || !sameSecret(expectedState, receivedState)) {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("Invalid Enable Banking sign-in state.");
-      return;
-    }
+      const receivedState = requestUrl.searchParams.get("state");
+      if (!receivedState || !sameSecret(expectedState, receivedState)) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end("Invalid Enable Banking sign-in state.");
+        return;
+      }
 
-    if (requestUrl.searchParams.has("error")) {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("Enable Banking sign-in was denied.");
+      if (requestUrl.searchParams.has("error")) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end("Enable Banking sign-in was denied.");
+        if (!settled) {
+          settled = true;
+          reject(new Error("Enable Banking Control Panel sign-in was denied"));
+        }
+        return;
+      }
+
+      const confirmationCode = requestUrl.searchParams.get("oobCode");
+      if (!confirmationCode) {
+        response.writeHead(400, { "content-type": "text/plain" });
+        response.end("The Enable Banking sign-in code was not provided.");
+        return;
+      }
+
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("Enable Banking sign-in complete. You may close this window.");
       if (!settled) {
         settled = true;
-        reject(new Error("Enable Banking Control Panel sign-in was denied"));
+        resolve(confirmationCode);
       }
-      return;
-    }
-
-    const confirmationCode = requestUrl.searchParams.get("oobCode");
-    if (!confirmationCode) {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("The Enable Banking sign-in code was not provided.");
-      return;
-    }
-
-    response.writeHead(200, { "content-type": "text/plain" });
-    response.end("Enable Banking sign-in complete. You may close this window.");
-    if (!settled) {
-      settled = true;
-      resolve(confirmationCode);
-    }
-  });
-
-  const { promise: listening, resolve: markListening, reject: failListening } =
-    Promise.withResolvers<number>();
-  server.once("error", failListening);
-  server.listen(0, "localhost", () => {
-    const address = server.address();
-    /* c8 ignore next 4 -- listen(0, "localhost") guarantees a TCP address before this callback. */
-    if (!address || typeof address === "string") {
-      failListening(new Error("Control Panel callback listener did not expose a port"));
-      return;
-    }
-    markListening(address.port);
-  });
-
-  let port: number;
-  try {
-    port = await listening;
-  } catch (error) {
-    /* c8 ignore next 3 -- This rejects OS-level listener startup failures not safely inducible through the public API. */
-    server.close();
-    throw error;
-  }
-
-  const timeout = setTimeout(() => {
-    if (!settled) {
-      settled = true;
-      reject(new Error("Enable Banking Control Panel sign-in timed out"));
-    }
-  }, CALLBACK_TIMEOUT_MS);
-  timeout.unref();
-
-  let closed = false;
-  const close = async (): Promise<void> => {
-    if (closed) return;
-    closed = true;
-    clearTimeout(timeout);
-    if (!server.listening) return;
-    const { promise: closedPromise, resolve: markClosed, reject: failClosed } =
-      Promise.withResolvers<void>();
-    server.close((error) => {
-      if (error) failClosed(error);
-      else markClosed();
     });
-    await closedPromise;
-  };
 
-  return { port, path: callbackUrl, wait: codePromise, close };
+    const listening = yield* Effect.tryPromise({
+      try: () =>
+        new Promise<number>((resolveListening, rejectListening) => {
+          server.once("error", rejectListening);
+          server.listen(0, "localhost", () => {
+            const address = server.address();
+            /* c8 ignore next 4 -- listen(0, "localhost") guarantees a TCP address before this callback. */
+            if (!address || typeof address === "string") {
+              rejectListening(
+                new Error("Control Panel callback listener did not expose a port"),
+              );
+              return;
+            }
+            resolveListening(address.port);
+          });
+        }),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catchAll((error) =>
+        Effect.tryPromise({
+          try: () =>
+            new Promise<void>((resolveClose) => {
+              server.close(() => resolveClose());
+            }),
+          catch: () => error,
+        }).pipe(Effect.flatMap(() => Effect.fail(error))),
+      ),
+    );
+
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error("Enable Banking Control Panel sign-in timed out"));
+      }
+    }, CALLBACK_TIMEOUT_MS);
+    timeout.unref();
+
+    let closed = false;
+    const close = Effect.gen(function* () {
+      if (closed) return;
+      closed = true;
+      clearTimeout(timeout);
+      if (!server.listening) return;
+      yield* Effect.tryPromise({
+        try: () =>
+          new Promise<void>((resolveClose, rejectClose) => {
+            server.close((error) => {
+              if (error) rejectClose(error);
+              else resolveClose();
+            });
+          }),
+        catch: (error) => error,
+      });
+    });
+
+    return {
+      port: listening,
+      path: callbackUrl,
+      wait: Effect.tryPromise({
+        try: () => codePromise,
+        catch: (error) => error,
+      }),
+      close,
+    };
+  });
 }
 
 function validateCallbackPath(value: string): string {

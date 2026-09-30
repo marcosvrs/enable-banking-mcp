@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Effect } from "effect";
 import childProcess from "node:child_process";
 import { generateKeyPairSync, X509Certificate } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -26,32 +27,40 @@ import {
 class MemorySecretStore {
   value;
 
-  async get() {
-    return this.value;
+  get() {
+    return Effect.sync(() => this.value);
   }
 
-  async set(value) {
-    this.value = value;
+  set(value) {
+    return Effect.sync(() => {
+      this.value = value;
+    });
   }
 
-  async clear() {
-    this.value = undefined;
+  clear() {
+    return Effect.sync(() => {
+      this.value = undefined;
+    });
   }
 }
 
 class MemorySessionStore {
   value;
 
-  async get() {
-    return this.value;
+  get() {
+    return Effect.sync(() => this.value);
   }
 
-  async set(value) {
-    this.value = value;
+  set(value) {
+    return Effect.sync(() => {
+      this.value = value;
+    });
   }
 
-  async clear() {
-    this.value = undefined;
+  clear() {
+    return Effect.sync(() => {
+      this.value = undefined;
+    });
   }
 }
 
@@ -65,10 +74,10 @@ test("persists and clears Control Panel auth in the configured secret store", as
     expiresAt: 1_800_000_000_000,
   };
 
-  await store.set(auth);
-  assert.deepEqual(await store.get(), auth);
-  await store.clear();
-  assert.equal(await store.get(), undefined);
+  await Effect.runPromise(store.set(auth));
+  assert.deepEqual(await Effect.runPromise(store.get()), auth);
+  await Effect.runPromise(store.clear());
+  assert.equal(await Effect.runPromise(store.get()), undefined);
 });
 
 test("stores generated application credentials in the configured secret store", async () => {
@@ -82,21 +91,18 @@ test("stores generated application credentials in the configured secret store", 
     redirectUrls: ["https://localhost:8765/callback"],
   };
 
-  await store.set(application);
+  await Effect.runPromise(store.set(application));
 
-  assert.deepEqual(await store.get(), application);
-  await store.clear();
-  assert.equal(await store.get(), undefined);
+  assert.deepEqual(await Effect.runPromise(store.get()), application);
+  await Effect.runPromise(store.clear());
+  assert.equal(await Effect.runPromise(store.get()), undefined);
 });
 test("rejects invalid stored certificates before cleanup commands", async () => {
-  await assert.rejects(
-    removeTrustedCertificate("not-a-certificate"),
-    /Stored localhost certificate is invalid/,
-  );
+  await assert.rejects(Effect.runPromise(removeTrustedCertificate("not-a-certificate")), /Stored localhost certificate is invalid/);
 });
 
 test("removes a trusted certificate using its SHA-1 fingerprint", async (context) => {
-  const { certificate } = await generateKeyMaterial();
+  const { certificate } = await Effect.runPromise(generateKeyMaterial());
   const expectedFingerprint = new X509Certificate(certificate).fingerprint.replaceAll(
     ":",
     "",
@@ -121,7 +127,7 @@ test("removes a trusted certificate using its SHA-1 fingerprint", async (context
   });
   syncBuiltinESMExports();
   try {
-    await removeTrustedCertificate(certificate);
+    await Effect.runPromise(removeTrustedCertificate(certificate));
   } finally {
     context.mock.restoreAll();
     syncBuiltinESMExports();
@@ -137,11 +143,11 @@ test("removes a trusted certificate using its SHA-1 fingerprint", async (context
 test("reports persisted completion after the MCP process restarts", async () => {
   const applicationStore = new MemoryApplicationStore();
   const sessionStore = new MemorySessionStore();
-  await applicationStore.set({ appId: "persisted-app-id" });
-  await sessionStore.set("persisted-session-id");
+  await Effect.runPromise(applicationStore.set({ appId: "persisted-app-id" }));
+  await Effect.runPromise(sessionStore.set("persisted-session-id"));
   const setup = new ApplicationSetupFlow({ applicationStore, sessionStore });
 
-  assert.deepEqual(await setup.getStatus(), {
+  assert.deepEqual(await Effect.runPromise(setup.getStatus()), {
     phase: "complete",
     pending: false,
     appId: "persisted-app-id",
@@ -170,18 +176,14 @@ test("uses the documented Control Panel registration requests", async () => {
     return new Response(JSON.stringify({ app_id: "app-id" }), { status: 200 });
   });
 
-  await client.requestEmailLogin(
-    "user@example.com",
-    4321,
-    `/callback?state=${"A".repeat(43)}`,
-  );
-  const auth = await client.completeEmailLogin("user@example.com", "oob-code");
-  const registration = await client.registerApplication(auth, {
+  await Effect.runPromise(client.requestEmailLogin("user@example.com", 4321, `/callback?state=${"A".repeat(43)}`));
+  const auth = await Effect.runPromise(client.completeEmailLogin("user@example.com", "oob-code"));
+  const registration = await Effect.runPromise(client.registerApplication(auth, {
     name: "Enable Banking MCP",
     certificate: "certificate",
     environment: "SANDBOX",
     redirect_urls: ["https://localhost:8765/callback"],
-  });
+  }));
 
   assert.deepEqual(registration, { app_id: "app-id" });
   assert.deepEqual(JSON.parse(calls[0].options.body), {
@@ -214,12 +216,11 @@ test("reuses a matching unexpired Control Panel session without sending email", 
     "https://enablebanking.com",
     "",
   );
-  const flow = new ControlPanelAuthFlow(client, async () => {
-    listenerCalls += 1;
-    throw new Error("Email callback listener should not be opened");
-  });
+  const flow = new ControlPanelAuthFlow(client, () =>
+    Effect.fail(new Error("Email callback listener should not be opened")),
+  );
 
-  const auth = await flow.authenticate("USER@example.com", existingAuth);
+  const auth = await Effect.runPromise(flow.authenticate("USER@example.com", existingAuth));
 
   assert.deepEqual(auth, existingAuth);
   assert.equal(listenerCalls, 0);
@@ -243,16 +244,16 @@ test("silently refreshes an expired Control Panel session when configured", asyn
     "https://enablebanking.com",
     "",
   );
-  const flow = new ControlPanelAuthFlow(client, async () => {
-    throw new Error("A successful refresh should not open an email callback");
-  });
+  const flow = new ControlPanelAuthFlow(client, () =>
+    Effect.fail(new Error("A successful refresh should not open an email callback")),
+  );
 
-  const auth = await flow.authenticate("user@example.com", {
+  const auth = await Effect.runPromise(flow.authenticate("user@example.com", {
     email: "user@example.com",
     idToken: "expired-id-token",
     refreshToken: "old-refresh-token",
     expiresAt: 1,
-  });
+  }));
   const refreshUrl = new URL(calls[0].url);
   const refreshBody = new URLSearchParams(calls[0].options.body);
 
@@ -267,19 +268,19 @@ test("silently refreshes an expired Control Panel session when configured", asyn
 test("refreshes matching stored Control Panel auth with missing expiry metadata", async () => {
   let refreshCalls = 0;
   const client = {
-    async refreshAuth(auth) {
+    refreshAuth(auth) {
       refreshCalls += 1;
-      return { ...auth, idToken: "renewed-id-token", expiresAt: Date.now() + 60_000 };
+      return Effect.succeed({ ...auth, idToken: "renewed-id-token", expiresAt: Date.now() + 60_000 });
     },
   };
-  const flow = new ControlPanelAuthFlow(client, async () => {
-    throw new Error("A refreshable session should not open an email callback");
-  });
-  const auth = await flow.authenticate("user@example.com", {
+  const flow = new ControlPanelAuthFlow(client, () =>
+    Effect.fail(new Error("A refreshable session should not open an email callback")),
+  );
+  const auth = await Effect.runPromise(flow.authenticate("user@example.com", {
     email: "user@example.com",
     idToken: "stored-id-token",
     refreshToken: "fake-stored-refresh-token",
-  });
+  }));
 
   assert.equal(refreshCalls, 1);
   assert.equal(auth.idToken, "renewed-id-token");
@@ -315,22 +316,22 @@ test("requests a sign-in link when the stored refresh token is rejected", async 
     "firebase-api-key",
   );
   let listenerCalls = 0;
-  const flow = new ControlPanelAuthFlow(client, async () => {
+  const flow = new ControlPanelAuthFlow(client, () => Effect.sync(() => {
     listenerCalls += 1;
     return {
       port: 4321,
       path: `/callback?state=${"A".repeat(43)}`,
-      wait: Promise.resolve("one-time-code"),
-      close: async () => {},
+      wait: Effect.succeed("one-time-code"),
+      close: Effect.void,
     };
-  });
+  }));
 
-  const auth = await flow.authenticate("user@example.com", {
+  const auth = await Effect.runPromise(flow.authenticate("user@example.com", {
     email: "user@example.com",
     idToken: "expired-id-token",
     refreshToken: "test-rejected-refresh-token",
     expiresAt: 1,
-  });
+  }));
 
   assert.deepEqual(
     calls.map(({ url }) => new URL(url).pathname),
@@ -355,33 +356,26 @@ test("propagates transient refresh failures without requesting another login", a
     "https://enablebanking.com",
     "firebase-api-key",
   );
-  const flow = new ControlPanelAuthFlow(client, async () => {
-    listenerCalls += 1;
-    throw new Error("Email sign-in should not be requested");
-  });
-
-  await assert.rejects(
-    flow.authenticate("user@example.com", {
-      email: "user@example.com",
-      idToken: "expired-id-token",
-      refreshToken: "refresh-token",
-      expiresAt: 1,
-    }),
-    /Control Panel 503/,
+  const flow = new ControlPanelAuthFlow(client, () =>
+    Effect.fail(new Error("Email sign-in should not be requested")),
   );
+
+  await assert.rejects(Effect.runPromise(flow.authenticate("user@example.com", {
+    email: "user@example.com",
+    idToken: "expired-id-token",
+    refreshToken: "refresh-token",
+    expiresAt: 1,
+  })), /Control Panel 503/);
   assert.equal(listenerCalls, 0);
 });
 
 test("rejects Control Panel callback paths without a valid state", async () => {
   const client = new ControlPanelClient(async () => new Response("{}", { status: 200 }));
-  await assert.rejects(
-    client.requestEmailLogin("user@example.com", 4321, "/callback"),
-    /callback path must contain a valid state/,
-  );
+  await assert.rejects(Effect.runPromise(client.requestEmailLogin("user@example.com", 4321, "/callback")), /callback path must contain a valid state/);
 });
 
 test("receives the Control Panel email callback on a loopback listener", async () => {
-  const listener = await createControlPanelCallbackListener();
+  const listener = await Effect.runPromise(createControlPanelCallbackListener());
   try {
     const callback = new URL(
       listener.path,
@@ -414,30 +408,27 @@ test("receives the Control Panel email callback on a loopback listener", async (
     callback.searchParams.set("oobCode", "confirmation-code");
     const response = await fetch(callback);
     assert.equal(response.status, 200);
-    assert.equal(await listener.wait, "confirmation-code");
+    assert.equal(await Effect.runPromise(listener.wait), "confirmation-code");
   } finally {
-    await listener.close();
+    await Effect.runPromise(listener.close);
   }
 });
 
 test("rejects a denied Control Panel callback and closes idempotently", async () => {
-  const listener = await createControlPanelCallbackListener();
+  const listener = await Effect.runPromise(createControlPanelCallbackListener());
   try {
     const denied = new URL(
       listener.path,
       `http://localhost:${listener.port}`,
     );
     denied.searchParams.set("error", "access_denied");
-    const completion = assert.rejects(
-      listener.wait,
-      /Control Panel sign-in was denied/,
-    );
+    const completion = assert.rejects(Effect.runPromise(listener.wait), /Control Panel sign-in was denied/)
     const response = await fetch(denied);
     assert.equal(response.status, 400);
     await completion;
   } finally {
-    await listener.close();
-    await listener.close();
+    await Effect.runPromise(listener.close);
+    await Effect.runPromise(listener.close);
   }
 });
 test("Control Panel auth flow rejects malformed callback paths and closes its listener", async () => {
@@ -455,19 +446,16 @@ test("Control Panel auth flow rejects malformed callback paths and closes its li
       requests += 1;
       return new Response("{}", { status: 200 });
     });
-    const flow = new ControlPanelAuthFlow(client, async () => ({
+    const flow = new ControlPanelAuthFlow(client, () => Effect.succeed({
       port: 4321,
       path,
-      wait: new Promise(() => {}),
-      close: async () => {
+      wait: Effect.never,
+      close: Effect.sync(() => {
         closed += 1;
-      },
+      }),
     }));
 
-    await assert.rejects(
-      flow.authenticate("user@example.com"),
-      /callback path/,
-    );
+    await assert.rejects(Effect.runPromise(flow.authenticate("user@example.com")), /callback path/);
     assert.equal(requests, 0, `malformed callback path reached provider: ${path}`);
     assert.equal(closed, 1, `listener was not closed for path: ${path}`);
   }
@@ -478,24 +466,29 @@ test("Control Panel auth flow handles invalid state, missing code, and a valid c
   let listener;
   let closeCalls = 0;
   const client = {
-    async requestEmailLogin(email, port, path) {
+    requestEmailLogin(email, port, path) {
       requests.push({ email, port, path });
+      return Effect.void;
     },
-    async completeEmailLogin(email, code) {
-      return { email, idToken: `id:${code}`, refreshToken: "refresh-token" };
+    completeEmailLogin(email, code) {
+      return Effect.succeed({ email, idToken: `id:${code}`, refreshToken: "refresh-token" });
     },
   };
-  const flow = new ControlPanelAuthFlow(client, async () => {
-    listener = await createControlPanelCallbackListener();
-    const close = listener.close;
-    listener.close = async () => {
-      closeCalls += 1;
-      await close();
-    };
-    return listener;
-  });
+  const flow = new ControlPanelAuthFlow(client, () =>
+    Effect.map(createControlPanelCallbackListener(), (createdListener) => {
+      listener = createdListener;
+      const close = listener.close;
+      listener.close = Effect.zipRight(
+        Effect.sync(() => {
+          closeCalls += 1;
+        }),
+        close,
+      );
+      return listener;
+    }),
+  );
 
-  const pendingLogin = flow.authenticate("  user@example.com  ");
+  const pendingLogin = Effect.runPromise(flow.authenticate("  user@example.com  "))
   while (!listener) await new Promise((resolve) => setImmediate(resolve));
   const callback = new URL(
     requests[0].path,
@@ -533,22 +526,28 @@ test("Control Panel auth flow rejects provider denial and closes its listener", 
   let listener;
   let closeCalls = 0;
   const client = {
-    async requestEmailLogin() {},
-    async completeEmailLogin() {
-      assert.fail("denied callback must not complete login");
+    requestEmailLogin() {
+      return Effect.void;
+    },
+    completeEmailLogin() {
+      return Effect.fail(new Error("denied callback must not complete login"));
     },
   };
-  const flow = new ControlPanelAuthFlow(client, async () => {
-    listener = await createControlPanelCallbackListener();
-    const close = listener.close;
-    listener.close = async () => {
-      closeCalls += 1;
-      await close();
-    };
-    return listener;
-  });
+  const flow = new ControlPanelAuthFlow(client, () =>
+    Effect.map(createControlPanelCallbackListener(), (createdListener) => {
+      listener = createdListener;
+      const close = listener.close;
+      listener.close = Effect.zipRight(
+        Effect.sync(() => {
+          closeCalls += 1;
+        }),
+        close,
+      );
+      return listener;
+    }),
+  );
 
-  const pendingLogin = flow.authenticate("user@example.com");
+  const pendingLogin = Effect.runPromise(flow.authenticate("user@example.com"))
   const rejectedLogin = assert.rejects(
     pendingLogin,
     /Control Panel sign-in was denied/,
@@ -589,11 +588,11 @@ test("completes a sandbox setup without shelling to another application", async 
   });
   const controlPanelAuth = new ControlPanelAuthFlow(
     controlPanelClient,
-    async () => ({
+    () => Effect.succeed({
       port: 4321,
       path: `/callback?state=${"A".repeat(43)}`,
-      wait: Promise.resolve("oob-code"),
-      close: async () => {},
+      wait: Effect.succeed("oob-code"),
+      close: Effect.void,
     }),
   );
   const { privateKey } = generateKeyPairSync("rsa", {
@@ -635,10 +634,10 @@ test("completes a sandbox setup without shelling to another application", async 
   let trustCalls = 0;
   const bankAuthorizationFlow = new BankAuthorizationFlow(
     sessionStore,
-    (url) => openedUrls.push(url),
-    async () => ({
-      wait: Promise.resolve("bank-code"),
-      close: async () => {},
+    (url) => Effect.sync(() => openedUrls.push(url)),
+    () => Effect.succeed({
+      wait: Effect.succeed("bank-code"),
+      close: Effect.void,
     }),
   );
   const controlPanelAuthStore = new MacKeychainControlPanelAuthStore(
@@ -652,17 +651,17 @@ test("completes a sandbox setup without shelling to another application", async 
     controlPanelAuthStore,
     authorizationFlow: bankAuthorizationFlow,
     createBankClient: bankClientFactory,
-    generateKeyMaterial: async () => ({
+    generateKeyMaterial: () => Effect.succeed({
       privateKey,
       certificate: "certificate",
     }),
-    trustCertificate: async () => {
+    trustCertificate: () => Effect.sync(() => {
       trustCalls += 1;
-    },
-    sleep: async () => {},
+    }),
+    sleep: () => Effect.void,
   });
 
-  const started = await setup.start({
+  const started = await Effect.runPromise(setup.start({
     controlPanelEmail: "user@example.com",
     appName: "Enable Banking MCP",
     environment: "SANDBOX",
@@ -670,7 +669,7 @@ test("completes a sandbox setup without shelling to another application", async 
     aspspName: "Example Bank",
     country: "FI",
     validUntil: "2099-01-01T00:00:00Z",
-  });
+  }));
 
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (setup.status.phase === "complete") break;
@@ -681,15 +680,15 @@ test("completes a sandbox setup without shelling to another application", async 
   assert.equal(setup.status.phase, "complete", setup.status.error);
   assert.equal(setup.status.appId, "new-app-id");
   assert.equal(setup.status.sessionStored, true);
-  assert.deepEqual(await applicationStore.get(), {
+  assert.deepEqual(await Effect.runPromise(applicationStore.get()), {
     appId: "new-app-id",
     privateKey,
     certificate: "certificate",
     environment: "SANDBOX",
     redirectUrls: ["https://localhost:8765/callback"],
   });
-  assert.equal(await sessionStore.get(), "new-session-id");
-  assert.deepEqual(await controlPanelAuthStore.get(), {
+  assert.equal(await Effect.runPromise(sessionStore.get()), "new-session-id");
+  assert.deepEqual(await Effect.runPromise(controlPanelAuthStore.get()), {
     email: "user@example.com",
     idToken: "id-token",
     refreshToken: "refresh-token",
@@ -699,9 +698,9 @@ test("completes a sandbox setup without shelling to another application", async 
   assert.equal(controlPanelCalls.length, 3);
   assert.equal(bankCalls.length, 3);
   assert.ok(bankCalls[0].url.includes("/aspsps?"));
-  await applicationStore.clear();
-  await sessionStore.clear();
-  assert.deepEqual(await setup.getStatus(), {
+  await Effect.runPromise(applicationStore.clear());
+  await Effect.runPromise(sessionStore.clear());
+  assert.deepEqual(await Effect.runPromise(setup.getStatus()), {
     phase: "idle",
     pending: false,
   });
@@ -724,11 +723,11 @@ test("registers an application before bank details are provided", async () => {
   });
   const controlPanelAuth = new ControlPanelAuthFlow(
     controlPanelClient,
-    async () => ({
+    () => Effect.succeed({
       port: 4321,
       path: `/callback?state=${"A".repeat(43)}`,
-      wait: Promise.resolve("oob-code"),
-      close: async () => {},
+      wait: Effect.succeed("oob-code"),
+      close: Effect.void,
     }),
   );
   const { privateKey } = generateKeyPairSync("rsa", {
@@ -741,38 +740,38 @@ test("registers an application before bank details are provided", async () => {
   const controlPanelAuthStore = new MacKeychainControlPanelAuthStore(
     new MemorySecretStore(),
   );
-  await controlPanelAuthStore.set({
+  await Effect.runPromise(controlPanelAuthStore.set({
     email: "user@example.com",
     idToken: "stored-id-token",
     refreshToken: "test-stored-refresh-token",
     expiresAt: Date.now() + 300_000,
-  });
+  }));
   const setup = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
     controlPanelClient,
     controlPanelAuth,
-    openBrowser: (url) => openedUrls.push(url),
+    openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
     controlPanelAuthStore,
     authorizationFlow: new BankAuthorizationFlow(
       sessionStore,
-      (url) => openedUrls.push(url),
+      (url) => Effect.sync(() => openedUrls.push(url)),
     ),
-    generateKeyMaterial: async () => ({
+    generateKeyMaterial: () => Effect.succeed({
       privateKey,
       certificate: "certificate",
     }),
-    trustCertificate: async () => {
+    trustCertificate: () => Effect.sync(() => {
       trustCalls += 1;
-    },
+    }),
   });
 
-  const started = await setup.registerApplication({
+  const started = await Effect.runPromise(setup.registerApplication({
     controlPanelEmail: "user@example.com",
     appName: "Enable Banking MCP",
     environment: "PRODUCTION",
     redirectUrl: "https://localhost:8765/callback",
-  });
+  }));
 
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (!setup.status.pending) break;
@@ -784,8 +783,8 @@ test("registers an application before bank details are provided", async () => {
   assert.equal(setup.status.pending, false);
   assert.equal(setup.status.appId, "application-only-id");
   assert.equal(setup.status.dashboardUrl, "https://enablebanking.com/cp/applications");
-  assert.deepEqual(await sessionStore.get(), undefined);
-  assert.deepEqual(await applicationStore.get(), {
+  assert.deepEqual(await Effect.runPromise(sessionStore.get()), undefined);
+  assert.deepEqual(await Effect.runPromise(applicationStore.get()), {
     appId: "application-only-id",
     privateKey,
     certificate: "certificate",
@@ -805,7 +804,7 @@ test("registers an application before bank details are provided", async () => {
     applicationStore,
     sessionStore,
   });
-  const restartedStatus = await restarted.getStatus();
+  const restartedStatus = await Effect.runPromise(restarted.getStatus());
   assert.equal(restartedStatus.phase, "account_link");
   assert.equal(restartedStatus.pending, false);
   assert.equal(restartedStatus.appId, "application-only-id");
@@ -813,9 +812,9 @@ test("registers an application before bank details are provided", async () => {
     restartedStatus.dashboardUrl,
     "https://enablebanking.com/cp/applications",
   );
-  await applicationStore.clear();
+  await Effect.runPromise(applicationStore.clear());
   setup.reset();
-  assert.deepEqual(await setup.getStatus(), {
+  assert.deepEqual(await Effect.runPromise(setup.getStatus()), {
     phase: "idle",
     pending: false,
   });
@@ -823,26 +822,26 @@ test("registers an application before bank details are provided", async () => {
 test("checks provider activation before reporting a persisted Production app", async () => {
   const applicationStore = new MemoryApplicationStore();
   const sessionStore = new MemorySessionStore();
-  await applicationStore.set({
+  await Effect.runPromise(applicationStore.set({
     appId: "persisted-production-app",
     privateKey: "private-key",
     certificate: "certificate",
     environment: "PRODUCTION",
     redirectUrls: ["https://localhost:8765/callback"],
-  });
+  }));
   let activationChecks = 0;
   const setup = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
     createBankClient: () => ({
-      async getApplication() {
+      getApplication() {
         activationChecks += 1;
-        return { active: true };
+        return Effect.succeed({ active: true });
       },
     }),
   });
 
-  const status = await setup.getStatus();
+  const status = await Effect.runPromise(setup.getStatus());
 
   assert.equal(activationChecks, 1);
   assert.equal(status.phase, "application_ready");
@@ -851,24 +850,24 @@ test("checks provider activation before reporting a persisted Production app", a
 test("reports Production activation as unverified when provider lookup fails", async () => {
   const applicationStore = new MemoryApplicationStore();
   const sessionStore = new MemorySessionStore();
-  await applicationStore.set({
+  await Effect.runPromise(applicationStore.set({
     appId: "persisted-production-app",
     privateKey: "private-key",
     certificate: "certificate",
     environment: "PRODUCTION",
     redirectUrls: ["https://localhost:8765/callback"],
-  });
+  }));
   const setup = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
     createBankClient: () => ({
-      async getApplication() {
-        throw new Error("provider unavailable");
+      getApplication() {
+        return Effect.fail(new Error("provider unavailable"));
       },
     }),
   });
 
-  const status = await setup.getStatus();
+  const status = await Effect.runPromise(setup.getStatus());
 
   assert.equal(status.phase, "account_link");
   assert.match(status.message, /could not be verified/);
@@ -877,16 +876,20 @@ test("reports Production activation as unverified when provider lookup fails", a
 class MemoryApplicationStore {
   value;
 
-  async get() {
-    return this.value;
+  get() {
+    return Effect.sync(() => this.value);
   }
 
-  async set(value) {
-    this.value = value;
+  set(value) {
+    return Effect.sync(() => {
+      this.value = value;
+    });
   }
 
-  async clear() {
-    this.value = undefined;
+  clear() {
+    return Effect.sync(() => {
+      this.value = undefined;
+    });
   }
 }
 
@@ -896,17 +899,20 @@ test("reserves the setup slot before asynchronous store checks", async () => {
     releaseStoreReads = resolve;
   });
   const gatedStore = {
-    async get() {
-      await storeReads;
-      return undefined;
+    get() {
+      return Effect.as(Effect.promise(() => storeReads), undefined);
     },
-    async set() {},
-    async clear() {},
+    set() {
+      return Effect.void;
+    },
+    clear() {
+      return Effect.void;
+    },
   };
   const setup = new ApplicationSetupFlow({
     applicationStore: gatedStore,
     sessionStore: gatedStore,
-    generateKeyMaterial: async () => ({
+    generateKeyMaterial: () => Effect.succeed({
       privateKey: "private-key",
       certificate: "certificate",
     }),
@@ -918,12 +924,9 @@ test("reserves the setup slot before asynchronous store checks", async () => {
     redirectUrl: "https://localhost:8765/callback",
   };
 
-  const first = setup.registerApplication(options);
+  const first = Effect.runPromise(setup.registerApplication(options));
   assert.equal(setup.status.pending, true);
-  await assert.rejects(
-    setup.registerApplication(options),
-    /Enable Banking setup is already in progress/,
-  );
+  await assert.rejects(Effect.runPromise(setup.registerApplication(options)), /Enable Banking setup is already in progress/);
 
   releaseStoreReads();
   const started = await first;
@@ -933,40 +936,40 @@ test("reserves the setup slot before asynchronous store checks", async () => {
 test("blocks setup reservations during credential cleanup", async () => {
   const { setup } = setupDependencies();
   let finishCleanup;
-  const cleanup = setup.withCredentialCleanup(
+  const cleanup = Effect.runPromise(setup.withCredentialCleanup(
     () =>
-      new Promise((resolve) => {
+      Effect.promise(() => new Promise((resolve) => {
         finishCleanup = resolve;
-      }),
-  );
+      })),
+  ));
   const registration = registrationOptions();
 
   await assert.rejects(
-    setup.registerApplication(registration),
+    Effect.runPromise(setup.registerApplication(registration)),
     /credential cleanup is pending/,
   );
   await assert.rejects(
-    setup.start({
+    Effect.runPromise(setup.start({
       ...registration,
       aspspName: "Example Bank",
       country: "FI",
-    }),
+    })),
     /credential cleanup is pending/,
   );
   await assert.rejects(
-    setup.withCredentialCleanup(async () => undefined),
+    Effect.runPromise(setup.withCredentialCleanup(() => Effect.void)),
     /setup or cleanup is pending/,
   );
 
   finishCleanup();
   await cleanup;
   await assert.rejects(
-    setup.withCredentialCleanup(async () => {
-      throw new Error("cleanup failed");
-    }),
+    Effect.runPromise(setup.withCredentialCleanup(() =>
+      Effect.fail(new Error("cleanup failed")),
+    )),
     /cleanup failed/,
   );
-  const started = await setup.registerApplication(registration);
+  const started = await Effect.runPromise(setup.registerApplication(registration));
   assert.equal(started.status, "started");
   assert.equal((await waitForSetup(setup)).phase, "application_ready");
 });
@@ -978,12 +981,12 @@ test("rolls back the setup reservation after validation fails", async () => {
   });
 
   await assert.rejects(
-    setup.registerApplication({
+    Effect.runPromise(setup.registerApplication({
       controlPanelEmail: "user@example.com",
       appName: "",
       environment: "SANDBOX",
       redirectUrl: "https://localhost:8765/callback",
-    }),
+    })),
     /app_name is required/,
   );
   assert.deepEqual(setup.status, {
@@ -1016,32 +1019,32 @@ function setupDependencies(overrides = {}) {
     applicationStore,
     sessionStore,
     controlPanelAuth: {
-      async authenticate(email) {
-        return { email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+      authenticate(email) {
+        return Effect.succeed({ email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" });
       },
     },
     controlPanelClient: {
-      async registerApplication() {
-        return { app_id: "recorded-app-id" };
+      registerApplication() {
+        return Effect.succeed({ app_id: "recorded-app-id" });
       },
     },
     authorizationFlow: {
       status: { pending: false },
-      async start() {
-        throw new Error("authorization collaborator not configured");
+      start() {
+        return Effect.fail(new Error("authorization collaborator not configured"));
       },
     },
-    generateKeyMaterial: async () => ({
+    generateKeyMaterial: () => Effect.succeed({
       privateKey: "fake-private-key",
       certificate: "fake-certificate",
     }),
-    trustCertificate: async () => {},
+    trustCertificate: () => Effect.void,
     createBankClient: () => ({
-      async listBanks() {
-        return { aspsps: [{ name: "Example Bank" }] };
+      listBanks() {
+        return Effect.succeed({ aspsps: [{ name: "Example Bank" }] });
       },
     }),
-    sleep: async () => {},
+    sleep: () => Effect.void,
     ...overrides,
   });
   return { setup, applicationStore, sessionStore };
@@ -1064,17 +1067,14 @@ test("rejects setup when either application or session state is already persiste
     const { setup } = setupDependencies({
       ...existing,
       controlPanelClient: {
-        async registerApplication() {
+        registerApplication() {
           registrationCalls += 1;
-          return { app_id: "unexpected-app" };
+          return Effect.succeed({ app_id: "unexpected-app" });
         },
       },
     });
 
-    await assert.rejects(
-      setup.registerApplication(registrationOptions()),
-      /already stored/,
-    );
+    await assert.rejects(Effect.runPromise(setup.registerApplication(registrationOptions())), /already stored/);
     assert.equal(registrationCalls, 0);
     assert.deepEqual(setup.status, { phase: "idle", pending: false });
   }
@@ -1084,20 +1084,20 @@ test("records provider registration failures as failed setup without application
   const registrationCalls = [];
   const { setup, applicationStore } = setupDependencies({
     controlPanelClient: {
-      async registerApplication(auth, request) {
+      registerApplication(auth, request) {
         registrationCalls.push({ auth, request });
-        throw new Error("provider registration rejected");
+        return Effect.fail(new Error("provider registration rejected"));
       },
     },
   });
 
-  await setup.registerApplication(registrationOptions());
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.pending, false);
   assert.equal(status.error, "provider registration rejected");
-  assert.equal(await applicationStore.get(), undefined);
+  assert.equal(await Effect.runPromise(applicationStore.get()), undefined);
   assert.equal(registrationCalls.length, 1);
   assert.equal(registrationCalls[0].request.name, "Enable Banking MCP");
   assert.equal(registrationCalls[0].request.certificate, "fake-certificate");
@@ -1106,23 +1106,25 @@ test("records provider registration failures as failed setup without application
 test("keeps registered application persisted when certificate trust fails", async () => {
   let trustCalls = 0;
   const { setup, applicationStore, sessionStore } = setupDependencies({
-    trustCertificate: async (certificate) => {
-      trustCalls += 1;
-      assert.equal(certificate, "fake-certificate");
-      throw new Error("certificate trust failed");
-    },
+    trustCertificate: (certificate) => Effect.flatMap(
+      Effect.sync(() => {
+        trustCalls += 1;
+        assert.equal(certificate, "fake-certificate");
+      }),
+      () => Effect.fail(new Error("certificate trust failed")),
+    ),
   });
 
-  await setup.registerApplication(registrationOptions());
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.appId, "recorded-app-id");
   assert.equal(status.error, "certificate trust failed");
   assert.equal(trustCalls, 1);
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
   const restarted = new ApplicationSetupFlow({ applicationStore, sessionStore });
-  assert.equal((await restarted.getStatus()).phase, "application_ready");
+  assert.equal((await Effect.runPromise(restarted.getStatus())).phase, "application_ready");
 });
 
 test("fails setup when the requested bank is absent and retains the registered application", async () => {
@@ -1130,99 +1132,94 @@ test("fails setup when the requested bank is absent and retains the registered a
   const { setup, applicationStore } = setupDependencies({
     authorizationFlow: {
       status: { pending: false },
-      async start() {
+      start() {
         authorizationCalls += 1;
-        return { authorization_url: "https://bank.example/authorize" };
+        return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
       },
     },
     createBankClient: () => ({
-      async listBanks() {
-        return { aspsps: [{ name: "Other Bank" }] };
+      listBanks() {
+        return Effect.succeed({ aspsps: [{ name: "Other Bank" }] });
       },
     }),
   });
-  await setup.start({
+  await Effect.runPromise(setup.start({
     ...registrationOptions(),
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.match(status.error, /ASPSP "Example Bank" is not available in SANDBOX for FI/);
   assert.equal(authorizationCalls, 0);
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
 });
 
 test("reports bank authorization startup errors without losing application state", async () => {
   const { setup, applicationStore, sessionStore } = setupDependencies({
     authorizationFlow: {
       status: { pending: false, lastError: "callback failed" },
-      async start() {
-        throw new Error("authorization provider unavailable");
+      start() {
+        return Effect.fail(new Error("authorization provider unavailable"));
       },
     },
   });
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     ...registrationOptions(),
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "authorization provider unavailable");
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
-  assert.equal(await sessionStore.get(), undefined);
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), undefined);
 });
 
 test("surfaces callback cancellation after authorization starts and keeps application state", async () => {
   const authorizationFlow = {
     status: { pending: true },
-    async start() {
+    start() {
       this.status = { pending: false, lastError: "bank callback was cancelled" };
-      return { authorization_url: "https://bank.example/authorize" };
+      return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
     },
   };
   const { setup, applicationStore, sessionStore } = setupDependencies({
     authorizationFlow,
   });
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     ...registrationOptions(),
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "bank callback was cancelled");
   assert.equal(status.appId, "recorded-app-id");
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
-  assert.equal(await sessionStore.get(), undefined);
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), undefined);
 });
 
 test("rolls back setup reservation when a secret-store read fails", async () => {
   const applicationStore = new MemoryApplicationStore();
-  applicationStore.get = async () => {
-    throw new Error("application Keychain read failed");
-  };
+  applicationStore.get = () => Effect.fail(new Error("application Keychain read failed"));
   let registrationCalls = 0;
   const { setup } = setupDependencies({
     applicationStore,
     controlPanelClient: {
-      async registerApplication() {
+      registerApplication() {
         registrationCalls += 1;
-        return { app_id: "unexpected-app" };
+        return Effect.succeed({ app_id: "unexpected-app" });
       },
     },
   });
 
-  await assert.rejects(
-    setup.registerApplication(registrationOptions()),
-    /application Keychain read failed/,
-  );
+  await assert.rejects(Effect.runPromise(setup.registerApplication(registrationOptions())), /application Keychain read failed/);
   assert.deepEqual(setup.status, { phase: "idle", pending: false });
   assert.equal(registrationCalls, 0);
 });
@@ -1231,44 +1228,42 @@ test("fails Control Panel authentication before application registration", async
   let registrationCalls = 0;
   const { setup, applicationStore } = setupDependencies({
     controlPanelAuth: {
-      async authenticate() {
-        throw new Error("Control Panel authentication failed");
+      authenticate() {
+        return Effect.fail(new Error("Control Panel authentication failed"));
       },
     },
     controlPanelClient: {
-      async registerApplication() {
+      registerApplication() {
         registrationCalls += 1;
-        return { app_id: "unexpected-app" };
+        return Effect.succeed({ app_id: "unexpected-app" });
       },
     },
   });
 
-  await setup.registerApplication(registrationOptions());
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "Control Panel authentication failed");
-  assert.equal(await applicationStore.get(), undefined);
+  assert.equal(await Effect.runPromise(applicationStore.get()), undefined);
   assert.equal(registrationCalls, 0);
 });
 
 test("reports provider-created application when local persistence fails", async () => {
   const applicationStore = new MemoryApplicationStore();
-  applicationStore.set = async () => {
-    throw new Error("application Keychain write failed");
-  };
+  applicationStore.set = () => Effect.fail(new Error("application Keychain write failed"));
   let registrationCalls = 0;
   const { setup } = setupDependencies({
     applicationStore,
     controlPanelClient: {
-      async registerApplication() {
+      registerApplication() {
         registrationCalls += 1;
-        return { app_id: "provider-app-id" };
+        return Effect.succeed({ app_id: "provider-app-id" });
       },
     },
   });
 
-  await setup.registerApplication(registrationOptions());
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
@@ -1282,78 +1277,72 @@ test("reports an empty bank catalog without starting authorization", async () =>
   const { setup, applicationStore } = setupDependencies({
     authorizationFlow: {
       status: { pending: false },
-      async start() {
+      start() {
         authorizationCalls += 1;
-        return { authorization_url: "https://bank.example/authorize" };
+        return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
       },
     },
     createBankClient: () => ({
-      async listBanks() {
-        return { aspsps: [] };
+      listBanks() {
+        return Effect.succeed({ aspsps: [] });
       },
     }),
   });
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     ...registrationOptions(),
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.match(status.error, /No ASPSPs were returned for this country/);
   assert.equal(authorizationCalls, 0);
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
 });
 
-test("times out Production activation without starting bank authorization", async () => {
-  let now = 0;
+test("keeps monitoring Production activation and continues bank authorization", async () => {
   let activationChecks = 0;
-  let active = false;
   let authorizationCalls = 0;
   const openedUrls = [];
-  const { setup, applicationStore, sessionStore } = setupDependencies({
-    openBrowser: (url) => openedUrls.push(url),
+  const sessionStore = new MemorySessionStore();
+  const { setup, applicationStore } = setupDependencies({
+    openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
+    sessionStore,
     createBankClient: () => ({
-      async getApplication() {
+      getApplication() {
         activationChecks += 1;
-        return { active };
+        return Effect.succeed({ active: activationChecks > 1 });
       },
-      async listBanks() {
-        return { aspsps: [{ name: "Example Bank" }] };
+      listBanks() {
+        return Effect.succeed({ aspsps: [{ name: "Example Bank" }] });
       },
     }),
     authorizationFlow: {
       status: { pending: false },
-      async start() {
+      start() {
         authorizationCalls += 1;
-        return { authorization_url: "https://bank.example/authorize" };
+        return Effect.as(
+          sessionStore.set("automatic-session"),
+          { authorization_url: "https://bank.example/authorize" },
+        );
       },
     },
-    sleep: async (milliseconds) => {
-      now += milliseconds;
-    },
-    now: () => now,
+    sleep: () => Effect.void,
   });
-
-  await setup.start({
+  const status = await Effect.runPromise(setup.runToCompletion({
     ...registrationOptions({ environment: "PRODUCTION" }),
     aspspName: "Example Bank",
     country: "FI",
-  });
-  const status = await waitForSetup(setup);
-  active = true;
-  const refreshedStatus = await setup.getStatus();
-  assert.equal(refreshedStatus.phase, "application_ready");
+  }));
 
-  assert.equal(status.phase, "account_link");
-  assert.match(status.message, /resume connect_bank/);
-  assert.ok(activationChecks > 0);
-  assert.equal(authorizationCalls, 0);
+  assert.equal(status.phase, "complete");
+  assert.ok(activationChecks >= 2);
+  assert.equal(authorizationCalls, 1);
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
-  assert.equal(await sessionStore.get(), undefined);
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), "automatic-session");
 });
 
 test("times out pending bank consent without discarding the registered application", async () => {
@@ -1361,25 +1350,25 @@ test("times out pending bank consent without discarding the registered applicati
   let authorizationCalls = 0;
   const authorizationFlow = {
     status: { pending: false },
-    async start() {
+    start() {
       authorizationCalls += 1;
       this.status = { pending: true };
-      return { authorization_url: "https://bank.example/authorize" };
+      return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
     },
   };
   const { setup, applicationStore, sessionStore } = setupDependencies({
     authorizationFlow,
-    sleep: async (milliseconds) => {
+    sleep: (milliseconds) => Effect.sync(() => {
       now += milliseconds;
-    },
+    }),
     now: () => now,
   });
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     ...registrationOptions(),
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
@@ -1387,8 +1376,8 @@ test("times out pending bank consent without discarding the registered applicati
   assert.equal(status.authorizationUrl, undefined);
   assert.equal(status.message, undefined);
   assert.equal(authorizationCalls, 1);
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
-  assert.equal(await sessionStore.get(), undefined);
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), undefined);
 });
 
 test("reuses matching unexpired Control Panel auth without contacting the provider", async () => {
@@ -1408,7 +1397,7 @@ test("reuses matching unexpired Control Panel auth without contacting the provid
   );
 
   assert.equal(
-    await flow.authenticate("USER@example.com", existingAuth),
+    await Effect.runPromise(flow.authenticate("USER@example.com", existingAuth)),
     existingAuth,
   );
 });
@@ -1422,34 +1411,33 @@ test("rejects concurrent Control Panel authentication attempts", async () => {
   let emailLinkCalls = 0;
   const flow = new ControlPanelAuthFlow(
     {
-      async requestEmailLogin() {
+      requestEmailLogin() {
         emailLinkCalls += 1;
+        return Effect.void;
       },
-      async completeEmailLogin(email, code) {
-        return {
+      completeEmailLogin(email, code) {
+        return Effect.succeed({
           email,
           idToken: `id:${code}`,
           refreshToken: "refresh-token",
-        };
+        });
       },
     },
-    async () => {
-      listenerCalls += 1;
-      await listenerGate;
-      return {
-        port: 4321,
-        path: "/callback",
-        wait: Promise.resolve("first-code"),
-        close: async () => {},
-      };
-    },
+    () =>
+      Effect.gen(function* () {
+        listenerCalls += 1;
+        yield* Effect.promise(() => listenerGate);
+        return {
+          port: 4321,
+          path: "/callback",
+          wait: Effect.succeed("first-code"),
+          close: Effect.void,
+        };
+      }),
   );
 
-  const first = flow.authenticate("first@example.com");
-  await assert.rejects(
-    flow.authenticate("second@example.com"),
-    /Control Panel authentication is already in progress/,
-  );
+  const first = Effect.runPromise(flow.authenticate("first@example.com"));
+  await assert.rejects(Effect.runPromise(flow.authenticate("second@example.com")), /Control Panel authentication is already in progress/);
   assert.equal(listenerCalls, 1);
 
   releaseListener();
@@ -1460,11 +1448,11 @@ test("rejects concurrent Control Panel authentication attempts", async () => {
   });
   assert.equal(emailLinkCalls, 1);
   let escapedAuthenticate;
-  await flow.withAuthentication(async (authenticate) => {
+  await Effect.runPromise(flow.withAuthentication((authenticate) => Effect.sync(() => {
     escapedAuthenticate = authenticate;
-  });
-  assert.throws(
-    () => escapedAuthenticate("late@example.com"),
+  })));
+  await assert.rejects(
+    Effect.runPromise(escapedAuthenticate("late@example.com")),
     /authentication reservation has ended/,
   );
 });
@@ -1472,48 +1460,35 @@ test("rejects concurrent Control Panel authentication attempts", async () => {
 test("serializes Control Panel authentication and credential cleanup", async () => {
   const flow = new ControlPanelAuthFlow({});
   let finishAuthentication;
-  const authentication = flow.withAuthentication(
-    () =>
-      new Promise((resolve) => {
-        finishAuthentication = resolve;
-      }),
-  );
+  const authentication = Effect.runPromise(flow.withAuthentication(
+    () => Effect.promise(() => new Promise((resolve) => {
+      finishAuthentication = resolve;
+    })),
+  ));
 
-  await assert.rejects(
-    flow.withCredentialCleanup(async () => undefined),
-    /Cannot clear credentials while Control Panel authentication or cleanup is pending/,
-  );
+  await assert.rejects(Effect.runPromise(flow.withCredentialCleanup(() => Effect.void)), /Cannot clear credentials while Control Panel authentication or cleanup is pending/);
   finishAuthentication("authenticated");
   assert.equal(await authentication, "authenticated");
 
   let finishCleanup;
-  const cleanup = flow.withCredentialCleanup(
-    () =>
-      new Promise((resolve) => {
-        finishCleanup = resolve;
-      }),
-  );
-  await assert.rejects(
-    flow.authenticate("user@example.com"),
-    /Control Panel credentials are being cleared/,
-  );
-  await assert.rejects(
-    flow.withCredentialCleanup(async () => undefined),
-    /Cannot clear credentials while Control Panel authentication or cleanup is pending/,
-  );
+  const cleanup = Effect.runPromise(flow.withCredentialCleanup(
+    () => Effect.promise(() => new Promise((resolve) => {
+      finishCleanup = resolve;
+    })),
+  ));
+  await assert.rejects(Effect.runPromise(flow.authenticate("user@example.com")), /Control Panel credentials are being cleared/);
+  await assert.rejects(Effect.runPromise(flow.withCredentialCleanup(() => Effect.void)), /Cannot clear credentials while Control Panel authentication or cleanup is pending/);
   finishCleanup("cleared");
   assert.equal(await cleanup, "cleared");
 
-  await assert.rejects(
-    flow.withCredentialCleanup(async () => {
-      throw new Error("credential deletion failed");
-    }),
-    /credential deletion failed/,
-  );
+  await assert.rejects(Effect.runPromise(flow.withCredentialCleanup(() =>
+    Effect.fail(new Error("credential deletion failed")),
+  )), /credential deletion failed/);
   assert.equal(
-    await flow.withAuthentication(async () => "authentication resumed"),
+    await Effect.runPromise(flow.withAuthentication(() => Effect.succeed("authentication resumed"))),
     "authentication resumed",
   );
+
 });
 
 test("a stored identity for another email starts a fresh Control Panel login", async () => {
@@ -1533,13 +1508,13 @@ test("a stored identity for another email starts a fresh Control Panel login", a
     "",
   );
   let closed = 0;
-  const flow = new ControlPanelAuthFlow(client, async () => ({
+  const flow = new ControlPanelAuthFlow(client, () => Effect.succeed({
     port: 4321,
     path: `/callback?state=${"A".repeat(43)}`,
-    wait: Promise.resolve("one-time-code"),
-    close: async () => {
+    wait: Effect.succeed("one-time-code"),
+    close: Effect.sync(() => {
       closed += 1;
-    },
+    }),
   }));
   const existingAuth = {
     email: "other@example.com",
@@ -1548,7 +1523,7 @@ test("a stored identity for another email starts a fresh Control Panel login", a
     expiresAt: Date.now() + 60_000,
   };
 
-  const auth = await flow.authenticate("user@example.com", existingAuth);
+  const auth = await Effect.runPromise(flow.authenticate("user@example.com", existingAuth));
 
   assert.equal(auth.email, "user@example.com");
   assert.equal(auth.idToken, "new-id-token");
@@ -1574,19 +1549,16 @@ test("closes the Control Panel listener when requesting an email link fails", as
     "",
   );
   let closed = 0;
-  const flow = new ControlPanelAuthFlow(client, async () => ({
+  const flow = new ControlPanelAuthFlow(client, () => Effect.succeed({
     port: 4321,
     path: `/callback?state=${"A".repeat(43)}`,
-    wait: new Promise(() => {}),
-    close: async () => {
+    wait: Effect.never,
+    close: Effect.sync(() => {
       closed += 1;
-    },
+    }),
   }));
 
-  await assert.rejects(
-    flow.authenticate("user@example.com"),
-    /Control Panel 503/,
-  );
+  await assert.rejects(Effect.runPromise(flow.authenticate("user@example.com")), /Control Panel 503/);
   assert.equal(closed, 1);
 });
 
@@ -1601,19 +1573,16 @@ test("rejects malformed Control Panel login responses and closes the listener", 
     "https://enablebanking.com",
     "",
   );
-  const flow = new ControlPanelAuthFlow(client, async () => ({
+  const flow = new ControlPanelAuthFlow(client, () => Effect.succeed({
     port: 4321,
     path: `/callback?state=${"A".repeat(43)}`,
-    wait: Promise.resolve("one-time-code"),
-    close: async () => {
+    wait: Effect.succeed("one-time-code"),
+    close: Effect.sync(() => {
       closed += 1;
-    },
+    }),
   }));
 
-  await assert.rejects(
-    flow.authenticate("user@example.com"),
-    /invalid login response/,
-  );
+  await assert.rejects(Effect.runPromise(flow.authenticate("user@example.com")), /invalid login response/);
   assert.equal(requestCount, 2);
   assert.equal(closed, 1);
 });
@@ -1622,59 +1591,59 @@ test("key generation failure does not authenticate or register an application", 
   let authenticationCalls = 0;
   let registrationCalls = 0;
   const { setup, applicationStore } = setupDependencies({
-    async generateKeyMaterial() {
-      throw new Error("certificate generation failed");
+    generateKeyMaterial() {
+      return Effect.fail(new Error("certificate generation failed"));
     },
     controlPanelAuth: {
-      async authenticate() {
+      authenticate() {
         authenticationCalls += 1;
-        return { email: "user@example.com", idToken: "token", refreshToken: "refresh" };
+        return Effect.succeed({ email: "user@example.com", idToken: "token", refreshToken: "refresh" });
       },
     },
     controlPanelClient: {
-      async registerApplication() {
+      registerApplication() {
         registrationCalls += 1;
-        return { app_id: "unexpected-app" };
+        return Effect.succeed({ app_id: "unexpected-app" });
       },
     },
   });
 
-  await setup.registerApplication(registrationOptions());
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "certificate generation failed");
   assert.equal(authenticationCalls, 0);
   assert.equal(registrationCalls, 0);
-  assert.equal(await applicationStore.get(), undefined);
+  assert.equal(await Effect.runPromise(applicationStore.get()), undefined);
 });
 
 test("Control Panel auth persistence failure prevents provider registration", async () => {
   let registrationCalls = 0;
   const { setup, applicationStore } = setupDependencies({
     controlPanelAuthStore: {
-      async get() {
-        return undefined;
+      get() {
+        return Effect.succeed(undefined);
       },
-      async set() {
-        throw new Error("Control Panel Keychain write failed");
+      set() {
+        return Effect.fail(new Error("Control Panel Keychain write failed"));
       },
     },
     controlPanelClient: {
-      async registerApplication() {
+      registerApplication() {
         registrationCalls += 1;
-        return { app_id: "unexpected-app" };
+        return Effect.succeed({ app_id: "unexpected-app" });
       },
     },
   });
 
-  await setup.registerApplication(registrationOptions());
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "Control Panel Keychain write failed");
   assert.equal(registrationCalls, 0);
-  assert.equal(await applicationStore.get(), undefined);
+  assert.equal(await Effect.runPromise(applicationStore.get()), undefined);
 });
 
 test("a rejected 401 Control Panel refresh falls back to email sign-in", async () => {
@@ -1699,19 +1668,19 @@ test("a rejected 401 Control Panel refresh falls back to email sign-in", async (
     "https://enablebanking.com",
     "",
   );
-  const flow = new ControlPanelAuthFlow(client, async () => ({
+  const flow = new ControlPanelAuthFlow(client, () => Effect.succeed({
     port: 4321,
     path: `/callback?state=${"A".repeat(43)}`,
-    wait: Promise.resolve("one-time-code"),
-    close: async () => {},
+    wait: Effect.succeed("one-time-code"),
+    close: Effect.void,
   }));
 
-  const auth = await flow.authenticate("user@example.com", {
+  const auth = await Effect.runPromise(flow.authenticate("user@example.com", {
     email: "user@example.com",
     idToken: "expired-id-token",
     refreshToken: "test-rejected-refresh-token",
     expiresAt: 1,
-  });
+  }));
 
   assert.equal(auth.idToken, "new-id-token");
   assert.equal(calls.length, 3);
@@ -1738,7 +1707,7 @@ test("Control Panel refresh preserves optional stored identity fields", async ()
     expiresAt: 1,
   };
 
-  const auth = await flow.authenticate("user@example.com", existingAuth);
+  const auth = await Effect.runPromise(flow.authenticate("user@example.com", existingAuth));
 
   assert.equal(auth.idToken, "renewed-id-token");
   assert.equal(auth.refreshToken, "test-current-refresh-token");
@@ -1757,15 +1726,12 @@ test("invalid Control Panel refresh responses do not trigger another login", asy
     throw new Error("Invalid refresh responses must not request a new login");
   });
 
-  await assert.rejects(
-    flow.authenticate("user@example.com", {
-      email: "user@example.com",
-      idToken: "expired-id-token",
-      refreshToken: "test-current-refresh-token",
-      expiresAt: 1,
-    }),
-    /invalid refresh response/,
-  );
+  await assert.rejects(Effect.runPromise(flow.authenticate("user@example.com", {
+    email: "user@example.com",
+    idToken: "expired-id-token",
+    refreshToken: "test-current-refresh-token",
+    expiresAt: 1,
+  })), /invalid refresh response/);
   assert.equal(listenerCalls, 0);
 });
 
@@ -1780,19 +1746,10 @@ test("rejects invalid callback destinations and ports before Control Panel reque
     `http://localhost/callback?state=${state}&extra=value`,
     `http://localhost/callback?state=${state}#fragment`,
   ]) {
-    await assert.rejects(
-      client.requestEmailLogin("user@example.com", 4321, callbackPath),
-      /callback path must contain a valid state/,
-    );
+    await assert.rejects(Effect.runPromise(client.requestEmailLogin("user@example.com", 4321, callbackPath)), /callback path must contain a valid state/);
   }
-  await assert.rejects(
-    client.requestEmailLogin("user@example.com", 4321, "http://["),
-    /callback path is invalid/,
-  );
-  await assert.rejects(
-    client.requestEmailLogin("user@example.com", 0, `/callback?state=${state}`),
-    /callback port is invalid/,
-  );
+  await assert.rejects(Effect.runPromise(client.requestEmailLogin("user@example.com", 4321, "http://[")), /callback path is invalid/);
+  await assert.rejects(Effect.runPromise(client.requestEmailLogin("user@example.com", 0, `/callback?state=${state}`)), /callback port is invalid/);
 });
 
 test("rejects malformed provider application registration responses", async () => {
@@ -1800,22 +1757,16 @@ test("rejects malformed provider application registration responses", async () =
     async () => new Response(JSON.stringify({}), { status: 200 }),
   );
 
-  await assert.rejects(
-    client.registerApplication(
-      {
-        email: "user@example.com",
-        idToken: "id-token",
-        refreshToken: "refresh-token",
-      },
-      {
-        name: "Enable Banking MCP",
-        certificate: "certificate",
-        environment: "SANDBOX",
-        redirect_urls: ["https://localhost:8765/callback"],
-      },
-    ),
-    /invalid application registration response/,
-  );
+  await assert.rejects(Effect.runPromise(client.registerApplication({
+    email: "user@example.com",
+    idToken: "id-token",
+    refreshToken: "refresh-token",
+  }, {
+    name: "Enable Banking MCP",
+    certificate: "certificate",
+    environment: "SANDBOX",
+    redirect_urls: ["https://localhost:8765/callback"],
+  })), /invalid application registration response/);
 });
 
 test("Control Panel callback timeout closes the listener and rejects login", async (context) => {
@@ -1825,24 +1776,27 @@ test("Control Panel callback timeout closes the listener and rejects login", asy
   let listener;
   const flow = new ControlPanelAuthFlow(
     {
-      async requestEmailLogin(email, port, path) {
-        requested.resolve({ email, port, path });
+      requestEmailLogin(email, port, path) {
+        return Effect.sync(() => requested.resolve({ email, port, path }));
       },
-      async completeEmailLogin() {
-        throw new Error("A timed-out callback must not complete login");
+      completeEmailLogin() {
+        return Effect.fail(new Error("A timed-out callback must not complete login"));
       },
     },
-    async () => {
-      listener = await createControlPanelCallbackListener();
-      const close = listener.close;
-      listener.close = async () => {
-        closeCalls += 1;
-        await close();
-      };
-      return listener;
-    },
+    () =>
+      Effect.map(createControlPanelCallbackListener(), (createdListener) => {
+        listener = createdListener;
+        const close = listener.close;
+        listener.close = Effect.zipRight(
+          Effect.sync(() => {
+            closeCalls += 1;
+          }),
+          close,
+        );
+        return listener;
+      }),
   );
-  const pendingLogin = flow.authenticate("user@example.com");
+  const pendingLogin = Effect.runPromise(flow.authenticate("user@example.com"))
   const request = await requested.promise;
   assert.equal(request.email, "user@example.com");
   assert.ok(request.port > 0);
@@ -1864,19 +1818,17 @@ test("Control Panel callback timeout closes the listener and rejects login", asy
 test("Sandbox registration completes without opening the Production dashboard", async () => {
   const openedUrls = [];
   const { setup, applicationStore } = setupDependencies({
-    openBrowser: (url) => openedUrls.push(url),
+    openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
   });
 
-  await setup.registerApplication(
-    registrationOptions({ environment: "SANDBOX" }),
-  );
+  await Effect.runPromise(setup.registerApplication(registrationOptions({ environment: "SANDBOX" })));
   const status = await waitForSetup(setup);
 
   assert.equal(status.phase, "application_ready");
   assert.equal(status.pending, false);
   assert.equal(status.appId, "recorded-app-id");
   assert.equal(status.dashboardUrl, undefined);
-  assert.equal((await applicationStore.get()).appId, "recorded-app-id");
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
   assert.deepEqual(openedUrls, []);
 });
 test("rejects invalid Control Panel email and callback ports before network access", async () => {
@@ -1887,13 +1839,7 @@ test("rejects invalid Control Panel email and callback ports before network acce
   });
   const validCallback = `/callback?state=${"A".repeat(43)}`;
 
-  await assert.rejects(
-    client.requestEmailLogin("   ", 4321, validCallback),
-    /control_panel_email must be a valid email address/,
-  );
-  await assert.rejects(
-    client.requestEmailLogin("person@example.com", 65536, validCallback),
-    /Control Panel callback port is invalid/,
-  );
+  await assert.rejects(Effect.runPromise(client.requestEmailLogin("   ", 4321, validCallback)), /control_panel_email must be a valid email address/);
+  await assert.rejects(Effect.runPromise(client.requestEmailLogin("person@example.com", 65536, validCallback)), /Control Panel callback port is invalid/);
   assert.equal(requestCount, 0);
 });

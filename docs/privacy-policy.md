@@ -109,21 +109,19 @@ deployment.
 
 The current macOS implementation stores the following in macOS Keychain:
 
-- the application ID, private key, and certificate;
-- the current Enable Banking session ID; and
-- the Control Panel authentication record.
+- one credential item containing the application ID, private key, certificate,
+  current Enable Banking session ID, and Control Panel authentication record;
+- a separate non-secret trusted-certificate item when HTTPS loopback trust is
+  enabled.
 
-New credential values are written as a single native Keychain item through
-`@napi-rs/keyring`, under a separate service name from the older records.
-Existing raw and chunked credential records remain readable until a successful
-replacement, then are removed; `/usr/bin/security` is used only to read or
-remove those legacy records, never to pass newly written secret values.
-Previously written large credential records may occupy multiple related
-Keychain records. The private key is generated or supplied by the operator and
-is used to sign API requests. The certificate is registered with Enable
-Banking and may be trusted locally for the HTTPS loopback callback. API
-responses and callback codes are held in process memory while used; the MCP
-does not intentionally persist banking responses.
+The credential bundle uses one native item through `@napi-rs/keyring`. Before
+creating it, the implementation checks its current and recognized legacy
+service names. Existing raw or per-secret records are consolidated into an
+existing item and duplicates are removed. Legacy chunk manifests fail closed:
+the MCP will not create another item until those records are removed in
+Keychain Access and the MCP is restarted. Callback codes and API responses
+remain in process memory while used; the MCP does not intentionally persist
+banking responses.
 
 The retention schedule for this personal deployment is:
 
