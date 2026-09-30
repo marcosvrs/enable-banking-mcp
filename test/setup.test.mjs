@@ -1302,18 +1302,18 @@ test("reports an empty bank catalog without starting authorization", async () =>
   assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
 });
 
-test("times out Production activation without starting bank authorization", async () => {
-  let now = 0;
+test("keeps monitoring Production activation and continues bank authorization", async () => {
   let activationChecks = 0;
-  let active = false;
   let authorizationCalls = 0;
   const openedUrls = [];
-  const { setup, applicationStore, sessionStore } = setupDependencies({
+  const sessionStore = new MemorySessionStore();
+  const { setup, applicationStore } = setupDependencies({
     openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
+    sessionStore,
     createBankClient: () => ({
       getApplication() {
         activationChecks += 1;
-        return Effect.succeed({ active });
+        return Effect.succeed({ active: activationChecks > 1 });
       },
       listBanks() {
         return Effect.succeed({ aspsps: [{ name: "Example Bank" }] });
@@ -1323,32 +1323,26 @@ test("times out Production activation without starting bank authorization", asyn
       status: { pending: false },
       start() {
         authorizationCalls += 1;
-        return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
+        return Effect.as(
+          sessionStore.set("automatic-session"),
+          { authorization_url: "https://bank.example/authorize" },
+        );
       },
     },
-    sleep: (milliseconds) => Effect.sync(() => {
-      now += milliseconds;
-    }),
-    now: () => now,
+    sleep: () => Effect.void,
   });
-
-  await Effect.runPromise(setup.start({
+  const status = await Effect.runPromise(setup.runToCompletion({
     ...registrationOptions({ environment: "PRODUCTION" }),
     aspspName: "Example Bank",
     country: "FI",
   }));
-  const status = await waitForSetup(setup);
-  active = true;
-  const refreshedStatus = await Effect.runPromise(setup.getStatus());
-  assert.equal(refreshedStatus.phase, "application_ready");
 
-  assert.equal(status.phase, "account_link");
-  assert.match(status.message, /resume connect_bank/);
-  assert.ok(activationChecks > 0);
-  assert.equal(authorizationCalls, 0);
+  assert.equal(status.phase, "complete");
+  assert.ok(activationChecks >= 2);
+  assert.equal(authorizationCalls, 1);
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
   assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
-  assert.equal(await Effect.runPromise(sessionStore.get()), undefined);
+  assert.equal(await Effect.runPromise(sessionStore.get()), "automatic-session");
 });
 
 test("times out pending bank consent without discarding the registered application", async () => {

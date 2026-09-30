@@ -13,13 +13,19 @@ type FormValueResult =
   | { status: "unsupported" }
   | { status: "declined"; action: "decline" | "cancel" }
   | { status: "invalid" }
+  | { status: "accepted"; value: Record<string, string> };
+type FormStringResult =
+  | { status: "unsupported" }
+  | { status: "declined"; action: "decline" | "cancel" }
+  | { status: "invalid" }
   | { status: "accepted"; value: string };
 
-export function elicitFormString(
+
+export function elicitForm(
   server: McpServer["server"],
-  field: string,
   message: string,
-  schema: FormFieldSchema,
+  properties: Record<string, FormFieldSchema>,
+  required: string[],
 ): Effect.Effect<FormValueResult, unknown> {
   return Effect.gen(function* () {
     const capabilities = server.getClientCapabilities()?.elicitation;
@@ -34,8 +40,8 @@ export function elicitFormString(
       message,
       requestedSchema: {
         type: "object",
-        properties: { [field]: schema },
-        required: [field],
+        properties,
+        required,
       },
     } satisfies ElicitRequestFormParams;
     const result = yield* Effect.tryPromise({
@@ -52,9 +58,35 @@ export function elicitFormString(
     if (result.action !== "accept") {
       return { status: "declined", action: result.action } as const;
     }
-    const value = result.content?.[field];
-    return typeof value === "string"
-      ? { status: "accepted", value } as const
+    const content = result.content;
+    if (
+      !content ||
+      required.some((field) => typeof content[field] !== "string")
+    ) {
+      return { status: "invalid" } as const;
+    }
+    return {
+      status: "accepted",
+      value: Object.fromEntries(
+        Object.entries(content).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      ),
+    } as const;
+  });
+}
+
+export function elicitFormString(
+  server: McpServer["server"],
+  field: string,
+  message: string,
+  schema: FormFieldSchema,
+): Effect.Effect<FormStringResult, unknown> {
+  return Effect.gen(function* () {
+    const result = yield* elicitForm(server, message, { [field]: schema }, [field]);
+    if (result.status !== "accepted") return result;
+    return typeof result.value[field] === "string"
+      ? { status: "accepted", value: result.value[field] } as const
       : { status: "invalid" } as const;
   });
 }

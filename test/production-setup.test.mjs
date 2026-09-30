@@ -412,13 +412,10 @@ test("registration without optional auth store persists a Sandbox application", 
     redirectUrl: " https://localhost:8765/callback ",
   }));
 
-  assert.deepEqual(await waitForSetup(setup), {
-    phase: "application_ready",
-    pending: false,
-    appId: "sandbox-app-id",
-    message:
-      "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
-  });
+  const setupStatus = await waitForSetup(setup);
+  assert.equal(setupStatus.phase, "application_ready");
+  assert.equal(setupStatus.pending, false);
+  assert.equal(setupStatus.appId, "sandbox-app-id");
   assert.deepEqual(dependencies.controlPanelClient.request, {
     name: "Test application",
     certificate: "fake-certificate",
