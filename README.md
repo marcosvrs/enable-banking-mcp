@@ -17,6 +17,17 @@ It does not provide payment initiation or submission, PIS, arbitrary Control Pan
 
 The source code is open source under the [MIT License](LICENSE). MIT permits downstream commercial reuse of the code; it does not grant commercial or other access rights to Enable Banking, a bank, an ASPSP, or another provider.
 
+## Agent skill
+
+Install the Enable Banking MCP operating guide for supported AI agents:
+
+```sh
+npx skills add marcosvrs/enable-banking-mcp
+```
+
+The `enable-banking-mcp` skill documents onboarding, authorization status,
+account and transaction reads, and safe session management.
+
 ## Requirements
 
 - macOS, because credentials and certificate trust use macOS Keychain (credentials use the native `@napi-rs/keyring` API; `/usr/bin/security` remains used for certificate trust and legacy credential cleanup);
