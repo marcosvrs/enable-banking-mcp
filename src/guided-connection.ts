@@ -46,10 +46,11 @@ export function connectBank(
   dependencies: GuidedConnectionDependencies,
 ): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
-    const [storedSession, application] = yield* Effect.all([
+    const [storedSession, storedApplication] = yield* Effect.all([
       dependencies.sessionStore.get(),
       dependencies.applicationStore.get(),
     ]);
+    let application = storedApplication;
     const environmentSessionId = dependencies.getEnvironmentSessionId();
     const connected = yield* recoverConfiguredSession<Record<string, unknown>>({
       storedSession,
@@ -63,31 +64,27 @@ export function connectBank(
       clearEnvironmentSession: () =>
         dependencies.clearEnvironmentSession(environmentSessionId),
     });
-    if (
-      connected &&
-      (options.accessProfile === "balances" ||
-        (typeof connected.access === "object" &&
-          connected.access !== null &&
-          "transactions" in connected.access &&
-          connected.access.transactions === true))
-    ) {
+    if (connected && hasRequestedAccess(connected, options.accessProfile)) {
       return connected;
     }
 
     if (dependencies.setupFlow.status.pending) {
       const status = yield* dependencies.setupFlow.waitForCompletion();
       if (status.phase === "complete") {
-        return {
+        const result = {
           status: "connected",
           ...(yield* dependencies.readAuthorizedBalances()),
         };
+        if (hasRequestedAccess(result, options.accessProfile)) return result;
+        application = yield* dependencies.applicationStore.get();
+      } else {
+        return {
+          status: status.phase === "failed" ? "failed" : "awaiting_user",
+          phase: status.phase,
+          ...(status.message ? { message: status.message } : {}),
+          ...(status.error ? { error: status.error } : {}),
+        };
       }
-      return {
-        status: status.phase === "failed" ? "failed" : "awaiting_user",
-        phase: status.phase,
-        ...(status.message ? { message: status.message } : {}),
-        ...(status.error ? { error: status.error } : {}),
-      };
     }
     if (dependencies.authorizationFlow.status.pending) {
       while (dependencies.authorizationFlow.status.pending) {
@@ -97,10 +94,11 @@ export function connectBank(
       if (error) {
         return { status: "failed", phase: "bank_authorization", error };
       }
-      return {
+      const result = {
         status: "connected",
         ...(yield* dependencies.readAuthorizedBalances()),
       };
+      if (hasRequestedAccess(result, options.accessProfile)) return result;
     }
     if (!application) dependencies.assertNoEnvironmentCredentials();
 
@@ -224,6 +222,19 @@ export function connectBank(
       ...(yield* dependencies.readAuthorizedBalances()),
     };
   });
+}
+function hasRequestedAccess(
+  connected: Record<string, unknown>,
+  accessProfile: AccessProfile,
+): boolean {
+  if (accessProfile === "balances") return true;
+  const access = connected.access;
+  return (
+    typeof access === "object" &&
+    access !== null &&
+    "transactions" in access &&
+    access.transactions === true
+  );
 }
 
 function collectConnectionInput(

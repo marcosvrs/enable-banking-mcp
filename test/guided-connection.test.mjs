@@ -40,7 +40,9 @@ async function runConnection({
   banksByCountry = { FI: [{ name: "Example Bank", country: "FI" }] },
   setupResult = { phase: "complete", pending: false },
   setupPending = false,
+  setupApplicationAfterWait,
   authorizationPending = false,
+  completeAuthorizationWhenObserved = false,
   accessProfile = "balances",
   activateApplicationOnBrowserOpen = false,
 } = {}) {
@@ -69,12 +71,19 @@ async function runConnection({
       },
       waitForCompletion() {
         state.setupWaits += 1;
+        if (setupApplicationAfterWait) {
+          state.applicationStore.value = setupApplicationAfterWait;
+        }
         return Effect.succeed(setupResult);
       },
     },
     authorizationFlow: {
       get status() {
-        return { pending: state.authorizationPending };
+        const pending = state.authorizationPending;
+        if (pending && completeAuthorizationWhenObserved) {
+          state.authorizationPending = false;
+        }
+        return { pending };
       },
       start(_client, options) {
         state.authorizationCalls.push(options);
@@ -294,6 +303,52 @@ test("connect waits for a running setup and returns its balances without another
   assert.equal(state.elicitationRequests.length, 0);
   assert.equal(result.status, "connected");
   assert.equal(state.balanceReads, 1);
+});
+test("a pending setup without transaction access continues into reauthorization", async () => {
+  const { result, state } = await runConnection({
+    setupPending: true,
+    setupApplicationAfterWait: application(),
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: { country: "FI", bank: "Example Bank" },
+    },
+    accessProfile: "balances_and_transactions",
+  });
+
+  assert.equal(state.setupWaits, 1);
+  assert.equal(state.setupOptions.length, 0);
+  assert.deepEqual(state.authorizationCalls, [{
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+    accessProfile: "balances_and_transactions",
+  }]);
+  assert.equal(result.status, "connected");
+  assert.equal(state.balanceReads, 2);
+});
+
+test("a pending authorization without transaction access continues into reauthorization", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application(),
+    authorizationPending: true,
+    completeAuthorizationWhenObserved: true,
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: { country: "FI", bank: "Example Bank" },
+    },
+    accessProfile: "balances_and_transactions",
+  });
+
+  assert.deepEqual(state.authorizationCalls, [{
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+    accessProfile: "balances_and_transactions",
+  }]);
+  assert.equal(result.status, "connected");
+  assert.equal(state.balanceReads, 2);
 });
 test("redacts elicited email from setup failures", async () => {
   const { result, toolResponse } = await runConnection({
