@@ -1,9 +1,9 @@
-export type LoopbackRedirect = {
+export interface LoopbackRedirect {
   protocol: "https:";
   hostname: string;
   port: number;
   path: string;
-};
+}
 
 const LOOPBACK_HOSTS: Record<string, true> = {
   "127.0.0.1": true,

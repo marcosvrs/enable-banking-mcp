@@ -9,7 +9,6 @@ import {
   DEFAULT_REDIRECT_URL,
   launchBrowser,
   loadCallbackTlsOptions,
-  type AccessProfile,
 } from "./authorization.js";
 import {
   EnableBankingApiError,
@@ -119,10 +118,11 @@ const setupFlow = new ApplicationSetupFlow({
   openBrowser: launchBrowser,
 });
 
-type ToolResult = {
+interface ToolResult {
+  [key: string]: unknown;
   content: [{ type: "text"; text: string }];
   isError?: boolean;
-};
+}
 
 async function safely<T>(operation: () => Promise<T>): Promise<ToolResult> {
   try {
@@ -133,9 +133,9 @@ async function safely<T>(operation: () => Promise<T>): Promise<ToolResult> {
 }
 
 function success(value: unknown): ToolResult {
-  const text = JSON.stringify(value, null, 2);
+  const text = JSON.stringify(value ?? null, null, 2);
   return {
-    content: [{ type: "text", text: redactLocalEmails(text ?? "null") }],
+    content: [{ type: "text", text: redactLocalEmails(text) }],
   };
 }
 
@@ -152,7 +152,7 @@ function failure(error: unknown): ToolResult {
       2,
     );
     return {
-      content: [{ type: "text", text: redactLocalEmails(text ?? "null") }],
+      content: [{ type: "text", text: redactLocalEmails(text) }],
       isError: true,
     };
   }
@@ -299,11 +299,13 @@ async function readConnectionStatus() {
       : undefined;
   return inspectConnectionStatus({
     configuration,
-    client,
     sessionIds,
-    controlPanelAuth,
-    configuredEnvironment: application?.environment,
-    pendingPhase,
+    ...(client ? { client } : {}),
+    ...(controlPanelAuth ? { controlPanelAuth } : {}),
+    ...(application?.environment
+      ? { configuredEnvironment: application.environment }
+      : {}),
+    ...(pendingPhase ? { pendingPhase } : {}),
   });
 }
 
@@ -475,9 +477,9 @@ server.registerTool(
       connectBank({
         appName: app_name,
         environment,
-        country,
-        aspspName: aspsp_name,
-        accessProfile: access_profile as AccessProfile,
+        ...(country === undefined ? {} : { country }),
+        ...(aspsp_name === undefined ? {} : { aspspName: aspsp_name }),
+        accessProfile: access_profile,
       }),
     ),
 );
@@ -497,9 +499,7 @@ server.registerTool(
         .enum(["PRODUCTION", "SANDBOX"])
         .default("PRODUCTION")
         .describe("Enable Banking application environment; personal PRODUCTION is the default"),
-      redirect_url: z
-        .string()
-        .url()
+      redirect_url: z.url()
         .default(DEFAULT_REDIRECT_URL)
         .describe("Registered HTTPS loopback callback URL"),
       aspsp_name: z
@@ -515,14 +515,10 @@ server.registerTool(
         .min(1)
         .default(DEFAULT_PRODUCTION_DESCRIPTION)
         .describe("Application description; defaults to read-only personal access"),
-      privacy_url: z
-        .string()
-        .url()
+      privacy_url: z.url()
         .default(DEFAULT_PRODUCTION_PRIVACY_URL)
         .describe("Privacy policy URL; defaults to the project policy"),
-      terms_url: z
-        .string()
-        .url()
+      terms_url: z.url()
         .default(DEFAULT_PRODUCTION_TERMS_URL)
         .describe("Terms of service URL; defaults to the project terms"),
       valid_until: z
@@ -566,8 +562,8 @@ server.registerTool(
         description,
         privacyUrl: privacy_url,
         termsUrl: terms_url,
-        validUntil: valid_until,
-        accessProfile: access_profile as AccessProfile,
+        ...(valid_until === undefined ? {} : { validUntil: valid_until }),
+        accessProfile: access_profile,
       };
       return setupFlow.start(options);
     }),
@@ -588,9 +584,7 @@ server.registerTool(
         .enum(["PRODUCTION", "SANDBOX"])
         .default("PRODUCTION")
         .describe("Enable Banking application environment; personal PRODUCTION is the default"),
-      redirect_url: z
-        .string()
-        .url()
+      redirect_url: z.url()
         .default(DEFAULT_REDIRECT_URL)
         .describe("Registered HTTPS loopback callback URL"),
       description: z
@@ -598,14 +592,10 @@ server.registerTool(
         .min(1)
         .default(DEFAULT_PRODUCTION_DESCRIPTION)
         .describe("Application description; defaults to read-only personal access"),
-      privacy_url: z
-        .string()
-        .url()
+      privacy_url: z.url()
         .default(DEFAULT_PRODUCTION_PRIVACY_URL)
         .describe("Privacy policy URL; defaults to the project policy"),
-      terms_url: z
-        .string()
-        .url()
+      terms_url: z.url()
         .default(DEFAULT_PRODUCTION_TERMS_URL)
         .describe("Terms of service URL; defaults to the project terms"),
     },
@@ -676,9 +666,7 @@ server.registerTool(
         .length(2)
         .default("IE")
         .describe("Two-letter ISO 3166-1 country code"),
-      redirect_url: z
-        .string()
-        .url()
+      redirect_url: z.url()
         .optional()
         .describe(
           "Registered HTTPS loopback callback URL; defaults to the stored application's first redirect",
@@ -721,8 +709,8 @@ server.registerTool(
             country,
             redirectUrl:
               redirect_url ?? application?.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
-            validUntil: valid_until,
-            accessProfile: access_profile as AccessProfile,
+            ...(valid_until === undefined ? {} : { validUntil: valid_until }),
+            accessProfile: access_profile,
           },
         );
       } finally {
@@ -885,11 +873,15 @@ server.registerTool(
       (
         await authorizedAccountClient(account_id)
       ).getAccountTransactions(account_id, {
-        dateFrom: date_from,
-        dateTo: date_to,
-        continuationKey: continuation_key,
-        transactionStatus: transaction_status,
-        strategy,
+        ...(date_from === undefined ? {} : { dateFrom: date_from }),
+        ...(date_to === undefined ? {} : { dateTo: date_to }),
+        ...(continuation_key === undefined
+          ? {}
+          : { continuationKey: continuation_key }),
+        ...(transaction_status === undefined
+          ? {}
+          : { transactionStatus: transaction_status }),
+        ...(strategy === undefined ? {} : { strategy }),
         limit,
       }),
     ),

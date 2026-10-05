@@ -208,7 +208,8 @@ export class EnableBankingClient {
     if (!/^[A-Za-z0-9_-]{43}$/.test(request.state)) {
       throw new Error("state must be a 256-bit base64url value");
     }
-    if (request.psu_type !== "personal") {
+    const psuType: unknown = request.psu_type;
+    if (psuType !== "personal") {
       throw new Error("psu_type must be personal");
     }
     if (
@@ -293,7 +294,7 @@ export class EnableBankingClient {
     const transactions: unknown[] = [];
     let continuationKey: string | undefined = query.continuationKey;
     let nextContinuationKey: string | undefined;
-    let hasMore = false;
+    let hasMore: boolean;
     let pages = 0;
 
     do {

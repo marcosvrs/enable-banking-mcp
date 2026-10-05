@@ -5,7 +5,7 @@ export interface BankCatalogClient {
   listBanks(country?: string): Promise<unknown>;
 }
 
-export type BankChoice = { name: string; country: string };
+export interface BankChoice { name: string; country: string }
 
 type ChoiceResult =
   | { status: "selected"; value: string }
@@ -80,8 +80,11 @@ export async function resolveBankSelection(options: {
         /^[A-Z]{2}$/.test(bank.country),
     );
     if (matches.length === 1) {
-      selectedBank = matches[0];
-      country = selectedBank.country;
+      const bank = matches[0];
+      if (bank) {
+        selectedBank = bank;
+        country = bank.country;
+      }
     } else if (matches.length > 1) {
       const choice = await promptForBank(
         options.mcpServer,
@@ -96,13 +99,11 @@ export async function resolveBankSelection(options: {
     }
   }
 
-  if (
-    !country &&
-    !requestedName &&
-    catalogBanks?.length === 1
-  ) {
-    selectedBank = catalogBanks[0];
-    country = selectedBank.country;
+  const soleCatalogBank =
+    catalogBanks?.length === 1 ? catalogBanks[0] : undefined;
+  if (!country && !requestedName && soleCatalogBank) {
+    selectedBank = soleCatalogBank;
+    country = soleCatalogBank.country;
   }
 
   if (!country && !selectedBank) {
@@ -233,7 +234,7 @@ async function promptForChoice(
   field: string,
   title: string,
   message: string,
-  choices: Array<{ value: string; title: string }>,
+  choices: { value: string; title: string }[],
 ): Promise<ChoiceResult> {
   if (choices.length === 0) return { status: "invalid" };
   const result = await elicitFormString(mcpServer, field, message, {
