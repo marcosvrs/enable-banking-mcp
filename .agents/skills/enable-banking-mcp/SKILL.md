@@ -168,7 +168,7 @@ The live MCP tool schema is authoritative. This list describes the current 20 pu
 | Tool | Inputs | Behavior |
 |---|---|---|
 | `get_session` | None | Fetches the current provider session. May reveal sensitive authorized-account/session data. |
-| `delete_session` | None | Deletes the current session and clears its matching local ID. Use only when the user explicitly asks to disconnect/revoke the session. |
+| `delete_session` | None | Deletes the current session from the provider and clears the matching local session ID in Keychain. Use only when the user explicitly asks to disconnect/revoke the session. |
 | `clear_local_credentials` | None | Destructive local cleanup: clears Keychain session/application private key/Control Panel auth and attempts to remove trusted callback certificate. It does not itself revoke bank consent or unlink dashboard accounts, and it does not remove environment variables or backups. Before a user-requested cleanup, warn that the exact matching private key must be backed up if the provider-side application is to be reused; without it, a new application may be required. Do not use as a troubleshooting shortcut. |
 
 All account-specific read tools validate the requested account UID against the current provider session. Never call a tool with a guessed UID. `get_transaction_details` additionally requires the transaction ID from the relevant account's transaction results.
