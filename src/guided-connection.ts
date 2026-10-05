@@ -37,7 +37,7 @@ export interface GuidedConnectionDependencies {
   readAuthorizedBalances(): Effect.Effect<Record<string, unknown>, unknown>;
   resolveCredentials(): Effect.Effect<EnableBankingCredentials, unknown>;
   createBankClient(credentials: EnableBankingCredentials): EnableBankingClient;
-  openBrowser(url: string): void;
+  openBrowser(url: string): Effect.Effect<void, unknown>;
   mcpServer: McpServer["server"];
 }
 
@@ -63,7 +63,16 @@ export function connectBank(
       clearEnvironmentSession: () =>
         dependencies.clearEnvironmentSession(environmentSessionId),
     });
-    if (connected) return connected;
+    if (
+      connected &&
+      (options.accessProfile === "balances" ||
+        (typeof connected.access === "object" &&
+          connected.access !== null &&
+          "transactions" in connected.access &&
+          connected.access.transactions === true))
+    ) {
+      return connected;
+    }
 
     if (dependencies.setupFlow.status.pending) {
       const status = yield* dependencies.setupFlow.waitForCompletion();
@@ -170,7 +179,7 @@ export function connectBank(
     const client = dependencies.createBankClient(credentials);
     let applicationInfo = yield* client.getApplication();
     if (application.environment === "PRODUCTION" && !applicationInfo.active) {
-      dependencies.openBrowser(APPLICATIONS_URL);
+      yield* dependencies.openBrowser(APPLICATIONS_URL);
       while (!applicationInfo.active) {
         yield* Effect.sleep(5_000);
         applicationInfo = yield* client.getApplication();

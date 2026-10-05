@@ -26,7 +26,7 @@ function inspectConnectionStatus(input) {
   );
 }
 
-test("reports inactive Production app separately from expired Control Panel login", async () => {
+test("reports inactive Production app and tells standalone callers how to continue", async () => {
   const status = await inspectConnectionStatus({
     configuration: "configured",
     sessionIds: [],
@@ -49,6 +49,11 @@ test("reports inactive Production app separately from expired Control Panel logi
   assert.equal(status.bank_session, "missing");
   assert.equal(status.control_panel_session, "expired");
   assert.equal(status.application_environment, "PRODUCTION");
+  assert.match(
+    status.next_action,
+    /Complete Production activation by linking an account in the Enable Banking dashboard, then call connect_bank to continue\./,
+  );
+  assert.doesNotMatch(status.next_action, /active connect_bank request|continues automatically/i);
 });
 
 test("reports active applications with no bank consent as authorization required", async () => {

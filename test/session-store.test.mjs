@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Effect } from "effect";
 import {
@@ -33,8 +38,58 @@ function createVault(initial = new Map()) {
   return {
     calls,
     records,
+    factory,
     vault: new MacKeychainCredentialVault(factory, account),
   };
+}
+
+const sessionStoreWorker = fileURLToPath(
+  new URL("./fixtures/session-store-worker.mjs", import.meta.url),
+);
+
+function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
+  const child = spawn(
+    process.execPath,
+    [sessionStoreWorker, keychainPath, slot, value, String(delayWrite)],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  let resolveReady;
+  let rejectReady;
+  let resolveCompletion;
+  let rejectCompletion;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const completed = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+    if (stdout.includes("READY\n")) resolveReady();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.once("error", (error) => {
+    rejectReady(error);
+    rejectCompletion(error);
+  });
+  child.once("close", (code) => {
+    if (!stdout.includes("READY\n")) {
+      rejectReady(new Error(`Keychain worker exited before ready: ${stderr}`));
+    }
+    if (code === 0) resolveCompletion();
+    else rejectCompletion(new Error(`Keychain worker failed: ${stderr}`));
+  });
+
+  return { child, ready, completed };
 }
 
 
@@ -66,6 +121,92 @@ test("creates one Keychain item for all credential slots after confirming absenc
   assert.ok(
     state.calls.slice(0, firstWrite).every(([operation]) => operation === "get"),
   );
+});
+
+test("independently initialized vaults merge each other's credential writes", async () => {
+  const state = createVault();
+  const firstVault = new MacKeychainCredentialVault(state.factory, account);
+  const secondVault = new MacKeychainCredentialVault(state.factory, account);
+  const firstSession = new MacKeychainSessionStore(firstVault);
+  const secondApplication = new MacKeychainSecretStore("application", secondVault);
+
+  await Effect.runPromise(firstSession.get());
+  await Effect.runPromise(secondApplication.get());
+  await Effect.runPromise(firstSession.set("session-placeholder"));
+  await Effect.runPromise(secondApplication.set("application-placeholder"));
+
+  const persisted = new MacKeychainCredentialVault(state.factory, account);
+  assert.equal(
+    await Effect.runPromise(new MacKeychainSessionStore(persisted).get()),
+    "session-placeholder",
+  );
+  assert.equal(
+    await Effect.runPromise(
+      new MacKeychainSecretStore("application", persisted).get(),
+    ),
+    "application-placeholder",
+  );
+});
+
+test("a stale vault clear cannot resurrect another process's cleared slot", async () => {
+  const state = createVault();
+  const firstVault = new MacKeychainCredentialVault(state.factory, account);
+  const secondVault = new MacKeychainCredentialVault(state.factory, account);
+  const firstSession = new MacKeychainSessionStore(firstVault);
+  const firstApplication = new MacKeychainSecretStore("application", firstVault);
+  const secondSession = new MacKeychainSessionStore(secondVault);
+  const secondApplication = new MacKeychainSecretStore("application", secondVault);
+
+  await Effect.runPromise(firstSession.set("session-placeholder"));
+  await Effect.runPromise(firstApplication.set("application-placeholder"));
+  await Effect.runPromise(secondSession.get());
+  await Effect.runPromise(secondApplication.get());
+  await Effect.runPromise(firstSession.clear());
+  await Effect.runPromise(secondApplication.clear());
+
+  assert.equal(state.records.size, 0);
+  const latestVault = new MacKeychainCredentialVault(state.factory, account);
+  assert.equal(
+    await Effect.runPromise(new MacKeychainSessionStore(latestVault).get()),
+    undefined,
+  );
+});
+
+test("concurrent processes preserve distinct credential slots", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "enable-banking-vault-test-"));
+  const keychainPath = join(directory, "records.json");
+  writeFileSync(keychainPath, "{}", { mode: 0o600 });
+  const sessionWorker = spawnVaultWriter(
+    keychainPath,
+    "session",
+    "session-placeholder",
+    true,
+  );
+  const applicationWorker = spawnVaultWriter(
+    keychainPath,
+    "application",
+    "application-placeholder",
+    false,
+  );
+
+  try {
+    await Promise.all([sessionWorker.ready, applicationWorker.ready]);
+    sessionWorker.child.stdin.end("go\n");
+    applicationWorker.child.stdin.end("go\n");
+    await Promise.all([sessionWorker.completed, applicationWorker.completed]);
+
+    const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+    const bundle = JSON.parse(
+      records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+    );
+    assert.equal(bundle.session, "session-placeholder");
+    assert.equal(bundle.application, "application-placeholder");
+  } finally {
+    for (const worker of [sessionWorker, applicationWorker]) {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("reuses an existing entry and consolidates prior per-service records", async () => {

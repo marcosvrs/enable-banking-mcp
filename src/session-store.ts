@@ -1,5 +1,9 @@
+import { lock as acquireCredentialLock } from "proper-lockfile";
 import { Effect } from "effect";
 import { Entry } from "@napi-rs/keyring";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface SecretStore {
   get(): Effect.Effect<string | undefined, unknown>;
@@ -48,6 +52,35 @@ const CREDENTIAL_CANDIDATES: ReadonlyArray<{
   { service: "enable-banking-mcp.pending" },
   { service: "enable-banking-mcp.retired" },
 ];
+
+const CREDENTIAL_LOCK_PATH = join(
+  homedir(),
+  ".config",
+  "enable-banking-mcp",
+  "credential-vault",
+);
+const CREDENTIAL_LOCK_OPTIONS = {
+  realpath: false,
+  stale: 30_000,
+  update: 10_000,
+  retries: { retries: 50, factor: 1, minTimeout: 50, maxTimeout: 200 },
+};
+
+async function withCredentialLock<T>(operation: () => T): Promise<T> {
+  mkdirSync(join(homedir(), ".config", "enable-banking-mcp"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  const release = await acquireCredentialLock(
+    CREDENTIAL_LOCK_PATH,
+    CREDENTIAL_LOCK_OPTIONS,
+  );
+  try {
+    return operation();
+  } finally {
+    await release();
+  }
+}
 
 let nativeKeyringEntryFactory: NativeKeyringEntryFactory = (
   serviceName,
@@ -217,63 +250,68 @@ export class MacKeychainCredentialVault {
   }
 
   get(slot: CredentialSlot): Effect.Effect<string | undefined, unknown> {
-    return Effect.try({
-      try: () => {
-        this.initialize();
-        return this.bundle[slot];
-      },
+    return Effect.tryPromise({
+      try: () =>
+        withCredentialLock(() => {
+          this.initialized = false;
+          this.initialize();
+          return this.bundle[slot];
+        }),
       catch: (error) => error,
     });
   }
 
   set(slot: CredentialSlot, value: string): Effect.Effect<void, unknown> {
-    return Effect.try({
-      try: () => {
-        const normalized = value.trim();
-        if (!normalized) {
-          throw new Error(`Cannot store an empty Enable Banking ${slot}`);
-        }
-        this.initialize();
-        if (!this.activeEntry) {
-          throw new Error("Enable Banking Keychain entry is unavailable");
-        }
-        const next = { ...this.bundle, [slot]: normalized };
-        // initialize() has checked every known app-owned service for an entry.
-        this.activeEntry.setPassword(
-          `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
-        );
-        this.bundle = next;
-      },
+    return Effect.tryPromise({
+      try: () =>
+        withCredentialLock(() => {
+          const normalized = value.trim();
+          if (!normalized) {
+            throw new Error(`Cannot store an empty Enable Banking ${slot}`);
+          }
+          this.initialized = false;
+          this.initialize();
+          if (!this.activeEntry) {
+            throw new Error("Enable Banking Keychain entry is unavailable");
+          }
+          const next = { ...this.bundle, [slot]: normalized };
+          this.activeEntry.setPassword(
+            `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
+          );
+          this.bundle = next;
+        }),
       catch: (error) => error,
     });
   }
 
   clear(slot: CredentialSlot): Effect.Effect<void, unknown> {
-    return Effect.try({
-      try: () => {
-        this.initialize();
-        if (this.bundle[slot] === undefined) return;
-        const next = { ...this.bundle };
-        delete next[slot];
-        if (Object.keys(next).length === 0) {
-          const entry = this.activeEntry;
-          if (!entry) {
-            throw new Error("Enable Banking Keychain entry is unavailable");
-          }
-          entry.deletePassword();
-          if (entry.getPassword() !== null) {
-            throw new Error("Unable to remove Enable Banking Keychain item");
-          }
-          this.bundle = {};
+    return Effect.tryPromise({
+      try: () =>
+        withCredentialLock(() => {
           this.initialized = false;
-          this.activeEntry = undefined;
-          return;
-        }
-        this.activeEntry?.setPassword(
-          `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
-        );
-        this.bundle = next;
-      },
+          this.initialize();
+          if (this.bundle[slot] === undefined) return;
+          const next = { ...this.bundle };
+          delete next[slot];
+          if (Object.keys(next).length === 0) {
+            const entry = this.activeEntry;
+            if (!entry) {
+              throw new Error("Enable Banking Keychain entry is unavailable");
+            }
+            entry.deletePassword();
+            if (entry.getPassword() !== null) {
+              throw new Error("Unable to remove Enable Banking Keychain item");
+            }
+            this.bundle = {};
+            this.initialized = false;
+            this.activeEntry = undefined;
+            return;
+          }
+          this.activeEntry?.setPassword(
+            `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
+          );
+          this.bundle = next;
+        }),
       catch: (error) => error,
     });
   }
