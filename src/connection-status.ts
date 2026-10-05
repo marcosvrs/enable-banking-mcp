@@ -144,7 +144,7 @@ export function inspectConnectionStatus(
       control_panel_session: controlPanelSession,
       ...environmentField,
       next_action:
-        "Complete Production activation by linking an account in the Enable Banking dashboard. The active connect_bank request continues automatically when activation is detected.",
+        "Complete Production activation by linking an account in the Enable Banking dashboard, then call connect_bank to continue.",
     };
   }
 

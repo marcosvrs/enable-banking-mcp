@@ -41,6 +41,8 @@ async function runConnection({
   setupResult = { phase: "complete", pending: false },
   setupPending = false,
   authorizationPending = false,
+  accessProfile = "balances",
+  activateApplicationOnBrowserOpen = false,
 } = {}) {
   const mcpServer = new McpServer({ name: "guided-connection-test", version: "1.0.0" });
   const state = {
@@ -113,7 +115,10 @@ async function runConnection({
       };
     },
     openBrowser(url) {
-      state.browserUrls.push(url);
+      return Effect.sync(() => {
+        state.browserUrls.push(url);
+        if (activateApplicationOnBrowserOpen) applicationInfo.active = true;
+      });
     },
     mcpServer: mcpServer.server,
   };
@@ -123,7 +128,7 @@ async function runConnection({
     result = await Effect.runPromise(connectBankEffect({
       appName: "Enable Banking MCP",
       environment: "PRODUCTION",
-      accessProfile: "balances",
+      accessProfile,
     }, dependencies));
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   });
@@ -216,6 +221,46 @@ test("an existing session returns balances without eliciting setup details", asy
   ]);
   assert.equal(state.balanceReads, 1);
   assert.equal(state.elicitationRequests.length, 0);
+});
+
+test("a stored balances-only session reauthorizes for transaction access", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application(),
+    sessionId: "stored-session",
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: { country: "FI", bank: "Example Bank" },
+    },
+    accessProfile: "balances_and_transactions",
+  });
+
+  assert.deepEqual(state.authorizationCalls, [{
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+    accessProfile: "balances_and_transactions",
+  }]);
+  assert.equal(result.status, "connected");
+  assert.equal(state.balanceReads, 2);
+});
+
+test("inactive Production applications open the dashboard before polling", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application("PRODUCTION"),
+    applicationInfo: { active: false, countries: ["FI"] },
+    activateApplicationOnBrowserOpen: true,
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: { country: "FI", bank: "Example Bank" },
+    },
+  });
+
+  assert.deepEqual(state.browserUrls, [
+    "https://enablebanking.com/cp/applications",
+  ]);
+  assert.equal(result.status, "connected");
 });
 
 test("an existing application asks country and bank together and completes authorization", async () => {
