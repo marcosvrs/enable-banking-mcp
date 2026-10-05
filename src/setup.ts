@@ -3,7 +3,11 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { X509Certificate } from "node:crypto";
+import {
+  createPrivateKey,
+  createPublicKey,
+  X509Certificate,
+} from "node:crypto";
 import {
   BankAuthorizationFlow,
   launchBrowser,
@@ -25,6 +29,10 @@ import type {
   StoredApplication,
 } from "./application-store.js";
 import type { SessionStore } from "./session-store.js";
+import type {
+  ConsentSettings,
+  ConsentSettingsResult,
+} from "./consent-settings.js";
 import type { EnableBankingCredentials } from "./config.js";
 import { EnableBankingClient } from "./enable-banking.js";
 
@@ -59,6 +67,13 @@ export interface SetupOptions extends ApplicationRegistrationOptions {
   accessProfile?: AccessProfile;
 }
 
+export interface GuidedSetupOptions extends ApplicationRegistrationOptions {
+  aspspName?: string;
+  country?: string;
+  validUntil?: string;
+  accessProfile?: AccessProfile;
+}
+
 export interface NormalizedApplicationRegistrationOptions
   extends ApplicationRegistrationOptions {
   gdprEmail?: string;
@@ -68,7 +83,15 @@ export interface NormalizedSetupOptions extends SetupOptions {
   gdprEmail?: string;
   redirectUrl: string;
   country: string;
-  validUntil: string;
+  validUntil?: string;
+  accessProfile: AccessProfile;
+}
+
+export interface NormalizedGuidedSetupOptions
+  extends NormalizedApplicationRegistrationOptions {
+  aspspName?: string;
+  country?: string;
+  validUntil?: string;
   accessProfile: AccessProfile;
 }
 
@@ -78,6 +101,7 @@ export type SetupPhase =
   | "registering_application"
   | "account_link"
   | "application_ready"
+  | "consent_settings"
   | "bank_authorization"
   | "complete"
   | "failed";
@@ -112,6 +136,10 @@ export interface ApplicationSetupDependencies {
   controlPanelAuthStore?: ControlPanelAuthStore;
   authorizationFlow: BankAuthorizationFlow;
   openBrowser?: BrowserOpener;
+
+  loadExistingPrivateKey?: (
+    appId: string,
+  ) => Effect.Effect<string, unknown>;
   generateKeyMaterial?: () => Effect.Effect<ApplicationKeyMaterial, unknown>;
   trustCertificate?: (
     certificate: string,
@@ -119,6 +147,9 @@ export interface ApplicationSetupDependencies {
   createBankClient?: (
     credentials: EnableBankingCredentials,
   ) => EnableBankingClient;
+  resolveConsentSettings?: (
+    defaults: ConsentSettings,
+  ) => Effect.Effect<ConsentSettingsResult, unknown>;
   sleep?: (milliseconds: number) => Effect.Effect<void, unknown>;
   now?: () => number;
 }
@@ -311,13 +342,54 @@ export class ApplicationSetupFlow {
     });
   }
 
+  startGuided(
+    options: GuidedSetupOptions,
+  ): Effect.Effect<SetupStartResult, unknown> {
+    return Effect.gen(this, function* () {
+      const previous = yield* Effect.sync(() => this.reserve());
+      const normalized = yield* Effect.try({
+        try: () => normalizeGuidedSetupOptions(options),
+        catch: (error) => error,
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* this.ensureStoresAvailable().pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
+      yield* Effect.forkDaemon(this.run(normalized));
+      return {
+        status: "started",
+        phase: "control_panel_auth",
+        message: this.current.message ?? "Enable Banking onboarding started",
+      };
+    });
+  }
+
   runToCompletion(
-    options: SetupOptions,
+    options: GuidedSetupOptions,
   ): Effect.Effect<SetupStatus, unknown> {
     return Effect.gen(this, function* () {
       const previous = yield* Effect.sync(() => this.reserve());
       const normalized = yield* Effect.try({
-        try: () => normalizeSetupOptions(options),
+        try: () => normalizeGuidedSetupOptions(options),
         catch: (error) => error,
       }).pipe(
         Effect.tapError(() =>
@@ -354,6 +426,53 @@ export class ApplicationSetupFlow {
       return this.status;
     });
   }
+  findLinkedBank(
+    applicationId: string,
+    controlPanelEmail?: string,
+  ): Effect.Effect<{ name: string; country: string }, unknown> {
+    return Effect.gen(
+      function* (this: ApplicationSetupFlow) {
+        const storedAuth = yield* (this.dependencies.controlPanelAuthStore?.get() ??
+          Effect.succeed(undefined));
+        const email = controlPanelEmail?.trim() || storedAuth?.email;
+        if (!email) {
+          return yield* Effect.fail(
+            new Error(
+              "Control Panel authentication is required to find this application's linked bank",
+            ),
+          );
+        }
+        const auth = yield* this.dependencies.controlPanelAuth.authenticate(
+          email,
+          storedAuth,
+        );
+        if (auth !== storedAuth) {
+          yield* (this.dependencies.controlPanelAuthStore?.set(auth) ??
+            Effect.void);
+        }
+        const banks = yield* this.dependencies.controlPanelClient.getLinkedBanks(
+          auth,
+          applicationId,
+        );
+        if (banks.length === 0) {
+          return yield* Effect.fail(
+            new Error(
+              "No linked bank was found for this application; link an account in the Enable Banking dashboard first",
+            ),
+          );
+        }
+        if (banks.length > 1) {
+          return yield* Effect.fail(
+            new Error(
+              `Multiple linked banks were found: ${banks.map(({ name, country }) => `${name} (${country})`).join(", ")}. This connection flow supports one bank per session`,
+            ),
+          );
+        }
+        return banks[0];
+      }.bind(this),
+    );
+  }
+
 
   private ensureStoresAvailable(): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
@@ -417,7 +536,7 @@ export class ApplicationSetupFlow {
                   appId: created.appId,
                   dashboardUrl: APPLICATIONS_URL,
                   message:
-                    "Application registered; activate it in the dashboard, then use connect_bank to continue the separate bank-session flow.",
+                    "Application ready; activate it in the dashboard, then use connect_bank to continue the separate bank-session flow.",
                 });
               } else {
                 this.update({
@@ -425,7 +544,7 @@ export class ApplicationSetupFlow {
                   pending: false,
                   appId: created.appId,
                   message:
-                    "Application registered; use connect_bank when ready to continue with bank authorization.",
+                    "Application ready; use connect_bank when ready to continue with bank authorization.",
                 });
               }
             }),
@@ -450,7 +569,9 @@ export class ApplicationSetupFlow {
     });
   }
 
-  private run(options: NormalizedSetupOptions): Effect.Effect<void, never> {
+  private run(
+    options: NormalizedSetupOptions | NormalizedGuidedSetupOptions,
+  ): Effect.Effect<void, never> {
     return Effect.gen(this, function* () {
       let application: StoredApplication | undefined;
       const workflow = Effect.gen(this, function* () {
@@ -482,7 +603,52 @@ export class ApplicationSetupFlow {
           yield* (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
           yield* waitForActivation(client, this.dependencies.sleep);
         }
-        const aspspName = yield* resolveAspspName(client, options);
+        let bank: { name: string; country: string };
+        if (options.aspspName && options.country) {
+          bank = {
+            name: yield* resolveAspspName(client, {
+              aspspName: options.aspspName,
+              country: options.country,
+              environment: options.environment,
+            }),
+            country: options.country,
+          };
+        } else {
+          bank = yield* this.findLinkedBank(
+            storedApplication.appId,
+            options.controlPanelEmail,
+          );
+        }
+        this.update({
+          phase: "consent_settings",
+          appId: storedApplication.appId,
+          message: `Detected ${bank.name} (${bank.country}); review consent settings`,
+        });
+        const consentSettings = this.dependencies.resolveConsentSettings
+          ? yield* this.dependencies.resolveConsentSettings({
+              accessProfile: options.accessProfile,
+              ...(options.validUntil
+                ? { validUntil: options.validUntil }
+                : {}),
+            })
+          : {
+              status: "accepted" as const,
+              settings: {
+                accessProfile: options.accessProfile,
+                ...(options.validUntil
+                  ? { validUntil: options.validUntil }
+                  : {}),
+              },
+            };
+        if (consentSettings.status !== "accepted") {
+          this.update({
+            phase: "failed",
+            pending: false,
+            appId: storedApplication.appId,
+            error: consentSettings.message,
+          });
+          return;
+        }
         this.update({
           phase: "bank_authorization",
           appId: storedApplication.appId,
@@ -491,11 +657,10 @@ export class ApplicationSetupFlow {
         const authorization = yield* this.dependencies.authorizationFlow.start(
           client,
           {
-            aspspName,
-            country: options.country,
+            aspspName: bank.name,
+            country: bank.country,
             redirectUrl: options.redirectUrl,
-            validUntil: options.validUntil,
-            accessProfile: options.accessProfile,
+            ...consentSettings.settings,
           },
         );
         this.update({
@@ -523,11 +688,14 @@ export class ApplicationSetupFlow {
         Effect.catchAllCause((cause) =>
           Effect.sync(() => {
             const error = Cause.squash(cause);
+            const message = error instanceof Error ? error.message : String(error);
             this.current = {
               phase: "failed",
               pending: false,
               ...(application?.appId ? { appId: application.appId } : {}),
-              error: error instanceof Error ? error.message : String(error),
+              error: message
+                .split(options.controlPanelEmail)
+                .join("[email redacted]"),
             };
           }),
         ),
@@ -539,8 +707,6 @@ export class ApplicationSetupFlow {
     options: NormalizedApplicationRegistrationOptions,
   ): Effect.Effect<StoredApplication, unknown> {
     return Effect.gen(this, function* () {
-      const keyMaterial = yield* (this.dependencies.generateKeyMaterial ??
-        generateKeyMaterial)();
       const existingAuth = yield* (this.dependencies.controlPanelAuthStore?.get() ??
         Effect.succeed(undefined));
       const controlPanelAuth = yield* this.dependencies.controlPanelAuth.authenticate(
@@ -551,6 +717,43 @@ export class ApplicationSetupFlow {
         yield* (this.dependencies.controlPanelAuthStore?.set(controlPanelAuth) ??
           Effect.void);
       }
+      const applications = yield* this.dependencies.controlPanelClient.listApplications(
+        controlPanelAuth,
+      );
+      const normalizedAppName = options.appName.toLocaleLowerCase("en-US");
+      const matches = applications.filter(
+        ({ name }) => name.toLocaleLowerCase("en-US") === normalizedAppName,
+      );
+      const restorable: StoredApplication[] = [];
+      for (const match of matches) {
+        if (!match.certificate) continue;
+        const privateKey = yield* (
+          this.dependencies.loadExistingPrivateKey ??
+          loadExistingApplicationPrivateKey
+        )(match.appId).pipe(
+          Effect.map((value) =>
+            privateKeyMatchesCertificate(value, match.certificate!)
+              ? value
+              : undefined,
+          ),
+          Effect.catchAll(() => Effect.succeed(undefined)),
+        );
+        if (privateKey === undefined) continue;
+        restorable.push({
+          appId: match.appId,
+          privateKey,
+          certificate: match.certificate,
+          environment: match.environment ?? options.environment,
+          redirectUrls: match.redirectUrls ?? [options.redirectUrl],
+        });
+      }
+      if (restorable.length === 1) {
+        const application = restorable[0];
+        yield* this.dependencies.applicationStore.set(application);
+        return application;
+      }
+      const keyMaterial = yield* (this.dependencies.generateKeyMaterial ??
+        generateKeyMaterial)();
       this.update({
         phase: "registering_application",
         message: "Registering the Enable Banking application",
@@ -576,6 +779,39 @@ export class ApplicationSetupFlow {
   }
 }
 
+function loadExistingApplicationPrivateKey(
+  appId: string,
+): Effect.Effect<string, unknown> {
+  const configuredPath =
+    process.env.ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE?.trim();
+  const keyPath =
+    configuredPath || join(homedir(), "Downloads", `${appId}.pem`);
+  return Effect.tryPromise({
+    try: () => readFile(keyPath, "utf8"),
+    catch: () =>
+      new Error("The matching application private key file could not be read"),
+  });
+}
+
+function privateKeyMatchesCertificate(
+  privateKey: string,
+  certificate: string,
+): boolean {
+  try {
+    const keyPublic = createPublicKey(createPrivateKey(privateKey)).export({
+      format: "der",
+      type: "spki",
+    });
+    const certificatePublic = new X509Certificate(certificate).publicKey.export({
+      format: "der",
+      type: "spki",
+    });
+    return Buffer.from(keyPublic).equals(Buffer.from(certificatePublic));
+  } catch {
+    return false;
+  }
+}
+
 function applicationStatus(
   application: StoredApplication,
   active?: boolean,
@@ -588,8 +824,8 @@ function applicationStatus(
     appId: application.appId,
     ...(activationRequired ? { dashboardUrl: APPLICATIONS_URL } : {}),
     message: activationRequired
-      ? "Application registered; Production dashboard account linking is required before bank authorization."
-      : "Application registered; use connect_bank to start bank authorization.",
+      ? "Production application activation is required before bank authorization."
+      : "Application ready; use connect_bank to start bank authorization.",
   };
 }
 
@@ -648,7 +884,8 @@ export function normalizeSetupOptions(
   const normalized = normalizeApplicationRegistrationOptions(options);
   const aspspName = options.aspspName.trim();
   const country = options.country.trim().toUpperCase();
-  const accessProfile = options.accessProfile ?? "balances";
+  const accessProfile =
+    options.accessProfile ?? "balances_and_transactions";
 
   if (!aspspName) throw new Error("aspsp_name is required");
   if (!/^[A-Z]{2}$/.test(country)) {
@@ -666,7 +903,41 @@ export function normalizeSetupOptions(
     aspspName,
     country,
     accessProfile,
-    validUntil: parseValidUntil(options.validUntil),
+    ...(options.validUntil !== undefined
+      ? { validUntil: parseValidUntil(options.validUntil) }
+      : {}),
+  };
+}
+export function normalizeGuidedSetupOptions(
+  options: GuidedSetupOptions,
+): NormalizedGuidedSetupOptions {
+  const normalized = normalizeApplicationRegistrationOptions(options);
+  const aspspName = options.aspspName?.trim();
+  const country = options.country?.trim().toUpperCase();
+  const accessProfile =
+    options.accessProfile ?? "balances_and_transactions";
+
+  if (Boolean(aspspName) !== Boolean(country)) {
+    throw new Error("aspsp_name and country must be provided together");
+  }
+  if (country && !/^[A-Z]{2}$/.test(country)) {
+    throw new Error("country must be a two-letter ISO 3166-1 code");
+  }
+  if (
+    accessProfile !== "balances" &&
+    accessProfile !== "balances_and_transactions"
+  ) {
+    throw new Error("access_profile is invalid");
+  }
+
+  return {
+    ...normalized,
+    ...(aspspName ? { aspspName } : {}),
+    ...(country ? { country } : {}),
+    accessProfile,
+    ...(options.validUntil !== undefined
+      ? { validUntil: parseValidUntil(options.validUntil) }
+      : {}),
   };
 }
 
@@ -705,7 +976,10 @@ function createRegistrationRequest(
 
 function resolveAspspName(
   client: EnableBankingClient,
-  options: NormalizedSetupOptions,
+  options: Pick<
+    NormalizedSetupOptions,
+    "aspspName" | "country" | "environment"
+  >,
 ): Effect.Effect<string, unknown> {
   return Effect.gen(function* () {
     const names = extractAspspNames(yield* client.listBanks(options.country));

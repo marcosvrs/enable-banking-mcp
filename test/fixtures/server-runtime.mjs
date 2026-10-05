@@ -42,6 +42,7 @@ let failFirstSessionCreate =
 let certificateDeleteAttempted = false;
 let delayApplicationRegistration =
   process.env.MCP_TEST_DELAY_REGISTRATION === "true";
+let applicationRegistered = false;
 
 function completedChild(stdout = "", stderr = "", code = 0, delay = 0) {
   const child = new EventEmitter();
@@ -132,10 +133,25 @@ globalThis.fetch = async (input, init = {}) => {
     });
   }
   if (url.hostname === "enablebanking.com" && url.pathname === "/api/applications") {
+    if (method === "GET") {
+      return Response.json(
+        applicationRegistered
+          ? [{
+              kid: "fixture-app-id",
+              name: "Enable Banking MCP",
+              certificate: "fixture-certificate",
+              environment: "PRODUCTION",
+              redirect_urls: ["https://localhost:8765/callback"],
+              whitelisted_accounts: [],
+            }]
+          : [],
+      );
+    }
     if (delayApplicationRegistration) {
       delayApplicationRegistration = false;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+    applicationRegistered = true;
     return Response.json({ app_id: "fixture-app-id" });
   }
 
@@ -147,7 +163,9 @@ globalThis.fetch = async (input, init = {}) => {
         kid: "fixture-app-id",
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
-        active: applicationRequests > 2,
+        active:
+          process.env.MCP_TEST_APPLICATION_NEVER_ACTIVE !== "true" &&
+          applicationRequests > 2,
         countries: ["IE"],
         services: ["AIS"],
       });
@@ -196,7 +214,7 @@ globalThis.fetch = async (input, init = {}) => {
         session_id: sessionId,
         status: "valid",
         aspsp: { name: "Fixture Bank", country: "IE" },
-        accounts: [{ uid: "fixture-account" }],
+        accounts: ["fixture-account"],
         accounts_data: [{ uid: "fixture-account", name: "Fixture account" }],
         access: { balances: true, transactions: true },
       });

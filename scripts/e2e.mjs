@@ -406,7 +406,7 @@ async function runMcpContract(artifactRoot) {
     );
     if (
       connectionTool?.description !==
-        "Read-only status of the personal AIS bank connection. Verifies a stored provider session and reports application activation or consent steps without opening a browser, starting consent, changing stored state, or returning account data" ||
+        "Read-only status of the personal AIS bank connection. A running guided flow is reported as onboarding_active with its phase and flow_id without querying provider session state. Otherwise verifies a stored provider session, reports pending or required onboarding steps, and gives the next action; never opens a browser, starts consent, changes stored state, or returns account data." ||
       connectionTool.annotations?.readOnlyHint !== true ||
       connectionTool.annotations?.destructiveHint !== false ||
       connectionTool.annotations?.idempotentHint !== true ||

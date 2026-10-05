@@ -7,6 +7,7 @@ import type { ApplicationStore } from "./application-store.js";
 import { EnableBankingClient } from "./enable-banking.js";
 import { resolveBankSelection } from "./bank-selection.js";
 import { elicitForm } from "./elicitation.js";
+import { resolveConsentSettings } from "./consent-settings.js";
 import { recoverConfiguredSession } from "./session-recovery.js";
 import type { SessionStore } from "./session-store.js";
 import {
@@ -16,6 +17,7 @@ import {
 } from "./setup.js";
 import type { ApplicationSetupFlow } from "./setup.js";
 
+import type { OnboardingPhase } from "./onboarding-state.js";
 type EnableBankingCredentials = { appId: string; privateKey: string };
 
 const APPLICATIONS_URL = "https://enablebanking.com/cp/applications";
@@ -24,12 +26,16 @@ export type ConnectBankOptions = {
   appName: string;
   environment: "PRODUCTION" | "SANDBOX";
   accessProfile: AccessProfile;
+  validUntil?: string;
 };
 
 export interface GuidedConnectionDependencies {
   applicationStore: Pick<ApplicationStore, "get">;
   sessionStore: Pick<SessionStore, "get" | "clear">;
-  setupFlow: Pick<ApplicationSetupFlow, "status" | "runToCompletion" | "waitForCompletion">;
+  setupFlow: Pick<
+    ApplicationSetupFlow,
+    "status" | "startGuided" | "findLinkedBank"
+  >;
   authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start">;
   assertNoEnvironmentCredentials(): void;
   getEnvironmentSessionId(): string | undefined;
@@ -38,14 +44,15 @@ export interface GuidedConnectionDependencies {
   resolveCredentials(): Effect.Effect<EnableBankingCredentials, unknown>;
   createBankClient(credentials: EnableBankingCredentials): EnableBankingClient;
   openBrowser(url: string): void;
+  setProgress?(phase: OnboardingPhase): void;
   mcpServer: McpServer["server"];
 }
-
 export function connectBank(
   options: ConnectBankOptions,
   dependencies: GuidedConnectionDependencies,
 ): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
+    yield* Effect.sync(() => dependencies.setProgress?.("checking_session"));
     const [storedSession, application] = yield* Effect.all([
       dependencies.sessionStore.get(),
       dependencies.applicationStore.get(),
@@ -55,10 +62,13 @@ export function connectBank(
       storedSession,
       environmentSessionId,
       read: () =>
-        Effect.map(dependencies.readAuthorizedBalances(), (accounts) => ({
-          status: "connected",
-          ...accounts,
-        })),
+        Effect.gen(function* () {
+          yield* Effect.sync(() => dependencies.setProgress?.("balance_retrieval"));
+          return {
+            status: "connected",
+            ...(yield* dependencies.readAuthorizedBalances()),
+          };
+        }),
       clearStoredSession: () => dependencies.sessionStore.clear(),
       clearEnvironmentSession: () =>
         dependencies.clearEnvironmentSession(environmentSessionId),
@@ -66,71 +76,58 @@ export function connectBank(
     if (connected) return connected;
 
     if (dependencies.setupFlow.status.pending) {
-      const status = yield* dependencies.setupFlow.waitForCompletion();
-      if (status.phase === "complete") {
-        return {
-          status: "connected",
-          ...(yield* dependencies.readAuthorizedBalances()),
-        };
-      }
+      const status = dependencies.setupFlow.status;
+      yield* Effect.sync(() =>
+        dependencies.setProgress?.(
+          status.phase === "idle" ? "setup" : status.phase,
+        ),
+      );
       return {
-        status: status.phase === "failed" ? "failed" : "awaiting_user",
+        status: "awaiting_user",
         phase: status.phase,
         ...(status.message ? { message: status.message } : {}),
-        ...(status.error ? { error: status.error } : {}),
       };
     }
     if (dependencies.authorizationFlow.status.pending) {
-      while (dependencies.authorizationFlow.status.pending) {
-        yield* Effect.sleep(250);
-      }
-      const error = dependencies.authorizationFlow.status.lastError;
-      if (error) {
-        return { status: "failed", phase: "bank_authorization", error };
-      }
+      yield* Effect.sync(() =>
+        dependencies.setProgress?.("bank_authorization"),
+      );
       return {
-        status: "connected",
-        ...(yield* dependencies.readAuthorizedBalances()),
+        status: "awaiting_user",
+        phase: "bank_authorization",
+        message: "Complete the bank authorization in the opened browser.",
       };
     }
     if (!application) dependencies.assertNoEnvironmentCredentials();
 
-
+    const includeBankInput =
+      (application?.environment ?? options.environment) === "SANDBOX";
+    yield* Effect.sync(() => dependencies.setProgress?.("collecting_input"));
     const input = yield* collectConnectionInput(
       dependencies.mcpServer,
       !application,
+      includeBankInput,
     );
     if (input.status !== "accepted") return input.result;
 
     if (!application) {
+      yield* Effect.sync(() => dependencies.setProgress?.("application_setup"));
       const setupOptions = {
         controlPanelEmail: input.email,
         appName: options.appName,
         environment: options.environment,
         redirectUrl: DEFAULT_REDIRECT_URL,
-        aspspName: input.aspspName,
-        country: input.country,
+        ...(input.aspspName ? { aspspName: input.aspspName } : {}),
+        ...(input.country ? { country: input.country } : {}),
         description: DEFAULT_PRODUCTION_DESCRIPTION,
         privacyUrl: DEFAULT_PRODUCTION_PRIVACY_URL,
         termsUrl: DEFAULT_PRODUCTION_TERMS_URL,
         accessProfile: options.accessProfile,
+        ...(options.validUntil ? { validUntil: options.validUntil } : {}),
       };
-      const status = yield* dependencies.setupFlow
-        .runToCompletion(setupOptions)
+      const started = yield* dependencies.setupFlow
+        .startGuided(setupOptions)
         .pipe(
-          Effect.map((value) => ({
-            ...value,
-            ...(value.message
-              ? {
-                  message: value.message
-                    .split(input.email)
-                    .join("[email redacted]"),
-                }
-              : {}),
-            ...(value.error
-              ? { error: value.error.split(input.email).join("[email redacted]") }
-              : {}),
-          })),
           Effect.catchAll((error) =>
             Effect.fail(
               new Error(
@@ -141,91 +138,110 @@ export function connectBank(
             ),
           ),
         );
-      if (status.phase === "complete") {
-        return {
-          status: "connected",
-          ...(yield* dependencies.readAuthorizedBalances().pipe(
-            Effect.catchAll((error) =>
-              Effect.fail(
-                new Error(
-                  (error instanceof Error ? error.message : String(error))
-                    .split(input.email)
-                    .join("[email redacted]"),
-                ),
-              ),
-            ),
-          )),
-        };
-      }
       return {
-        status: status.phase === "failed" ? "failed" : "awaiting_user",
-        phase: status.phase,
-        ...(status.message ? { message: status.message } : {}),
-        ...(status.error ? { error: status.error } : {}),
-        ...(status.dashboardUrl ? { dashboard_url: status.dashboardUrl } : {}),
+        status: "awaiting_user",
+        phase: started.phase,
+        message: started.message,
       };
     }
 
+    yield* Effect.sync(() => dependencies.setProgress?.("application_check"));
     const credentials = yield* dependencies.resolveCredentials();
     const client = dependencies.createBankClient(credentials);
     let applicationInfo = yield* client.getApplication();
     if (application.environment === "PRODUCTION" && !applicationInfo.active) {
+      yield* Effect.sync(() => dependencies.setProgress?.("account_activation"));
       dependencies.openBrowser(APPLICATIONS_URL);
-      while (!applicationInfo.active) {
-        yield* Effect.sleep(5_000);
-        applicationInfo = yield* client.getApplication();
+      return {
+        status: "awaiting_user",
+        phase: "account_activation",
+        message:
+          "Link an account to activate the Production application, then call connect_bank again to resume.",
+      };
+    }
+
+    let bank: { name: string; country: string };
+    if (application.environment === "PRODUCTION") {
+      yield* Effect.sync(() => dependencies.setProgress?.("bank_discovery"));
+      const linked = yield* dependencies.setupFlow
+        .findLinkedBank(application.appId)
+        .pipe(
+          Effect.map((value) => ({ bank: value })),
+          Effect.catchAll((error) =>
+            Effect.succeed({
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          ),
+        );
+      if ("error" in linked) {
+        return {
+          status: "failed",
+          phase: "bank_selection",
+          error: linked.error,
+        };
       }
+      bank = linked.bank;
+    } else {
+      yield* Effect.sync(() => dependencies.setProgress?.("bank_selection"));
+      const selection = yield* resolveBankSelection({
+        client,
+        mcpServer: dependencies.mcpServer,
+        applicationCountries: applicationInfo.countries,
+        country: input.country,
+        aspspName: input.aspspName,
+      });
+      if (selection.status !== "selected") {
+        return {
+          status: "failed",
+          phase: "bank_selection",
+          message: selection.message,
+        };
+      }
+      bank = selection.bank;
     }
 
-    const selection = yield* resolveBankSelection({
-      client,
-      mcpServer: dependencies.mcpServer,
-      applicationCountries: applicationInfo.countries,
-      country: input.country,
-      aspspName: input.aspspName,
-    });
-    if (selection.status !== "selected") {
+    const consentSettings = yield* resolveConsentSettings(
+      dependencies.mcpServer,
+      {
+        accessProfile: options.accessProfile,
+        ...(options.validUntil ? { validUntil: options.validUntil } : {}),
+      },
+    );
+    if (consentSettings.status !== "accepted") {
       return {
-        status: "failed",
-        phase: "bank_selection",
-        message: selection.message,
+        status: consentSettings.status,
+        phase: "consent_settings",
+        message: consentSettings.message,
       };
     }
-
-    const authorization = yield* dependencies.authorizationFlow.start(client, {
-      aspspName: selection.bank.name,
-      country: selection.country,
+    yield* Effect.sync(() => dependencies.setProgress?.("bank_authorization"));
+    yield* dependencies.authorizationFlow.start(client, {
+      aspspName: bank.name,
+      country: bank.country,
       redirectUrl: application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
-      accessProfile: options.accessProfile,
+      ...consentSettings.settings,
     });
-    while (dependencies.authorizationFlow.status.pending) {
-      yield* Effect.sleep(250);
-    }
-    const authorizationError = dependencies.authorizationFlow.status.lastError;
-    if (authorizationError) {
-      return {
-        status: "failed",
-        phase: "bank_authorization",
-        error: authorizationError,
-      };
-    }
     return {
-      status: "connected",
-      authorization_url: authorization.authorization_url,
-      ...(yield* dependencies.readAuthorizedBalances()),
+      status: "awaiting_user",
+      phase: "bank_authorization",
+      message:
+        "Complete the bank authorization in the opened browser. After connection_status reports connected, call connect_bank to fetch balances.",
     };
   });
 }
 
+
+
 function collectConnectionInput(
   mcpServer: McpServer["server"],
   includeEmail: boolean,
+  includeBank: boolean,
 ): Effect.Effect<
   | {
       status: "accepted";
       email: string;
-      country: string;
-      aspspName: string;
+      country?: string;
+      aspspName?: string;
     }
   | {
       status: "declined" | "unsupported" | "invalid";
@@ -233,6 +249,9 @@ function collectConnectionInput(
     },
   unknown
 > {
+  if (!includeEmail && !includeBank) {
+    return Effect.succeed({ status: "accepted", email: "" });
+  }
   const properties = {
     ...(includeEmail
       ? {
@@ -243,31 +262,36 @@ function collectConnectionInput(
           },
         }
       : {}),
-    country: {
-      type: "string" as const,
-      title: "Bank country",
-      description: "Two-letter ISO 3166-1 country code",
-      minLength: 2,
-      maxLength: 2,
-    },
-    bank: {
-      type: "string" as const,
-      title: "Bank",
-      description: "Exact bank name",
-      minLength: 1,
-    },
+    ...(includeBank
+      ? {
+          country: {
+            type: "string" as const,
+            title: "Bank country",
+            description: "Two-letter ISO 3166-1 country code",
+            minLength: 2,
+            maxLength: 2,
+          },
+          bank: {
+            type: "string" as const,
+            title: "Bank",
+            description: "Exact bank name",
+            minLength: 1,
+          },
+        }
+      : {}),
   };
   const required = [
     ...(includeEmail ? ["control_panel_email"] : []),
-    "country",
-    "bank",
+    ...(includeBank ? ["country", "bank"] : []),
   ];
   return Effect.gen(function* () {
     const elicited = yield* elicitForm(
       mcpServer,
       includeEmail
-        ? "To connect your personal bank account, enter your Enable Banking Control Panel email, the bank country, and the bank."
-        : "Enter the bank country and bank for this Enable Banking application.",
+        ? includeBank
+          ? "Enter the Control Panel email and bank for Sandbox onboarding."
+          : "Enter the Control Panel email. Production bank detection uses the account linked in the Enable Banking dashboard."
+        : "Enter the bank country and bank for this Sandbox application.",
       properties,
       required,
     );
@@ -279,21 +303,22 @@ function collectConnectionInput(
           phase: "input",
           message:
             elicited.status === "unsupported"
-              ? "This MCP client does not support form elicitation. connect_bank requires the client to provide an MCP-owned form; no setup was started."
+              ? "This MCP client does not support form elicitation. connect_bank requires an MCP-owned form; no setup was started."
               : elicited.status === "declined"
                 ? "Connection setup was cancelled; no provider authorization was started."
                 : "The MCP client returned incomplete form data; no setup was started.",
         },
       } as const;
     }
-    const country = elicited.value.country.trim().toUpperCase();
-    const bank = elicited.value.bank.trim();
+    const country = includeBank
+      ? elicited.value.country?.trim().toUpperCase() ?? ""
+      : undefined;
+    const bank = includeBank ? elicited.value.bank?.trim() ?? "" : undefined;
     const email = includeEmail
       ? elicited.value.control_panel_email?.trim() ?? ""
       : "";
     if (
-      !/^[A-Z]{2}$/.test(country) ||
-      !bank ||
+      (includeBank && (!country || !/^[A-Z]{2}$/.test(country) || !bank)) ||
       (includeEmail && !/^[^\s@]+@[^\s@]+$/.test(email))
     ) {
       return {
@@ -301,16 +326,17 @@ function collectConnectionInput(
         result: {
           status: "failed",
           phase: "input",
-          message:
-            "The form must contain a valid email (for first-time setup), a two-letter country code, and a bank name.",
+          message: includeBank
+            ? "The form must contain a valid email when requested, a two-letter country code, and a bank name."
+            : "The form must contain a valid Control Panel email.",
         },
       } as const;
     }
     return {
       status: "accepted",
       email,
-      country,
-      aspspName: bank,
+      ...(country ? { country } : {}),
+      ...(bank ? { aspspName: bank } : {}),
     } as const;
   });
 }

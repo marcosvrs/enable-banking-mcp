@@ -155,7 +155,7 @@ test("opens browser authorization and stores the callback session", async () => 
   assert.equal(flow.status.pending, false);
 });
 
-test("requests balances without transactions by default", async () => {
+test("requests balances and transaction history by default", async () => {
   const store = new MemorySessionStore();
   const completion = Promise.withResolvers();
   let authorizationRequest;
@@ -194,7 +194,7 @@ test("requests balances without transactions by default", async () => {
   }));
 
   assert.equal(authorizationRequest.access.balances, true);
-  assert.equal(authorizationRequest.access.transactions, false);
+  assert.equal(authorizationRequest.access.transactions, true);
   completion.resolve("callback-code");
   assert.equal(await waitForSession(store), "stored-session-id");
 });

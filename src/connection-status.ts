@@ -5,6 +5,7 @@ import {
   isTerminalSessionError,
   type EnableBankingClient,
 } from "./enable-banking.js";
+import type { OnboardingSnapshot } from "./onboarding-state.js";
 import type { ControlPanelAuth } from "./control-panel.js";
 
 export type ConnectionState =
@@ -12,6 +13,7 @@ export type ConnectionState =
   | "setup_required"
   | "application_activation_required"
   | "bank_authorization_required"
+  | "onboarding_active"
   | "awaiting_user"
   | "status_unavailable";
 
@@ -22,6 +24,8 @@ export interface ConnectionStatus {
   control_panel_session: "not_stored" | "stored" | "expired";
   application_environment?: ApplicationEnvironment;
   phase?: string;
+  flow_id?: string;
+  onboarding_status?: OnboardingSnapshot["status"];
   next_action: string;
 }
 
@@ -32,6 +36,8 @@ export interface ConnectionStatusInput {
   controlPanelAuth?: Pick<ControlPanelAuth, "expiresAt">;
   configuredEnvironment?: ApplicationEnvironment;
   pendingPhase?: string;
+  pendingAction?: string;
+  onboarding?: OnboardingSnapshot;
   now?: number;
 }
 
@@ -39,16 +45,39 @@ export function inspectConnectionStatus(
   input: ConnectionStatusInput,
 ): Effect.Effect<ConnectionStatus, unknown> {
   return Effect.gen(function* () {
-  const controlPanelSession = !input.controlPanelAuth
-    ? "not_stored"
-    : input.controlPanelAuth.expiresAt !== undefined &&
-        input.controlPanelAuth.expiresAt <= (input.now ?? Date.now())
-      ? "expired"
-      : "stored";
-  let bankSession: ConnectionStatus["bank_session"] =
-    input.sessionIds.length > 0 ? "unknown" : "missing";
+    const controlPanelSession = !input.controlPanelAuth
+      ? "not_stored"
+      : input.controlPanelAuth.expiresAt !== undefined &&
+          input.controlPanelAuth.expiresAt <= (input.now ?? Date.now())
+        ? "expired"
+        : "stored";
+    let bankSession: ConnectionStatus["bank_session"] =
+      input.sessionIds.length > 0 ? "unknown" : "missing";
 
-  if (input.sessionIds.length > 0) {
+    if (input.onboarding?.status === "running") {
+      return {
+        connection: "onboarding_active",
+        application:
+          input.configuration === "configured"
+            ? "configured"
+            : input.configuration === "missing"
+              ? "not_configured"
+              : "unknown",
+        bank_session: bankSession,
+        control_panel_session: controlPanelSession,
+        ...(input.configuredEnvironment
+          ? { application_environment: input.configuredEnvironment }
+          : {}),
+        flow_id: input.onboarding.flow_id,
+        onboarding_status: input.onboarding.status,
+        phase: input.onboarding.phase,
+        next_action:
+          input.pendingAction ??
+          "Guided onboarding is active; check connection_status for progress.",
+      };
+    }
+
+    if (input.sessionIds.length > 0) {
     if (!input.client) {
       return unavailable(input, controlPanelSession, "unknown");
     }
@@ -73,7 +102,8 @@ export function inspectConnectionStatus(
           ...(input.configuredEnvironment
             ? { application_environment: input.configuredEnvironment }
             : {}),
-          next_action: "No action required; the provider accepts the stored bank session.",
+          next_action:
+            "No action required; use connect_bank or account-specific tools to retrieve balances.",
         };
       } else if (!isTerminalSessionError(sessionResult.left)) {
         return unavailable(input, controlPanelSession, "unknown");
@@ -98,8 +128,16 @@ export function inspectConnectionStatus(
       ...(input.configuredEnvironment
         ? { application_environment: input.configuredEnvironment }
         : {}),
+      ...(input.onboarding
+        ? {
+            flow_id: input.onboarding.flow_id,
+            onboarding_status: input.onboarding.status,
+          }
+        : {}),
       phase: input.pendingPhase,
-      next_action: "The active connect_bank request monitors this provider step and continues automatically. Complete any required interaction in the opened browser; do not rerun a tool.",
+      next_action:
+        input.pendingAction ??
+        "An onboarding request is active. Complete the required browser step and check connection_status before resuming.",
     };
   }
 
@@ -144,7 +182,7 @@ export function inspectConnectionStatus(
       control_panel_session: controlPanelSession,
       ...environmentField,
       next_action:
-        "Complete Production activation by linking an account in the Enable Banking dashboard. The active connect_bank request continues automatically when activation is detected.",
+        "Link an account to the stored Production application in the Enable Banking dashboard, then call connect_bank to continue. No new application is needed.",
     };
   }
 
@@ -156,7 +194,9 @@ export function inspectConnectionStatus(
       control_panel_session: controlPanelSession,
       ...environmentField,
       next_action:
-        "Run connect_bank; it collects the bank country and bank together through MCP form elicitation.",
+        environment === "PRODUCTION"
+          ? "Run connect_bank; it detects the linked bank from the application's Control Panel account links."
+          : "Run connect_bank; Sandbox connections require the bank country and name.",
     };
   }
 
@@ -166,8 +206,21 @@ export function inspectConnectionStatus(
     bank_session: bankSession,
     control_panel_session: controlPanelSession,
     ...environmentField,
-    next_action:
-      "Run connect_bank; it collects the bank country and bank together through MCP form elicitation.",
+    ...(input.onboarding?.status === "failed"
+      ? {
+          flow_id: input.onboarding.flow_id,
+          onboarding_status: input.onboarding.status,
+          phase: input.onboarding.phase,
+          next_action:
+            input.pendingAction ??
+            "The previous onboarding flow failed; call connect_bank to retry from stored state.",
+        }
+      : {
+          next_action:
+            environment === "PRODUCTION"
+              ? "Run connect_bank; it detects the linked bank from the application's Control Panel account links."
+              : "Run connect_bank; Sandbox connections require the bank country and name.",
+        }),
   };
   });
 }

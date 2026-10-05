@@ -38,36 +38,48 @@ async function runConnection({
   response,
   applicationInfo = { active: true, countries: ["FI"] },
   banksByCountry = { FI: [{ name: "Example Bank", country: "FI" }] },
-  setupResult = { phase: "complete", pending: false },
   setupPending = false,
+  setupStartError,
   authorizationPending = false,
+  accessProfile = "balances_and_transactions",
+  validUntil,
 } = {}) {
   const mcpServer = new McpServer({ name: "guided-connection-test", version: "1.0.0" });
   const state = {
     applicationStore: memoryStore(storedApplication),
     sessionStore: memoryStore(sessionId),
     setupOptions: [],
-    setupWaits: 0,
     authorizationCalls: [],
     balanceReads: 0,
     browserUrls: [],
     elicitationRequests: [],
+    linkedBankLookups: 0,
     authorizationPending,
+    progress: [],
   };
   const dependencies = {
     applicationStore: state.applicationStore,
     sessionStore: state.sessionStore,
     setupFlow: {
       get status() {
-        return { phase: setupPending ? "bank_authorization" : "idle", pending: setupPending };
+        return {
+          phase: setupPending ? "bank_authorization" : "idle",
+          pending: setupPending,
+        };
       },
-      runToCompletion(options) {
+      startGuided(options) {
         state.setupOptions.push(options);
-        return Effect.succeed(setupResult);
+        return setupStartError
+          ? Effect.fail(setupStartError)
+          : Effect.succeed({
+              status: "started",
+              phase: "control_panel_auth",
+              message: "Enable Banking onboarding started",
+            });
       },
-      waitForCompletion() {
-        state.setupWaits += 1;
-        return Effect.succeed(setupResult);
+      findLinkedBank() {
+        state.linkedBankLookups += 1;
+        return Effect.succeed({ name: "Example Bank", country: "FI" });
       },
     },
     authorizationFlow: {
@@ -76,12 +88,10 @@ async function runConnection({
       },
       start(_client, options) {
         state.authorizationCalls.push(options);
-        return Effect.sync(() => {
-          state.authorizationPending = false;
-          return {
-            status: "awaiting_user",
-            authorization_url: "https://bank.example/authorize",
-          };
+        state.authorizationPending = true;
+        return Effect.succeed({
+          status: "awaiting_user",
+          authorization_url: "https://bank.example/authorize",
         });
       },
     },
@@ -115,6 +125,9 @@ async function runConnection({
     openBrowser(url) {
       state.browserUrls.push(url);
     },
+    setProgress(phase) {
+      state.progress.push(phase);
+    },
     mcpServer: mcpServer.server,
   };
 
@@ -123,7 +136,8 @@ async function runConnection({
     result = await Effect.runPromise(connectBankEffect({
       appName: "Enable Banking MCP",
       environment: "PRODUCTION",
-      accessProfile: "balances",
+      accessProfile,
+      ...(validUntil ? { validUntil } : {}),
     }, dependencies));
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   });
@@ -131,10 +145,16 @@ async function runConnection({
     { name: "guided-connection-test-client", version: "1.0.0" },
     { capabilities },
   );
+  let elicitationResponseIndex = 0;
   if (response) {
     client.setRequestHandler(ElicitRequestSchema, async ({ params }) => {
       state.elicitationRequests.push(params);
-      return response;
+      const selectedResponse = Array.isArray(response)
+        ? response[elicitationResponseIndex++]
+        : response;
+      return typeof selectedResponse === "function"
+        ? selectedResponse(params)
+        : selectedResponse;
     });
   }
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -149,15 +169,11 @@ async function runConnection({
   }
 }
 
-test("first-run connect asks for email, country, and bank once, then returns balances", async () => {
+test("first-run Production connect starts background onboarding after eliciting email", async () => {
   const { result, state, toolResponse } = await runConnection({
     response: {
       action: "accept",
-      content: {
-        control_panel_email: "person@example.com",
-        country: "ie",
-        bank: "Example Bank",
-      },
+      content: { control_panel_email: "person@example.com" },
     },
     capabilities: { elicitation: { form: {} } },
   });
@@ -165,7 +181,7 @@ test("first-run connect asks for email, country, and bank once, then returns bal
   assert.equal(state.elicitationRequests.length, 1);
   assert.deepEqual(
     state.elicitationRequests[0].requestedSchema.required,
-    ["control_panel_email", "country", "bank"],
+    ["control_panel_email"],
   );
   assert.equal(
     state.elicitationRequests[0].requestedSchema.properties.control_panel_email.format,
@@ -176,17 +192,14 @@ test("first-run connect asks for email, country, and bank once, then returns bal
     appName: "Enable Banking MCP",
     environment: "PRODUCTION",
     redirectUrl: "https://localhost:8765/callback",
-    aspspName: "Example Bank",
-    country: "IE",
     description: "Read-only personal account-information access",
     privacyUrl: "https://marcosvrs.github.io/enable-banking-mcp/privacy-policy/",
     termsUrl: "https://marcosvrs.github.io/enable-banking-mcp/terms-of-use/",
-    accessProfile: "balances",
+    accessProfile: "balances_and_transactions",
   });
-  assert.equal(result.status, "connected");
-  assert.deepEqual(result.balances, [
-    { account_id: "account-1", balances: [{ amount: "42.00" }] },
-  ]);
+  assert.equal(result.status, "awaiting_user");
+  assert.equal(result.phase, "control_panel_auth");
+  assert.equal(state.balanceReads, 0);
   assert.doesNotMatch(JSON.stringify(toolResponse), /person@example\.com/);
 });
 
@@ -218,57 +231,139 @@ test("an existing session returns balances without eliciting setup details", asy
   assert.equal(state.elicitationRequests.length, 0);
 });
 
-test("an existing application asks country and bank together and completes authorization", async () => {
+test("existing Sandbox application asks country, bank, and consent settings", async () => {
   const { result, state } = await runConnection({
     storedApplication: application(),
     capabilities: { elicitation: { form: {} } },
-    response: {
-      action: "accept",
-      content: { country: "FI", bank: "Example Bank" },
-    },
+    response: [
+      {
+        action: "accept",
+        content: { country: "FI", bank: "Example Bank" },
+      },
+      {
+        action: "accept",
+        content: { access_profile: "balances_and_transactions" },
+      },
+    ],
   });
 
   assert.deepEqual(
     state.elicitationRequests[0].requestedSchema.required,
     ["country", "bank"],
   );
+  assert.deepEqual(
+    state.elicitationRequests[1].requestedSchema.properties.access_profile.enum,
+    ["balances_and_transactions", "balances"],
+  );
+  assert.deepEqual(state.authorizationCalls[0], {
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+    accessProfile: "balances_and_transactions",
+  });
+  assert.equal(result.status, "awaiting_user");
+  assert.equal(result.phase, "bank_authorization");
+  assert.equal(state.balanceReads, 0);
+});
+
+test("existing Production onboarding falls back to default consent without form support", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application("PRODUCTION"),
+  });
+
+  assert.equal(state.elicitationRequests.length, 0);
+  assert.equal(state.linkedBankLookups, 1);
+  assert.deepEqual(state.authorizationCalls[0], {
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+    accessProfile: "balances_and_transactions",
+  });
+  assert.equal(result.status, "awaiting_user");
+  assert.equal(result.phase, "bank_authorization");
+  assert.equal(state.balanceReads, 0);
+});
+test("lets the user change transaction scope and consent expiry before bank auth", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application("PRODUCTION"),
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: {
+        access_profile: "balances",
+        valid_until: "2099-12-01T00:00:00Z",
+      },
+    },
+  });
+
+  const form = state.elicitationRequests[0];
+  assert.equal(
+    form.requestedSchema.properties.access_profile.default,
+    "balances_and_transactions",
+  );
+  assert.deepEqual(
+    form.requestedSchema.properties.access_profile.enum,
+    ["balances_and_transactions", "balances"],
+  );
+  assert.equal(form.requestedSchema.properties.valid_until.format, "date-time");
+  assert.deepEqual(form.requestedSchema.required, ["access_profile"]);
   assert.deepEqual(state.authorizationCalls[0], {
     aspspName: "Example Bank",
     country: "FI",
     redirectUrl: "https://localhost:8765/callback",
     accessProfile: "balances",
+    validUntil: "2099-12-01T00:00:00Z",
   });
-  assert.equal(result.status, "connected");
-  assert.equal(state.balanceReads, 1);
+  assert.equal(result.status, "awaiting_user");
+});
+test("declining consent settings stops before bank authorization", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application("PRODUCTION"),
+    capabilities: { elicitation: { form: {} } },
+    response: { action: "decline" },
+  });
+
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.phase, "consent_settings");
+  assert.equal(state.authorizationCalls.length, 0);
 });
 
-test("connect waits for a running setup and returns its balances without another form", async () => {
+test("stored inactive Production app opens dashboard and returns an activation wait", async () => {
+  const applicationInfo = { active: false, countries: ["FI"] };
+  const { result, state } = await runConnection({
+    storedApplication: application("PRODUCTION"),
+    applicationInfo,
+    capabilities: { elicitation: { form: {} } },
+  });
+
+  assert.equal(state.elicitationRequests.length, 0);
+  assert.deepEqual(state.browserUrls, ["https://enablebanking.com/cp/applications"]);
+  assert.equal(state.linkedBankLookups, 0);
+  assert.equal(result.status, "awaiting_user");
+  assert.equal(result.phase, "account_activation");
+  assert.ok(state.progress.includes("account_activation"));
+  assert.equal(state.progress.at(-1), "account_activation");
+});
+
+test("connect returns the active setup phase without waiting for completion", async () => {
   const { result, state } = await runConnection({ setupPending: true });
-  assert.equal(state.setupWaits, 1);
   assert.equal(state.setupOptions.length, 0);
   assert.equal(state.elicitationRequests.length, 0);
-  assert.equal(result.status, "connected");
-  assert.equal(state.balanceReads, 1);
+  assert.equal(result.status, "awaiting_user");
+  assert.equal(result.phase, "bank_authorization");
+  assert.equal(state.balanceReads, 0);
 });
-test("redacts elicited email from setup failures", async () => {
-  const { result, toolResponse } = await runConnection({
+test("redacts elicited email from setup start failures", async () => {
+  const { toolResponse } = await runConnection({
     capabilities: { elicitation: { form: {} } },
     response: {
       action: "accept",
-      content: {
-        control_panel_email: "person@example.com",
-        country: "IE",
-        bank: "Example Bank",
-      },
+      content: { control_panel_email: "person@example.com" },
     },
-    setupResult: {
-      phase: "failed",
-      pending: false,
-      error: "Provider rejected person@example.com",
-    },
+    setupStartError: new Error("Provider rejected person@example.com"),
   });
 
-  assert.equal(result.status, "failed");
-  assert.equal(result.error, "Provider rejected [email redacted]");
+  assert.equal(toolResponse.isError, true);
+  assert.match(JSON.stringify(toolResponse), /\[email redacted\]/);
   assert.doesNotMatch(JSON.stringify(toolResponse), /person@example\.com/);
 });

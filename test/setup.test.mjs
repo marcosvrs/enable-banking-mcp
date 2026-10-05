@@ -7,6 +7,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { connect } from "node:net";
 import test from "node:test";
 import { PassThrough } from "node:stream";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   MacKeychainControlPanelAuthStore,
 } from "../dist/control-panel-store.js";
@@ -200,6 +203,123 @@ test("uses the documented Control Panel registration requests", async () => {
   });
   assert.equal(calls[2].options.headers.Authorization, "Bearer id-token");
 });
+test("returns only unique linked-bank names from the matching Control Panel application", async () => {
+  const calls = [];
+  const client = new ControlPanelClient(async (url, options) => {
+    calls.push({ url: String(url), options });
+    return new Response(
+      JSON.stringify([
+        {
+          kid: "other-app",
+          whitelisted_accounts: [
+            { aspsp: { name: "Unrelated Bank", country: "FI" } },
+          ],
+        },
+        {
+          kid: "app-id",
+          certificate: "private-certificate-marker",
+          whitelisted_accounts: [
+            {
+              aspsp: { name: "Sample Bank", country: "ie" },
+              account_number: "private-account-marker",
+            },
+            { aspsp: { name: "sample bank", country: "IE" } },
+            { aspsp: { name: "Second Bank", country: "FI" } },
+          ],
+        },
+      ]),
+      { status: 200 },
+    );
+  });
+
+  const banks = await Effect.runPromise(
+    client.getLinkedBanks(
+      { email: "person@example.com", idToken: "fake-id-token", refreshToken: "fake-refresh-token" },
+      "app-id",
+    ),
+  );
+
+  assert.deepEqual(banks, [
+    { name: "Sample Bank", country: "IE" },
+    { name: "Second Bank", country: "FI" },
+  ]);
+  assert.equal(new URL(calls[0].url).pathname, "/api/applications");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer fake-id-token");
+  assert.doesNotMatch(JSON.stringify(banks), /private-(?:certificate|account)-marker/);
+});
+
+test("fails when the stored application is absent from the Control Panel list", async () => {
+  const client = new ControlPanelClient(async () =>
+    new Response(JSON.stringify([{ kid: "another-app", whitelisted_accounts: [] }]), {
+      status: 200,
+    }),
+  );
+
+  await assert.rejects(
+    Effect.runPromise(
+      client.getLinkedBanks(
+        { email: "person@example.com", idToken: "fake-id-token", refreshToken: "fake-refresh-token" },
+        "missing-app",
+      ),
+    ),
+    /could not find the stored application/,
+  );
+});
+
+test("lists existing Control Panel application details for safe reuse", async () => {
+  const calls = [];
+  const client = new ControlPanelClient(async (url, options) => {
+    calls.push({ url: String(url), options });
+    return new Response(
+      JSON.stringify([{
+        kid: "existing-app-id",
+        name: "Existing App",
+        certificate: "public-certificate",
+        environment: "production",
+        redirect_urls: ["https://localhost:8765/callback"],
+      }]),
+      { status: 200 },
+    );
+  });
+
+  const applications = await Effect.runPromise(
+    client.listApplications({
+      email: "person@example.com",
+      idToken: "fake-id-token",
+      refreshToken: "fake-refresh-token",
+    }),
+  );
+
+  assert.deepEqual(applications, [{
+    appId: "existing-app-id",
+    name: "Existing App",
+    certificate: "public-certificate",
+    environment: "PRODUCTION",
+    redirectUrls: ["https://localhost:8765/callback"],
+  }]);
+  assert.equal(new URL(calls[0].url).pathname, "/api/applications");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer fake-id-token");
+});
+
+test("fails closed when Control Panel application names cannot be inspected", async () => {
+  const client = new ControlPanelClient(async () =>
+    new Response(JSON.stringify([{ kid: "app-id" }]), { status: 200 }),
+  );
+
+  await assert.rejects(
+    Effect.runPromise(
+      client.listApplications({
+        email: "person@example.com",
+        idToken: "fake-id-token",
+        refreshToken: "fake-refresh-token",
+      }),
+    ),
+    /invalid application list/,
+  );
+});
+
 
 test("reuses a matching unexpired Control Panel session without sending email", async () => {
   const existingAuth = {
@@ -584,6 +704,7 @@ test("completes a sandbox setup without shelling to another application", async 
         { status: 200 },
       );
     }
+    if (options.method === "GET") return Response.json([]);
     return new Response(JSON.stringify({ app_id: "new-app-id" }), { status: 200 });
   });
   const controlPanelAuth = new ControlPanelAuthFlow(
@@ -695,7 +816,9 @@ test("completes a sandbox setup without shelling to another application", async 
   });
   assert.equal(trustCalls, 1);
   assert.deepEqual(openedUrls, ["https://bank.example/authorize"]);
-  assert.equal(controlPanelCalls.length, 3);
+  assert.equal(controlPanelCalls.length, 4);
+  assert.equal(controlPanelCalls[2].options.method, "GET");
+  assert.equal(controlPanelCalls[3].options.method, "POST");
   assert.equal(bankCalls.length, 3);
   assert.ok(bankCalls[0].url.includes("/aspsps?"));
   await Effect.runPromise(applicationStore.clear());
@@ -714,10 +837,14 @@ test("registers an application before bank details are provided", async () => {
   const controlPanelCalls = [];
   const controlPanelClient = new ControlPanelClient(async (url, options) => {
     controlPanelCalls.push({ url: String(url), options });
+    if (
+      String(url).endsWith("/api/applications") &&
+      options.method === "GET"
+    ) {
+      return Response.json([]);
+    }
     if (String(url).endsWith("/api/applications")) {
-      return new Response(JSON.stringify({ app_id: "application-only-id" }), {
-        status: 200,
-      });
+      return Response.json({ app_id: "application-only-id" });
     }
     throw new Error(`Unexpected Control Panel request: ${url}`);
   });
@@ -793,7 +920,9 @@ test("registers an application before bank details are provided", async () => {
   });
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
   assert.equal(trustCalls, 1);
-  assert.equal(controlPanelCalls.length, 1);
+  assert.equal(controlPanelCalls.length, 2);
+  assert.equal(controlPanelCalls[0].options.method, "GET");
+  assert.equal(controlPanelCalls[1].options.method, "POST");
   assert.ok(controlPanelCalls[0].url.endsWith("/api/applications"));
   assert.equal(
     controlPanelCalls[0].options.headers.Authorization,
@@ -1015,6 +1144,17 @@ function registrationOptions(overrides = {}) {
 function setupDependencies(overrides = {}) {
   const applicationStore = overrides.applicationStore ?? new MemoryApplicationStore();
   const sessionStore = overrides.sessionStore ?? new MemorySessionStore();
+  const defaultControlPanelClient = {
+    listApplications() {
+      return Effect.succeed([]);
+    },
+    registerApplication() {
+      return Effect.succeed({ app_id: "recorded-app-id" });
+    },
+    getLinkedBanks() {
+      return Effect.succeed([{ name: "Example Bank", country: "FI" }]);
+    },
+  };
   const setup = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
@@ -1023,11 +1163,7 @@ function setupDependencies(overrides = {}) {
         return Effect.succeed({ email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" });
       },
     },
-    controlPanelClient: {
-      registerApplication() {
-        return Effect.succeed({ app_id: "recorded-app-id" });
-      },
-    },
+    controlPanelClient: defaultControlPanelClient,
     authorizationFlow: {
       status: { pending: false },
       start() {
@@ -1046,6 +1182,10 @@ function setupDependencies(overrides = {}) {
     }),
     sleep: () => Effect.void,
     ...overrides,
+    controlPanelClient: {
+      ...defaultControlPanelClient,
+      ...overrides.controlPanelClient,
+    },
   });
   return { setup, applicationStore, sessionStore };
 }
@@ -1101,6 +1241,131 @@ test("records provider registration failures as failed setup without application
   assert.equal(registrationCalls.length, 1);
   assert.equal(registrationCalls[0].request.name, "Enable Banking MCP");
   assert.equal(registrationCalls[0].request.certificate, "fake-certificate");
+});
+
+test("reuses the existing same-name app whose private key matches its certificate", async () => {
+  let registrationCalls = 0;
+  let keyGenerationCalls = 0;
+  const keyMaterial = await Effect.runPromise(generateKeyMaterial());
+  const duplicateMaterial = await Effect.runPromise(generateKeyMaterial());
+  const keyLookups = [];
+  const { setup, applicationStore } = setupDependencies({
+    controlPanelClient: {
+      listApplications() {
+        return Effect.succeed([
+          {
+            appId: "new-duplicate-id",
+            name: "Enable Banking MCP",
+            certificate: duplicateMaterial.certificate,
+            environment: "PRODUCTION",
+            redirectUrls: ["https://localhost:8765/callback"],
+          },
+          {
+            appId: "existing-app-id",
+            name: "enable banking mcp",
+            certificate: keyMaterial.certificate,
+            environment: "PRODUCTION",
+            redirectUrls: ["https://localhost:8765/callback"],
+          },
+        ]);
+      },
+      registerApplication() {
+        registrationCalls += 1;
+        return Effect.succeed({ app_id: "third-duplicate" });
+      },
+    },
+    loadExistingPrivateKey(appId) {
+      keyLookups.push(appId);
+      return Effect.succeed(keyMaterial.privateKey);
+    },
+    generateKeyMaterial() {
+      keyGenerationCalls += 1;
+      return Effect.succeed(keyMaterial);
+    },
+  });
+
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
+  const status = await waitForSetup(setup);
+  const stored = await Effect.runPromise(applicationStore.get());
+
+  assert.equal(status.phase, "application_ready");
+  assert.deepEqual(keyLookups, ["new-duplicate-id", "existing-app-id"]);
+  assert.equal(stored.appId, "existing-app-id");
+  assert.equal(stored.privateKey, keyMaterial.privateKey);
+  assert.equal(stored.certificate, keyMaterial.certificate);
+  assert.equal(registrationCalls, 0);
+  assert.equal(keyGenerationCalls, 0);
+});
+
+test("restores an existing application from the configured private-key path", async () => {
+  const previousPath = process.env.ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE;
+  const directory = await mkdtemp(join(tmpdir(), "enable-banking-key-"));
+  try {
+    const keyMaterial = await Effect.runPromise(generateKeyMaterial());
+    const keyPath = join(directory, "existing-app.pem");
+    await writeFile(keyPath, keyMaterial.privateKey, { mode: 0o600 });
+    process.env.ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE = keyPath;
+    const { setup, applicationStore } = setupDependencies({
+      controlPanelClient: {
+        listApplications() {
+          return Effect.succeed([{
+            appId: "existing-app-id",
+            name: "Enable Banking MCP",
+            certificate: keyMaterial.certificate,
+            environment: "SANDBOX",
+            redirectUrls: ["https://localhost:8765/callback"],
+          }]);
+        },
+      },
+    });
+
+    await Effect.runPromise(setup.registerApplication(registrationOptions()));
+    const status = await waitForSetup(setup);
+    const stored = await Effect.runPromise(applicationStore.get());
+
+    assert.equal(status.phase, "application_ready");
+    assert.equal(stored.appId, "existing-app-id");
+    assert.equal(stored.privateKey, keyMaterial.privateKey);
+  } finally {
+    if (previousPath === undefined) {
+      delete process.env.ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE;
+    } else {
+      process.env.ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE = previousPath;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("registers a new application when an existing same-name app key is absent", async () => {
+  let registrationCalls = 0;
+  const { setup, applicationStore } = setupDependencies({
+    controlPanelClient: {
+      listApplications() {
+        return Effect.succeed([{
+          appId: "existing-app-id",
+          name: "Enable Banking MCP",
+          certificate: "existing-certificate",
+          environment: "PRODUCTION",
+          redirectUrls: ["https://localhost:8765/callback"],
+        }]);
+      },
+      registerApplication() {
+        registrationCalls += 1;
+        return Effect.succeed({ app_id: "new-app-id" });
+      },
+    },
+    loadExistingPrivateKey() {
+      return Effect.fail(new Error("key file missing"));
+    },
+  });
+
+  await Effect.runPromise(setup.registerApplication(registrationOptions()));
+  const status = await waitForSetup(setup);
+  const stored = await Effect.runPromise(applicationStore.get());
+
+  assert.equal(status.phase, "application_ready");
+  assert.equal(stored.appId, "new-app-id");
+  assert.equal(registrationCalls, 1);
 });
 
 test("keeps registered application persisted when certificate trust fails", async () => {
@@ -1302,8 +1567,9 @@ test("reports an empty bank catalog without starting authorization", async () =>
   assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
 });
 
-test("keeps monitoring Production activation and continues bank authorization", async () => {
+test("continues Production setup using the linked bank without bank inputs", async () => {
   let activationChecks = 0;
+  let authorizationOptions;
   let authorizationCalls = 0;
   const openedUrls = [];
   const sessionStore = new MemorySessionStore();
@@ -1315,14 +1581,12 @@ test("keeps monitoring Production activation and continues bank authorization", 
         activationChecks += 1;
         return Effect.succeed({ active: activationChecks > 1 });
       },
-      listBanks() {
-        return Effect.succeed({ aspsps: [{ name: "Example Bank" }] });
-      },
     }),
     authorizationFlow: {
       status: { pending: false },
-      start() {
+      start(_client, options) {
         authorizationCalls += 1;
+        authorizationOptions = options;
         return Effect.as(
           sessionStore.set("automatic-session"),
           { authorization_url: "https://bank.example/authorize" },
@@ -1331,18 +1595,78 @@ test("keeps monitoring Production activation and continues bank authorization", 
     },
     sleep: () => Effect.void,
   });
-  const status = await Effect.runPromise(setup.runToCompletion({
-    ...registrationOptions({ environment: "PRODUCTION" }),
-    aspspName: "Example Bank",
-    country: "FI",
-  }));
+  const status = await Effect.runPromise(setup.runToCompletion(
+    registrationOptions({ environment: "PRODUCTION" }),
+  ));
 
   assert.equal(status.phase, "complete");
   assert.ok(activationChecks >= 2);
   assert.equal(authorizationCalls, 1);
+  assert.equal(authorizationOptions.aspspName, "Example Bank");
+  assert.equal(authorizationOptions.country, "FI");
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
   assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
   assert.equal(await Effect.runPromise(sessionStore.get()), "automatic-session");
+});
+
+test("fails without authorization when the Control Panel has no linked bank", async () => {
+  let authorizationCalls = 0;
+  const { setup } = setupDependencies({
+    controlPanelClient: {
+      registerApplication: () => Effect.succeed({ app_id: "recorded-app-id" }),
+      getLinkedBanks: () => Effect.succeed([]),
+    },
+    createBankClient: () => ({
+      getApplication: () => Effect.succeed({ active: true }),
+    }),
+    authorizationFlow: {
+      status: { pending: false },
+      start() {
+        authorizationCalls += 1;
+        return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
+      },
+    },
+  });
+
+  const status = await Effect.runPromise(setup.runToCompletion(
+    registrationOptions({ environment: "PRODUCTION" }),
+  ));
+
+  assert.equal(status.phase, "failed");
+  assert.match(status.error, /No linked bank was found/);
+  assert.equal(authorizationCalls, 0);
+});
+
+test("reports multiple linked banks instead of choosing one silently", async () => {
+  let authorizationCalls = 0;
+  const { setup } = setupDependencies({
+    controlPanelClient: {
+      registerApplication: () => Effect.succeed({ app_id: "recorded-app-id" }),
+      getLinkedBanks: () =>
+        Effect.succeed([
+          { name: "First Bank", country: "FI" },
+          { name: "Second Bank", country: "IE" },
+        ]),
+    },
+    createBankClient: () => ({
+      getApplication: () => Effect.succeed({ active: true }),
+    }),
+    authorizationFlow: {
+      status: { pending: false },
+      start() {
+        authorizationCalls += 1;
+        return Effect.succeed({ authorization_url: "https://bank.example/authorize" });
+      },
+    },
+  });
+
+  const status = await Effect.runPromise(setup.runToCompletion(
+    registrationOptions({ environment: "PRODUCTION" }),
+  ));
+
+  assert.equal(status.phase, "failed");
+  assert.match(status.error, /First Bank \(FI\), Second Bank \(IE\)/);
+  assert.equal(authorizationCalls, 0);
 });
 
 test("times out pending bank consent without discarding the registered application", async () => {
@@ -1587,7 +1911,7 @@ test("rejects malformed Control Panel login responses and closes the listener", 
   assert.equal(closed, 1);
 });
 
-test("key generation failure does not authenticate or register an application", async () => {
+test("key generation failure after app lookup does not register an application", async () => {
   let authenticationCalls = 0;
   let registrationCalls = 0;
   const { setup, applicationStore } = setupDependencies({
@@ -1613,7 +1937,7 @@ test("key generation failure does not authenticate or register an application", 
 
   assert.equal(status.phase, "failed");
   assert.equal(status.error, "certificate generation failed");
-  assert.equal(authenticationCalls, 0);
+  assert.equal(authenticationCalls, 1);
   assert.equal(registrationCalls, 0);
   assert.equal(await Effect.runPromise(applicationStore.get()), undefined);
 });

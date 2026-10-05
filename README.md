@@ -24,13 +24,28 @@ The source code is open source under the [MIT License](LICENSE). MIT permits dow
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
 
-For first-time onboarding, call `connect_bank`. The MCP server always asks for
-the Control Panel email, bank country, and bank together in one form; it does
-not infer them from conversation history, environment variables, or a stored
-Control Panel identity. No email environment setting is required. The email
-authenticates the Control Panel and is the data-protection contact for a
-Production application; it does not identify the user's bank or retrieve
-account data. Elicited form values are visible to the connected MCP client.
+On first-run Production onboarding, when no local application is configured,
+`connect_bank` asks for the Control Panel email and checks that account for
+the requested application name. It reuses an application only when exactly
+one matching local private key is available and matches that application's
+certificate. If no unique usable key is found, onboarding registers a new app,
+including when a same-name app already exists. Control Panel-generated key
+exports are named `~/Downloads/<application-id>.pem`; otherwise set
+`ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE` to the local path of the
+matching private key.
+
+A stored Production application skips the first-run form. If it is inactive,
+`connect_bank` opens the Enable Banking dashboard and promptly returns
+`awaiting_user` with a `flow_id`. Link an account, then call `connect_bank`
+again to resume; the existing app is reused and no duplicate registration
+occurs. Provider dashboard sign-in is handled there; the first-run MCP form is
+not used for this stored-app step.
+
+Sandbox asks for country and bank when needed. No email environment setting is
+required. The Control Panel email authenticates that account and is the
+data-protection contact for a new Production application; it does not identify
+the user's bank or retrieve account data. Elicited form values are visible to
+the connected MCP client.
 
 
 Matching unexpired Control Panel sessions are reused. Expired sessions are
@@ -54,12 +69,16 @@ implementation supports and advertises the capability. A first-run
 without starting setup. Do not collect the missing information through an
 agent-owned form or environment fallback.
 
-The primary onboarding form requests all first-run values together (email,
-country, and bank), or country and bank when an application already exists.
-Form values are visible to the connected MCP client. Never enter bank
-passwords, one-time codes, API keys, tokens, or bank credentials into an MCP
-form; authentication and consent stay on the provider's browser pages. See the
-[MCP elicitation specification](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation),
+Production onboarding elicits the Control Panel email when no local application
+is configured. After authentication, the server looks for requested-name apps
+in the Control Panel account and reuses one only when exactly one matching
+local private key is available. Otherwise it registers a new app, even if a
+same-name app exists. The bank is detected from linked accounts for the chosen
+application; no Production bank form is shown. Sandbox onboarding elicits
+country and bank when needed. Form values are visible to the connected MCP
+client. Never enter bank passwords, one-time codes, API keys, tokens, or bank
+credentials into an MCP form; authentication and consent stay on the provider's
+browser pages. See the [MCP elicitation specification](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation),
 [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp#respond-to-mcp-elicitation-requests),
 and [Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
@@ -69,7 +88,7 @@ and [Codex configuration reference](https://developers.openai.com/codex/config-r
 The published package is the easiest route for clients that support npm:
 
 ```sh
-npx -y enable-banking-mcp@0.4.0-beta.1
+npx -y enable-banking-mcp@0.4.0-beta.2
 ```
 
 The release workflow publishes the unscoped `enable-banking-mcp` package to
@@ -85,15 +104,16 @@ For clients that accept an `mcpServers` JSON block, use the published package:
   "mcpServers": {
     "enable-banking-mcp": {
       "command": "npx",
-      "args": ["-y", "enable-banking-mcp@0.4.0-beta.1"]
+      "args": ["-y", "enable-banking-mcp@0.4.0-beta.2"]
     }
   }
 }
 ```
 
-No email environment variable is needed. The MCP asks directly for first-run
-email, country, and bank. Form values are visible to the connected MCP client;
-use only a client trusted with that data. Pass `"environment": "SANDBOX"` to
+No email environment variable is needed. First-time Production onboarding
+asks for the Control Panel email and detects the bank after dashboard account
+linking. Form values are visible to the connected MCP client; use only a client
+trusted with that data. Pass `"environment": "SANDBOX"` to
 `connect_bank` only when sandbox testing is intended.
 
 ### Claude Code
@@ -104,7 +124,7 @@ Claude Code can write the local MCP entry without manual JSON editing:
 claude mcp add --scope user \
   --transport stdio \
   enable-banking-mcp -- \
-  npx -y enable-banking-mcp@0.4.0-beta.1
+  npx -y enable-banking-mcp@0.4.0-beta.2
 ```
 
 Use `--scope local` instead of `--scope user` to limit the server to the
@@ -132,7 +152,7 @@ Codex can write the shared local `~/.codex/config.toml` entry from the CLI:
 
 ```sh
 codex mcp add enable-banking-mcp \
-  -- npx -y enable-banking-mcp@0.4.0-beta.1
+  -- npx -y enable-banking-mcp@0.4.0-beta.2
 ```
 
 The resulting MCP configuration is shared by Codex CLI, ChatGPT desktop
@@ -152,8 +172,8 @@ codex plugin list
 
 Alternatively, open the Codex plugin browser with `codex`, then `/plugins`,
 install **Enable Banking MCP**, and start a new session. The plugin requires
-no email environment variable; `connect_bank` asks through MCP form
-elicitation.
+no email environment variable; Production `connect_bank` asks only for the
+Control Panel email through MCP form elicitation.
 
 ### Oh My Pi (OMP)
 
@@ -165,8 +185,9 @@ omp plugin install --scope user enable-banking-mcp@enable-banking-mcp
 omp plugin list
 ```
 
-The plugin requires no email environment variable. `connect_bank` collects
-first-run details through MCP form elicitation.
+The plugin requires no email environment variable. First-time Production
+`connect_bank` asks only for the Control Panel email; Sandbox also asks for
+the bank country and name.
 
 Start a new OMP session after installation. After marketplace updates, run
 `/reload-plugins` to refresh the current session.
@@ -280,23 +301,42 @@ Do not put npm tokens in this repository, an MCP configuration, or a prompt.
 
 ## First-run flow
 
-`connect_bank` always requests first-run Control Panel email, country, and bank
-in one MCP form. It does not derive those values from chat, environment
-variables, or stored identity. It requests only country and bank for an
-existing application without a session. A valid stored session skips setup
-questions and returns balances.
+For Production onboarding without a local application, `connect_bank` asks for
+the Control Panel email, then checks the authenticated account for applications
+with the requested name. It reuses one only when exactly one local private key
+matches its registered certificate. If no unique match exists, it registers a
+new application rather than failing. Control Panel-generated keys can be
+restored from their `<application-id>.pem` exports in `~/Downloads`; otherwise
+set `ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE` to a matching local key path.
 
-The server handles the Control Panel email callback on its loopback listener,
-registers the application, monitors Production activation, starts bank
-authorization, handles that callback, and fetches balances for every
-authorized account before returning from the same MCP tool call. The
-application credentials, current Enable Banking session, and Control Panel
-authentication share one native Keychain credential item. A locally trusted
-callback certificate remains a separate non-secret Keychain item.
+A stored Production application does not show the first-run form. If inactive,
+`connect_bank` opens the dashboard and returns `awaiting_user` with a `flow_id`;
+link the account and call `connect_bank` again. Sandbox connections ask for
+country and bank when needed. A valid stored session skips setup questions and
+returns balances.
 
+Bank discovery reads the authenticated Control Panel application-list response
+(`whitelisted_accounts[].aspsp`) and retains only the bank name and country.
+This relies on the dashboard response shape, not the public AIS API contract.
+
+Accounts at the same institution collapse to one bank. If an application has
+multiple distinct linked banks, `connect_bank` reports their names and
+countries and stops rather than choosing one silently.
+
+The server handles the Control Panel email callback on its loopback listener
+and continues guided setup and provider callbacks in the background while the
+MCP process remains running. `connect_bank` returns promptly with
+`awaiting_user` and a `flow_id` when a human or provider step is pending. After
+`connection_status` reports `connected`, call `connect_bank` again to retrieve
+balances for every authorized account.
+
+The application credentials, current Enable Banking session, and Control
+Panel authentication share one native Keychain credential item. A locally
+trusted callback certificate remains a separate non-secret Keychain item.
 The defaults are personal `PRODUCTION`, a read-only description, project
-privacy/terms URLs, and balances-only access. The Control Panel email is also
-the Production application's data-protection contact. To use `SANDBOX`, pass
+privacy/terms URLs, and a request for balances plus transaction-history access.
+The bank may grant a narrower scope. The Control Panel email is also the
+Production application's data-protection contact. To use `SANDBOX`, pass
 `"environment": "SANDBOX"` explicitly.
 
 ### Check bank authorization state
@@ -308,36 +348,48 @@ returning accounts, opening a browser, or starting consent.
 `connection: "connected"` means Enable Banking accepted the stored session.
 `control_panel_session` reports Control Panel login storage/expiry separately;
 it is not bank authorization. `status_unavailable` means the provider state
-could not be verified, not that the bank session is invalid.
+could not be verified, not that the bank session is invalid. `onboarding_active`
+reports a running guided flow without querying provider session status. When a
+phase is active, the status includes its phase, `flow_id`, and next action.
+`awaiting_user` means follow that action, then resume with `connect_bank`; do
+not overlap tool calls that are still running.
 
 ### Recommended: guided connection
 
-Call `connect_bank` as the primary one-call onboarding path.
+Call `connect_bank` as the primary resumable onboarding path.
 
-1. For a new application, MCP form elicitation asks for the Control Panel
-   email, bank country, and bank together before registration. The connected
-   MCP client can see these form values. The server does not use conversation,
-   environment, or stored identity as a substitute. Clients without MCP form
-   elicitation stop before setup; no agent-owned form or MCP tool retry is
-   required.
-2. The server requests a Control Panel email sign-in link when needed and
-   listens for its loopback callback. The user clicks the link; the callback
-   is processed automatically and setup continues without the user reporting
-   completion.
+1. On first run, the form asks for the Control Panel email. The server checks
+   that account for applications with the requested name. It reuses one only
+   when exactly one local key matches its certificate; otherwise it registers
+   a new app, even if a same-name app exists. Sandbox also asks for country and
+   bank. An already stored Production app skips this first-run form. If
+   inactive, the server opens the dashboard and returns `awaiting_user` with a
+   `flow_id`; link the account, then call `connect_bank` again. Clients without
+   form elicitation stop before first-run input; no agent-owned form is used.
+2. For a new application, the server requests a Control Panel email sign-in
+   link when needed and handles its loopback callback in the background. The
+   user clicks the link; check `connection_status` for progress. If the MCP
+   process restarts before the callback, call `connect_bank` again to resume
+   from stored application state.
 3. For a new Production application, the server opens the Enable Banking
-   dashboard and polls application activation. The user must activate it by
-   linking an account. The provider's [linked-accounts guide](https://enablebanking.com/docs/api/linked-accounts/)
+   dashboard. The user must activate it by linking an account. The provider's
+   [linked-accounts guide](https://enablebanking.com/docs/api/linked-accounts/)
    says this step routes through Enable Banking and the bank, where the user
-   accepts provider terms and confirms the account link.
-4. After activation, the server starts a separate API authorization through
-   Enable Banking, opens the bank flow, and receives the callback. The user
-   must complete bank sign-in/MFA and explicitly consent. The server then
-   exchanges the authorization code for a session and fetches balances for
-   each authorized account. The same `connect_bank` call returns those
-   balances.
-5. An active `connect_bank` call waits through browser/provider steps; do not
-   rerun the tool or tell the agent that a page is done. This flow uses the
-   system browser and local callbacks, not a Chrome DevTools or other MCP.
+   accepts provider terms and confirms the account link. Follow
+   `connection_status.next_action` to resume.
+4. After activation, the server detects the linked bank from that application's
+   Control Panel account links, then starts separate API authorization through
+   Enable Banking and opens the bank flow. The user must complete bank
+   sign-in/MFA and explicitly consent. The server processes the callback and
+   stores the session in Keychain. Once `connection_status` reports
+   `connected`, call `connect_bank` again to fetch balances for each authorized
+   account.
+5. While `connection_status` reports an active phase, avoid overlapping
+   `connect_bank` invocations. For `awaiting_user`, follow `next_action`; the
+   same flow ID is retained when resuming. Application and session state
+   persist in Keychain/provider state, but the onboarding flow itself is
+   in-memory. This flow uses the system browser and local callbacks, not a
+   Chrome DevTools or other MCP.
 
 The Production account link and the API session authorization are separate
 provider operations. The linked-account step does not create the API session.
@@ -347,10 +399,18 @@ authorization code. The user therefore cannot complete a fresh real-account
 setup with only an email-link click: Production account linking and bank
 authorization/consent remain required.
 
-The default access profile is balances. Request transaction history only when
-needed. A Production linked-account restriction limits which accounts may be
+After the bank is identified, an onboarding form lets the user choose the
+requested access profile and consent expiry before bank authorization. The
+default profile is `balances_and_transactions`; choose `balances` for
+balance-only access. Enter an optional future RFC3339 `valid_until`, or leave it
+blank for the 30-day default from authorization. The bank determines what it
+grants. A Production linked-account restriction limits which accounts may be
 accessed; the API session is still required even when that same account was
 linked in the dashboard.
+
+`list_accounts` returns account UIDs as strings from the Enable Banking
+session. Pass one of these strings as `account_id` to account detail, balance,
+or transaction tools; each tool checks the UID against the stored session.
 
 ### Advanced: register the application before choosing a bank
 
@@ -368,9 +428,12 @@ For example:
 }
 ```
 
-The tool authenticates the Control Panel, registers the application, stores
-its credentials locally, and returns. In Production it opens the application
-dashboard and reports `account_link`; the user completes account linking there.
+The tool authenticates the Control Panel, reuses a same-name application only
+when exactly one local private key matches its certificate, and otherwise
+registers a new application, even if a same-name app exists. It stores the
+selected application's credentials locally and returns. In Production it
+opens the application dashboard and reports `account_link`; the user completes
+account linking there.
 This is a lower-level registration path. Use `connect_bank` for the
 server-orchestrated flow through API authorization and balances; use
 `authorize_bank` only for explicit advanced control.
@@ -381,8 +444,11 @@ Call `setup_enable_banking` with:
 
 - an application name;
 - the HTTPS loopback redirect URL, defaulting to `https://localhost:8765/callback`;
-- the target ASPSP name and two-letter country code; and
-- `access_profile` set to `balances` (default) or `balances_and_transactions`.
+- the target ASPSP name and two-letter country code;
+- optional `valid_until` as a future RFC3339 date-time (default: 30 days from
+  bank authorization); and
+- `access_profile` set to `balances_and_transactions` (default) or `balances`
+  for balance-only access.
 
 For example, the default Production call can contain:
 
@@ -392,22 +458,24 @@ For example, the default Production call can contain:
   "redirect_url": "https://localhost:8765/callback",
   "aspsp_name": "Example Bank",
   "country": "IE",
-  "access_profile": "balances"
+  "access_profile": "balances_and_transactions"
 }
 ```
 
-This advanced tool starts the full server-side setup workflow and returns
-before balances are fetched. The server continues monitoring activation and
-bank authorization callbacks in the background. Use `connect_bank` for the
-one-call flow that also returns balances.
+This advanced tool reuses a matching Control Panel application only when
+exactly one local private key matches its certificate; otherwise it registers
+a new app, even if a same-name app exists. It starts the full server-side setup
+workflow and returns before balances are fetched. The server continues
+monitoring activation and bank authorization callbacks in the background. Use
+`connect_bank` for guided onboarding and balance retrieval.
 
 For an already configured application, `control_panel_authenticate` takes no
 arguments and reuses the Keychain session, refreshing it silently when
 possible. If refresh is rejected, advanced authentication tools use a stored
 email, MCP form elicitation, or local `ENABLE_BANKING_CONTROL_PANEL_EMAIL`
 configuration. `control_panel_status` reports authentication state and expiry
-without returning the email or tokens. `connect_bank` always asks directly for
-first-run details.
+without returning the email or tokens. For an existing Production application,
+`connect_bank` detects the linked bank without asking for a bank name.
 
 For an application registered with `register_application`, or any other
 already configured application, use `authorize_bank` to start a new personal
@@ -425,7 +493,7 @@ target ASPSP name and country directly.
 
 - `delete_session` deletes the current provider session and clears the matching local session ID.
 - `control_panel_logout` removes the persisted Control Panel session.
-- `clear_local_credentials` clears local session, application, and Control Panel records and attempts to remove the locally trusted callback certificate. If stored application metadata is invalid or certificate removal fails, it preserves the application record and reports cleanup failure.
+- `clear_local_credentials` clears local session, application (including its private key), and Control Panel records and attempts to remove the locally trusted callback certificate. Back up the exact application signing key before clearing if the provider-side app must be reused; Control Panel-generated exports are named `<application-id>.pem` in `~/Downloads`. Without a matching key, a later onboarding cannot sign requests for that app and registers a new application instead. If stored application metadata is invalid or certificate removal fails, it preserves the application record and reports cleanup failure.
 
 Logout and credential cleanup are refused while Control Panel authentication,
 bank authorization, or setup is pending, preventing a later callback from

@@ -21,6 +21,8 @@ type FormStringResult =
   | { status: "accepted"; value: string };
 
 
+const FORM_ELICITATION_TIMEOUT_MS = 10 * 60 * 1000;
+
 export function elicitForm(
   server: McpServer["server"],
   message: string,
@@ -44,13 +46,15 @@ export function elicitForm(
         required,
       },
     } satisfies ElicitRequestFormParams;
+    const requestOptions = { timeout: FORM_ELICITATION_TIMEOUT_MS };
     const result = yield* Effect.tryPromise({
       try: () =>
         capabilities.form
-          ? server.elicitInput(params)
+          ? server.elicitInput(params, requestOptions)
           : server.request(
               { method: "elicitation/create", params },
               ElicitResultSchema,
+              requestOptions,
             ),
       catch: (error) => error,
     });

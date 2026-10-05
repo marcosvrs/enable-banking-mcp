@@ -35,7 +35,7 @@ class MemoryStore {
 test("waits for production account linking before bank consent", async () => {
   const applicationStore = new MemoryStore();
   const sessionStore = new MemoryStore();
-  const controlPanelClient = new ControlPanelClient(async (url) => {
+  const controlPanelClient = new ControlPanelClient(async (url, options) => {
     if (String(url).endsWith("getOobConfirmationCode")) {
       return new Response("{}", { status: 200 });
     }
@@ -45,6 +45,7 @@ test("waits for production account linking before bank consent", async () => {
         { status: 200 },
       );
     }
+    if (options.method === "GET") return Response.json([]);
     return new Response(JSON.stringify({ app_id: "new-app-id" }), { status: 200 });
   });
   const controlPanelAuth = new ControlPanelAuthFlow(
@@ -97,7 +98,8 @@ test("waits for production account linking before bank consent", async () => {
       });
     });
   const openedUrls = [];
-  const authorizationFlow = new BankAuthorizationFlow(
+  let authorizationOptions;
+  const bankAuthorizationFlow = new BankAuthorizationFlow(
     sessionStore,
     (url) => Effect.sync(() => openedUrls.push(url)),
     () => Effect.succeed({
@@ -105,6 +107,15 @@ test("waits for production account linking before bank consent", async () => {
       close: Effect.void,
     }),
   );
+  const authorizationFlow = {
+    get status() {
+      return bankAuthorizationFlow.status;
+    },
+    start(client, options) {
+      authorizationOptions = options;
+      return bankAuthorizationFlow.start(client, options);
+    },
+  };
   const setup = new ApplicationSetupFlow({
     applicationStore,
     sessionStore,
@@ -113,6 +124,17 @@ test("waits for production account linking before bank consent", async () => {
     authorizationFlow,
     openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
     createBankClient: bankClientFactory,
+    resolveConsentSettings(defaults) {
+      assert.equal(defaults.accessProfile, "balances_and_transactions");
+      assert.equal(defaults.validUntil, "2099-01-01T00:00:00.000Z");
+      return Effect.succeed({
+        status: "accepted",
+        settings: {
+          accessProfile: "balances",
+          validUntil: "2099-12-01T00:00:00Z",
+        },
+      });
+    },
     generateKeyMaterial: () => Effect.succeed({
       privateKey,
       certificate: "certificate",
@@ -145,6 +167,13 @@ test("waits for production account linking before bank consent", async () => {
     "https://enablebanking.com/cp/applications",
     "https://bank.example/authorize",
   ]);
+  assert.deepEqual(authorizationOptions, {
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl: "https://localhost:8765/callback",
+    accessProfile: "balances",
+    validUntil: "2099-12-01T00:00:00Z",
+  });
   assert.equal(await Effect.runPromise(sessionStore.get()), "session-id");
 });
 
@@ -166,7 +195,7 @@ test("requires HTTPS loopback callbacks for every environment", () => {
   );
 });
 
-test("defaults Production contact and policy fields", () => {
+test("defaults Production contact, policy, and consent fields", () => {
   const normalized = normalizeSetupOptions({
     controlPanelEmail: "user@example.com",
     appName: "Enable Banking MCP",
@@ -186,6 +215,8 @@ test("defaults Production contact and policy fields", () => {
     normalized.termsUrl,
     "https://marcosvrs.github.io/enable-banking-mcp/terms-of-use/",
   );
+  assert.equal(normalized.accessProfile, "balances_and_transactions");
+  assert.equal(normalized.validUntil, undefined);
 });
 
 test("defaults a whitespace-only Production description", () => {
@@ -230,6 +261,9 @@ test("keeps production application linking state when activation lookup fails", 
     },
   };
   const controlPanelClient = {
+    listApplications() {
+      return Effect.succeed([]);
+    },
     registerApplication() {
       return Effect.succeed({ app_id: "production-app-id" });
     },
@@ -380,6 +414,9 @@ function setupDependencies({ applicationStore = new MemoryStore(), sessionStore 
     applicationStore,
     sessionStore,
     controlPanelClient: {
+      listApplications() {
+        return Effect.succeed([]);
+      },
       registerApplication(_auth, request) {
         this.request = request;
         return Effect.succeed({ app_id: "sandbox-app-id" });

@@ -48,6 +48,8 @@ test("reports inactive Production app separately from expired Control Panel logi
   assert.equal(status.application, "inactive");
   assert.equal(status.bank_session, "missing");
   assert.equal(status.control_panel_session, "expired");
+  assert.match(status.next_action, /link an account.*then call connect_bank/i);
+  assert.match(status.next_action, /No new application is needed/);
   assert.equal(status.application_environment, "PRODUCTION");
 });
 
@@ -172,10 +174,47 @@ test("reports missing setup and in-progress browser steps without starting them"
     configuration: "missing",
     sessionIds: [],
     pendingPhase: "control_panel_auth",
+    pendingAction: "Complete the email link, then resume with connect_bank.",
+    onboarding: {
+      flow_id: "flow-123",
+      status: "awaiting_user",
+      phase: "control_panel_auth",
+    },
   });
   assert.equal(awaitingUser.connection, "awaiting_user");
   assert.equal(awaitingUser.phase, "control_panel_auth");
+  assert.equal(awaitingUser.flow_id, "flow-123");
+  assert.equal(awaitingUser.onboarding_status, "awaiting_user");
+  assert.match(awaitingUser.next_action, /complete the email link/i);
 });
+test("prioritizes a running onboarding flow over provider session checks", async () => {
+  const status = await inspectConnectionStatus({
+    configuration: "configured",
+    sessionIds: ["stored-session"],
+    client: {
+      getSession: async () => {
+        throw new Error("provider should not be queried during active onboarding");
+      },
+      getApplication: async () => {
+        throw new Error("application lookup should not run during active onboarding");
+      },
+    },
+    pendingAction: "Setup is active; check status again.",
+    onboarding: {
+      flow_id: "flow-running",
+      status: "running",
+      phase: "bank_authorization",
+    },
+  });
+
+  assert.equal(status.connection, "onboarding_active");
+  assert.equal(status.phase, "bank_authorization");
+  assert.equal(status.flow_id, "flow-running");
+  assert.equal(status.onboarding_status, "running");
+  assert.equal(status.next_action, "Setup is active; check status again.");
+});
+
+
 test("reports unavailable status for malformed provider application responses", async () => {
   for (const getApplication of [
     async () => null,

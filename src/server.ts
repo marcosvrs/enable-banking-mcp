@@ -38,46 +38,59 @@ import {
   type ApplicationRegistrationOptions,
   type SetupOptions,
 } from "./setup.js";
+import { resolveConsentSettings } from "./consent-settings.js";
 import { MacKeychainSessionStore } from "./session-store.js";
 import { inspectConnectionStatus } from "./connection-status.js";
 import { connectBank as runGuidedConnection, type ConnectBankOptions } from "./guided-connection.js";
 import { resolveControlPanelEmailInput } from "./control-panel-email.js";
+import {
+  OnboardingStateMachine,
+  type OnboardingPhase,
+} from "./onboarding-state.js";
 
 const server = new McpServer(
   {
     name: "enable-banking",
-    version: "0.4.0-beta.1",
+    version: "0.4.0-beta.2",
   },
   {
     instructions:
-      `connect_bank is the one-call onboarding workflow. For a new application,
-the MCP asks up front for the Control Panel email, bank country, and bank in
-one form elicitation. Do not infer these from chat, environment variables, or
-stored Control Panel identity. For an existing application it asks for bank
-country and bank together. It then owns registration, local email callback
-handling, Production activation monitoring, bank authorization callback, and
-retrieval of balances for authorized accounts. No other MCP server is used.
+      `connect_bank starts or resumes the guided personal AIS onboarding flow.
+It returns promptly with status awaiting_user and a flow_id when setup or a
+provider action is pending; it does not hold the tool call open for browser
+callbacks. The MCP continues its callback/setup work in the background while
+the server remains running. On first run, it asks for the Control Panel email,
+checks for a same-name application with a matching local key, and registers a
+new app if none can be reused. A stored Production application skips the
+first-run form. If inactive, link an account in the dashboard, then call
+connect_bank again to resume. Sandbox connections ask for country and bank
+when needed. Use connection_status for the current phase and next action; once
+it reports connected, call connect_bank to retrieve balances. If the MCP
+process restarts, start connect_bank again; application and session state are
+recovered from Keychain/provider state, not an onboarding checkpoint.
 
 The user must still perform provider-required actions: click the Control Panel
 email link; in Production, activate the application by linking an account in
 the Enable Banking dashboard; and complete the separate API bank sign-in,
 MFA, and explicit consent. Production activation does not create the API
 session. Do not promise that an email click alone can authorize bank data.
-The MCP opens the system browser and waits for callbacks and provider state;
-never ask the user to rerun a tool, copy a code, or tell the agent when a page
-is done. The user must also approve any local certificate-trust prompt.
+Do not start duplicate onboarding calls while an earlier tool call is still
+running. Stored application/session state prevents duplicate registration.
+The user must also approve any local certificate-trust prompt.
 
-Never request bank passwords, OTPs, API keys, access tokens, or consent through
-the model. If MCP form elicitation is unavailable or declined, connect_bank
-stops without starting setup; do not fall back to agent-owned forms or local
-email configuration. Never pass emails, tokens, private keys, or session IDs
-as tool arguments or expose them in results.
+Never request bank passwords, OTPs, API keys, access tokens, or bank consent
+through the model. The onboarding form may collect requested data scope and
+expiry; the user must still give actual consent at the bank. If a required
+email or bank form is unsupported or declined, stop before setup. If the
+optional consent-settings form is unsupported, use the supplied/default
+settings; if declined, stop before authorization. Never pass emails, tokens,
+private keys, or session IDs as tool arguments or expose them in results.
 
 Use connection_status only for status checks; it does not start consent,
 modify stored sessions, or return account data. Use setup_enable_banking,
 register_application, and authorize_bank only for advanced explicit control;
-the primary onboarding path is connect_bank. This server is read-only for
-personal account information and never initiates payments.`
+the primary path is connect_bank. This server is read-only for personal
+account information and never initiates payments.`
   },
 );
 
@@ -107,6 +120,8 @@ const setupFlow = new ApplicationSetupFlow({
   authorizationFlow,
   /* c8 ignore next -- test/server.test.mjs exercises this factory in a child process, outside c8 counters. */
   createBankClient: (credentials) => new EnableBankingClient(credentials),
+  resolveConsentSettings: (defaults) =>
+    resolveConsentSettings(server.server, defaults),
   openBrowser: launchBrowser,
 });
 
@@ -234,6 +249,15 @@ function sessionClient(): Effect.Effect<
     });
   });
 }
+function accountUid(account: unknown): string | undefined {
+  if (typeof account === "string" && account.length > 0) return account;
+  if (typeof account !== "object" || account === null || Array.isArray(account)) {
+    return undefined;
+  }
+  const uid = (account as Record<string, unknown>).uid;
+  return typeof uid === "string" && uid.length > 0 ? uid : undefined;
+}
+
 function authorizedAccountClient(
   accountId: string,
 ): Effect.Effect<EnableBankingClient, unknown> {
@@ -243,12 +267,7 @@ function authorizedAccountClient(
     const accounts = session.accounts;
     if (
       !Array.isArray(accounts) ||
-      !accounts.some(
-        (account) =>
-          typeof account === "object" &&
-          account !== null &&
-          (account as Record<string, unknown>).uid === accountId,
-      )
+      !accounts.some((account) => accountUid(account) === accountId)
     ) {
       return yield* Effect.fail(
         new Error("Account is not authorized by the current bank session"),
@@ -280,16 +299,12 @@ function authorizedBalances(): Effect.Effect<Record<string, unknown>, unknown> {
     }
     const balances = yield* Effect.all(
       session.accounts.map((account) => {
-        if (
-          typeof account !== "object" ||
-          account === null ||
-          typeof (account as Record<string, unknown>).uid !== "string"
-        ) {
+        const accountId = accountUid(account);
+        if (!accountId) {
           return Effect.fail(
             new Error("Enable Banking session returned an invalid account UID"),
           );
         }
-        const accountId = (account as Record<string, string>).uid;
         return Effect.map(client.getAccountBalances(accountId), (result) => ({
           account_id: accountId,
           balances: result,
@@ -305,6 +320,8 @@ function authorizedBalances(): Effect.Effect<Record<string, unknown>, unknown> {
     };
   });
 }
+const onboardingState = new OnboardingStateMachine();
+
 
 function readConnectionStatus(): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
@@ -352,11 +369,27 @@ function readConnectionStatus(): Effect.Effect<unknown, unknown> {
     }
 
     const setupStatus = setupFlow.status;
+    const flow = onboardingState.snapshot();
+    const authorizationPending = authorizationFlow.status.pending;
     const pendingPhase = setupStatus.pending
       ? setupStatus.phase
-      : authorizationFlow.status.pending
+      : authorizationPending
         ? "bank_authorization"
-        : undefined;
+        : flow?.status === "running" || flow?.status === "awaiting_user"
+          ? flow.phase
+          : undefined;
+    const pendingAction = setupStatus.pending
+      ? "An onboarding request is active; complete its current user step, check connection_status, and follow its next_action. After it reports connected, call connect_bank to retrieve balances."
+      : authorizationPending
+        ? "Complete bank authorization in the opened browser; after connection_status reports connected, call connect_bank to retrieve balances."
+        : flow?.status === "awaiting_user" &&
+            flow.phase === "account_activation"
+          ? "Link an account in the dashboard, then call connect_bank again to resume this flow."
+          : flow?.status === "failed"
+            ? "The previous onboarding flow failed; call connect_bank to retry from stored state."
+            : flow?.status === "running"
+              ? "An onboarding request is running; check connection_status for progress."
+              : undefined;
     return yield* inspectConnectionStatus({
       configuration,
       client,
@@ -364,34 +397,77 @@ function readConnectionStatus(): Effect.Effect<unknown, unknown> {
       controlPanelAuth,
       configuredEnvironment: application?.environment,
       pendingPhase,
+      pendingAction,
+      onboarding: flow,
     });
   });
 }
 function connectBank(
   options: ConnectBankOptions,
 ): Effect.Effect<unknown, unknown> {
-  return runGuidedConnection(options, {
-    applicationStore,
-    sessionStore,
-    setupFlow,
-    authorizationFlow,
-    assertNoEnvironmentCredentials,
-    getEnvironmentSessionId: () =>
-      process.env.ENABLE_BANKING_SESSION_ID?.trim(),
-    clearEnvironmentSession: (sessionId) => {
-      if (
-        sessionId &&
-        process.env.ENABLE_BANKING_SESSION_ID?.trim() === sessionId
-      ) {
-        delete process.env.ENABLE_BANKING_SESSION_ID;
-      }
-    },
-    readAuthorizedBalances: authorizedBalances,
-    resolveCredentials,
-    createBankClient: (credentials) => new EnableBankingClient(credentials),
-    openBrowser: launchBrowser,
-    mcpServer: server.server,
-  });
+  return Effect.gen(function* () {
+    const flow = yield* Effect.try({
+      try: () => onboardingState.begin(),
+      catch: (error) => error,
+    });
+    const result = yield* runGuidedConnection(options, {
+      applicationStore,
+      sessionStore,
+      setupFlow,
+      authorizationFlow,
+      assertNoEnvironmentCredentials,
+      getEnvironmentSessionId: () =>
+        process.env.ENABLE_BANKING_SESSION_ID?.trim(),
+      clearEnvironmentSession: (sessionId) => {
+        if (
+          sessionId &&
+          process.env.ENABLE_BANKING_SESSION_ID?.trim() === sessionId
+        ) {
+          delete process.env.ENABLE_BANKING_SESSION_ID;
+        }
+      },
+      readAuthorizedBalances: authorizedBalances,
+      resolveCredentials,
+      createBankClient: (credentials) => new EnableBankingClient(credentials),
+      openBrowser: launchBrowser,
+      setProgress: (phase) => {
+        onboardingState.setPhase(flow.flow_id, phase);
+      },
+      mcpServer: server.server,
+    }).pipe(
+      Effect.tapError(() =>
+        Effect.sync(() => onboardingState.fail(flow.flow_id)),
+      ),
+    );
+    const outcome =
+      typeof result === "object" && result !== null
+        ? (result as Record<string, unknown>)
+        : {};
+    if (outcome.status === "awaiting_user") {
+      const phase =
+        typeof outcome.phase === "string"
+          ? (outcome.phase as OnboardingPhase)
+          : (onboardingState.snapshot()?.phase ?? "starting");
+      onboardingState.awaitUser(flow.flow_id, phase);
+    } else if (outcome.status === "connected") {
+      onboardingState.complete(flow.flow_id);
+    } else {
+      onboardingState.fail(flow.flow_id);
+    }
+    return {
+      ...(typeof result === "object" && result !== null
+        ? (result as Record<string, unknown>)
+        : { result }),
+      flow_id: flow.flow_id,
+    };
+  }).pipe(
+    Effect.onInterrupt(() => {
+      const flow = onboardingState.snapshot();
+      return flow?.status === "running"
+        ? Effect.sync(() => onboardingState.fail(flow.flow_id))
+        : Effect.void;
+    }),
+  );
 }
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
 let storedControlPanelEmail: string | undefined;
@@ -515,29 +591,34 @@ server.registerTool(
   "connect_bank",
   {
     description:
-      "One-call personal AIS onboarding. The MCP requests the Control Panel email, bank country, and bank together using form elicitation, then owns registration, email callback handling, Production activation monitoring, bank authorization callback, and balance retrieval. The user must still complete provider-required email, dashboard account-linking, bank sign-in/MFA, and consent steps.",
+      "Resumable personal AIS onboarding. Returns promptly with status awaiting_user and a flow_id while setup or provider callbacks continue in the background. During onboarding, review the requested data access and consent expiry in an elicitation form when supported. Use connection_status to see the phase and next action; link a Production account in the dashboard when requested, then call connect_bank again to resume. After connection_status reports connected, call connect_bank again to retrieve balances. First-run asks for Control Panel email and reuses a same-name app only when exactly one local private key matches its certificate; otherwise registers a new app. Sandbox asks for country and bank when needed. The user must complete provider-required email-link, dashboard account-linking, bank sign-in/MFA, and consent steps.",
     inputSchema: {
       app_name: z
         .string()
         .min(1)
         .default("Enable Banking MCP")
-        .describe("Application name used when first-run registration is needed"),
+        .describe("Application name used to find a reusable app; a new app is registered if there is no unique matching local key"),
       environment: z
         .enum(["PRODUCTION", "SANDBOX"])
         .default("PRODUCTION")
         .describe("Application environment used when first-run registration is needed"),
       access_profile: z
         .enum(["balances", "balances_and_transactions"])
-        .default("balances")
-        .describe("Whether the consent may include transaction history"),
+        .default("balances_and_transactions")
+        .describe("Consent profile; transaction history is requested by default"),
+      valid_until: z
+        .string()
+        .optional()
+        .describe("Optional future RFC3339 expiry; defaults to 30 days from bank authorization"),
     },
   },
-  ({ app_name, environment, access_profile }) =>
+  ({ app_name, environment, access_profile, valid_until }) =>
     safely(
       connectBank({
         appName: app_name,
         environment,
         accessProfile: access_profile as AccessProfile,
+        validUntil: valid_until,
       }),
     ),
 );
@@ -546,7 +627,7 @@ server.registerTool(
   "setup_enable_banking",
   {
     description:
-      "Advanced background setup for a known bank and country. The MCP continues registration, Production activation monitoring, callbacks, and session storage after returning its initial status. Use connect_bank for the one-call form, orchestration, and balance retrieval.",
+      "Advanced background setup for a known bank and country. Reuses a same-name Control Panel application only when exactly one local private key matches its certificate; otherwise registers a new app, even if a same-name app exists. The MCP continues activation, callbacks, and session storage after returning. After the bank is identified, a supported client is prompted to review data access and consent expiry. Use connect_bank for resumable guided onboarding and balance retrieval.",
     inputSchema: {
       app_name: z
         .string()
@@ -589,11 +670,11 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Future RFC3339 consent expiry; defaults to 30 days"),
+        .describe("Future RFC3339 consent expiry; defaults to 30 days from bank authorization"),
       access_profile: z
         .enum(["balances", "balances_and_transactions"])
-        .default("balances")
-        .describe("Whether the consent may include transaction history"),
+        .default("balances_and_transactions")
+        .describe("Whether the consent may include transaction history; included by default"),
     },
   },
   ({
@@ -639,7 +720,7 @@ server.registerTool(
   "register_application",
   {
     description:
-      "Advanced registration-only path. Registers the application and returns its initial status; Production account linking and API bank authorization remain separate. Use connect_bank for the primary one-call setup and balances.",
+      "Advanced registration-only path. Reuses a same-name Control Panel application only when exactly one local private key matches its certificate; otherwise registers a new app, even if a same-name app exists. Production account linking and bank authorization remain separate. Use connect_bank for resumable guided onboarding and balance retrieval.",
     inputSchema: {
       app_name: z
         .string()
@@ -716,7 +797,7 @@ server.registerTool(
   "connection_status",
   {
     description:
-      "Read-only status of the personal AIS bank connection. Verifies a stored provider session and reports application activation or consent steps without opening a browser, starting consent, changing stored state, or returning account data",
+      "Read-only status of the personal AIS bank connection. A running guided flow is reported as onboarding_active with its phase and flow_id without querying provider session state. Otherwise verifies a stored provider session, reports pending or required onboarding steps, and gives the next action; never opens a browser, starts consent, changes stored state, or returns account data.",
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -751,11 +832,11 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Future RFC3339 consent expiry; defaults to 30 days"),
+        .describe("Future RFC3339 consent expiry; defaults to 30 days from bank authorization"),
       access_profile: z
         .enum(["balances", "balances_and_transactions"])
-        .default("balances")
-        .describe("Whether the consent may include transaction history"),
+        .default("balances_and_transactions")
+        .describe("Whether the consent may include transaction history; included by default"),
     },
   },
   ({
@@ -1010,7 +1091,7 @@ server.registerTool(
   "clear_local_credentials",
   {
     description:
-      "Clear locally stored Enable Banking credentials, session state, Control Panel authentication, and localhost certificate trust",
+      "Clear locally stored Enable Banking credentials, including the application signing private key, session state, Control Panel authentication, and localhost certificate trust. Back up the exact private key before clearing if the provider-side app must be reused; Control Panel-generated exports are named <application-id>.pem in Downloads. Without a matching key backup, the server cannot sign for that application.",
   },
   () =>
     safely(

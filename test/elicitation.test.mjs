@@ -6,7 +6,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import test from "node:test";
-import { elicitFormString as elicitFormStringEffect } from "../dist/elicitation.js";
+import {
+  elicitForm as elicitFormEffect,
+  elicitFormString as elicitFormStringEffect,
+} from "../dist/elicitation.js";
 
 function elicitFormString(...args) {
   return Effect.runPromise(elicitFormStringEffect(...args));
@@ -136,4 +139,44 @@ test("legacy elicitation capability uses the protocol request and rejects non-st
   assert.equal(sentRequest.request.method, "elicitation/create");
   assert.equal(sentRequest.request.params.mode, "form");
   assert.deepEqual(sentRequest.request.params.requestedSchema.required, ["value"]);
+});
+test("form elicitation accepts a response after the SDK default timeout", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const server = new McpServer({ name: "elicitation-timeout-test", version: "1.0.0" });
+  const client = new Client(
+    { name: "elicitation-timeout-test-client", version: "1.0.0" },
+    { capabilities: { elicitation: { form: {} } } },
+  );
+  const requestReceived = Promise.withResolvers();
+  const response = Promise.withResolvers();
+  client.setRequestHandler(ElicitRequestSchema, async () => {
+    requestReceived.resolve();
+    return response.promise;
+  });
+
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  try {
+    await client.connect(clientTransport);
+    const pending = Effect.runPromise(
+      elicitFormEffect(
+        server.server,
+        "Enter a value",
+        { value: { type: "string", title: "Value" } },
+        ["value"],
+      ),
+    );
+    await requestReceived.promise;
+    context.mock.timers.tick(60_001);
+    await new Promise((resolve) => setImmediate(resolve));
+    response.resolve({ action: "accept", content: { value: "submitted" } });
+
+    assert.deepEqual(await pending, {
+      status: "accepted",
+      value: { value: "submitted" },
+    });
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

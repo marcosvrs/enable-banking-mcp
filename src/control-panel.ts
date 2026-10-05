@@ -34,6 +34,7 @@ type ControlPanelPath =
   | "/api/applications";
 
 interface ControlPanelRequestOptions {
+  method?: "GET" | "POST";
   body?: unknown;
   headers?: Record<string, string>;
 }
@@ -65,6 +66,14 @@ export class ControlPanelApiError extends Error {
     super(`Enable Banking Control Panel ${status}: ${message}`);
     this.name = "ControlPanelApiError";
   }
+}
+
+export interface ControlPanelApplicationSummary {
+  appId: string;
+  name: string;
+  certificate?: string;
+  environment?: ApplicationEnvironment;
+  redirectUrls?: string[];
 }
 
 export class ControlPanelClient {
@@ -241,6 +250,117 @@ export class ControlPanelClient {
       }.bind(this),
     );
   }
+  listApplications(
+    auth: ControlPanelAuth,
+  ): Effect.Effect<ControlPanelApplicationSummary[], unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const result = yield* this.requestAuthenticated<unknown>(
+          auth,
+          "/api/applications",
+          { method: "GET" },
+        );
+        if (!Array.isArray(result)) {
+          return yield* Effect.fail(
+            new Error("Enable Banking Control Panel returned an invalid application list"),
+          );
+        }
+        const applications: ControlPanelApplicationSummary[] = [];
+        for (const value of result) {
+          if (typeof value !== "object" || value === null) {
+            return yield* Effect.fail(
+              new Error("Enable Banking Control Panel returned an invalid application list"),
+            );
+          }
+          const record = value as Record<string, unknown>;
+          if (
+            typeof record.kid !== "string" ||
+            !record.kid.trim() ||
+            typeof record.name !== "string" ||
+            !record.name.trim()
+          ) {
+            return yield* Effect.fail(
+              new Error("Enable Banking Control Panel returned an invalid application list"),
+            );
+          }
+          const environment =
+            typeof record.environment === "string"
+              ? record.environment.toUpperCase()
+              : undefined;
+          const redirectUrls = Array.isArray(record.redirect_urls)
+            ? record.redirect_urls.filter(
+                (url): url is string =>
+                  typeof url === "string" && Boolean(url.trim()),
+              )
+            : undefined;
+          applications.push({
+            appId: record.kid.trim(),
+            name: record.name.trim(),
+            ...(typeof record.certificate === "string"
+              ? { certificate: record.certificate }
+              : {}),
+            ...(environment === "PRODUCTION" || environment === "SANDBOX"
+              ? { environment }
+              : {}),
+            ...(redirectUrls?.length ? { redirectUrls } : {}),
+          });
+        }
+        return applications;
+      }.bind(this),
+    );
+  }
+
+
+  getLinkedBanks(
+    auth: ControlPanelAuth,
+    applicationId: string,
+  ): Effect.Effect<Array<{ name: string; country: string }>, unknown> {
+    return Effect.gen(
+      function* (this: ControlPanelClient) {
+        const applications = yield* this.requestAuthenticated<unknown>(
+          auth,
+          "/api/applications",
+          { method: "GET" },
+        );
+        if (!Array.isArray(applications)) {
+          return yield* Effect.fail(
+            new Error("Enable Banking Control Panel returned an invalid application list"),
+          );
+        }
+        const application = applications.find(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            (value as Record<string, unknown>).kid === applicationId,
+        );
+        if (!application) {
+          return yield* Effect.fail(
+            new Error("Enable Banking Control Panel could not find the stored application"),
+          );
+        }
+        const linkedAccounts = (application as Record<string, unknown>)
+          .whitelisted_accounts;
+        if (!Array.isArray(linkedAccounts)) return [];
+
+        const linkedBanks = new Map<string, { name: string; country: string }>();
+        for (const linkedAccount of linkedAccounts) {
+          if (typeof linkedAccount !== "object" || linkedAccount === null) continue;
+          const aspsp = (linkedAccount as Record<string, unknown>).aspsp;
+          if (typeof aspsp !== "object" || aspsp === null) continue;
+          const record = aspsp as Record<string, unknown>;
+          if (typeof record.name !== "string" || typeof record.country !== "string") {
+            continue;
+          }
+          const name = record.name.trim();
+          const country = record.country.trim().toUpperCase();
+          if (!name || !/^[A-Z]{2}$/.test(country)) continue;
+          const key = `${country}:${name.toLowerCase()}`;
+          if (!linkedBanks.has(key)) linkedBanks.set(key, { name, country });
+        }
+        return [...linkedBanks.values()];
+      }.bind(this),
+    );
+  }
 
   private requestAuthenticated<T = unknown>(
     auth: ControlPanelAuth,
@@ -269,7 +389,7 @@ export class ControlPanelClient {
           ...options.headers,
         };
         const init: RequestInit = {
-          method: "POST",
+          method: options.method ?? "POST",
           headers,
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         };

@@ -187,7 +187,9 @@ export class BankAuthorizationFlow {
             },
             access: {
               balances: true,
-              transactions: options.accessProfile === "balances_and_transactions",
+              transactions:
+                (options.accessProfile ?? "balances_and_transactions") ===
+                "balances_and_transactions",
               valid_until: validUntil,
             },
             state,
