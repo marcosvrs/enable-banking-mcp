@@ -43,15 +43,15 @@ export interface AuthorizationStartResult {
 
 export type BrowserOpener = (url: string) => void;
 
-export type CallbackListener = {
+export interface CallbackListener {
   wait: Promise<string>;
   close: () => Promise<void>;
-};
+}
 
-export type CallbackTlsOptions = {
+export interface CallbackTlsOptions {
   key: Buffer;
   cert: Buffer;
-};
+}
 
 export type CallbackTlsOptionsProvider = () =>
   | CallbackTlsOptions
@@ -63,14 +63,14 @@ export type CallbackListenerFactory = (
   tlsOptionsProvider?: CallbackTlsOptionsProvider,
 ) => Promise<CallbackListener>;
 
-type PendingAuthorization = {
+interface PendingAuthorization {
   listener: CallbackListener;
-};
+}
 
 export class BankAuthorizationFlow {
   private starting = false;
-  private pending?: PendingAuthorization;
-  private lastError?: string;
+  private pending: PendingAuthorization | undefined;
+  private lastError: string | undefined;
   private credentialCleanupPending = false;
 
   constructor(
@@ -181,6 +181,8 @@ export class BankAuthorizationFlow {
         authorization_url: authorization.url,
       };
     } catch (error) {
+      // The async callback may clear this pending state while the provider request awaits.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- The async callback can clear this state.
       if (this.pending?.listener === listener) {
         this.pending = undefined;
       }
@@ -225,6 +227,9 @@ export function parseValidUntil(value?: string): string {
     const month = Number(value.slice(5, 7));
     const day = Number(value.slice(8, 10));
     const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    if (month < 1 || month > 12) {
+      throw new Error("valid_until must be a future RFC3339 date-time");
+    }
     const daysInMonth = [
       31,
       leapYear ? 29 : 28,
@@ -239,7 +244,7 @@ export function parseValidUntil(value?: string): string {
       30,
       31,
     ][month - 1];
-    if (month < 1 || month > 12 || day < 1 || day > daysInMonth) {
+    if (day < 1 || daysInMonth === undefined || day > daysInMonth) {
       throw new Error("valid_until must be a future RFC3339 date-time");
     }
   }
@@ -322,9 +327,11 @@ async function createCallbackListener(
   );
 
   const { promise: listening, resolve: markListening, reject: failListening } =
+    // This is a legitimate void resolver; the rule does not recognize call-expression type arguments.
+    // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Completion signal has no value.
     Promise.withResolvers<void>();
   server.once("error", failListening);
-  server.listen(redirect.port, redirect.hostname, () => markListening());
+  server.listen(redirect.port, redirect.hostname, () => { markListening(); });
   try {
     await listening;
   } catch (error) {
@@ -344,6 +351,8 @@ async function createCallbackListener(
     clearTimeout(timeout);
     if (!server.listening) return;
     const { promise: closedPromise, resolve: markClosed, reject: failClosed } =
+      // This is a legitimate void resolver; the rule does not recognize call-expression type arguments.
+      // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Completion signal has no value.
       Promise.withResolvers<void>();
     server.close((error) => {
       if (error) failClosed(error);

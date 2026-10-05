@@ -37,6 +37,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BEFORE_SHA: ${{ github.event.before }}
+          PRIVACY_FORBIDDEN_VALUES: ${{ secrets.PRIVACY_FORBIDDEN_VALUES }}
         run: |
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             node scripts/privacy-scan.mjs --range "${BASE_SHA}..${HEAD_SHA}"

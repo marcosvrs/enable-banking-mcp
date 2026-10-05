@@ -9,17 +9,17 @@ export interface SecretStore {
 
 export type SessionStore = SecretStore;
 
-type SecurityResult = {
+interface SecurityResult {
   code: number;
   stdout: string;
   stderr: string;
-};
+}
 type SecurityRunner = (args: string[]) => Promise<SecurityResult>;
-export type NativeKeyringEntry = {
+export interface NativeKeyringEntry {
   getPassword(): string | null;
   setPassword(value: string): void;
   deletePassword(): boolean;
-};
+}
 export type NativeKeyringEntryFactory = (
   service: string,
   account: string,
@@ -50,6 +50,8 @@ function runSecurity(args: string[]): Promise<SecurityResult> {
   let stdout = "";
   let stderr = "";
 
+  // Child process mocks or runtime failures may not honor Node's declared pipe streams.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- Keep the runtime failure path.
   if (!child.stdout || !child.stderr) {
     child.kill();
     reject(new Error("Required local credential command failed"));
@@ -78,8 +80,8 @@ const RETIRED_SERVICE_SUFFIX = ".retired";
 const PENDING_SERVICE_SUFFIX = ".pending";
 const MAX_KEYCHAIN_CHUNKS = 256;
 
-type ChunkGeneration = { id: string; count: number };
-type ChunkManifest = { active: ChunkGeneration; retired: ChunkGeneration[] };
+interface ChunkGeneration { id: string; count: number }
+interface ChunkManifest { active: ChunkGeneration; retired: ChunkGeneration[] }
 
 function chunkService(service: string, index: number): string {
   return `${service}${CHUNK_SERVICE_SUFFIX}${index}`;
@@ -94,7 +96,6 @@ function generationChunkService(
     ? chunkService(service, index)
     : `${service}${CHUNK_SERVICE_SUFFIX}${generation.id}.${index}`;
 }
-
 function parseManifest(value: string, label: string): ChunkManifest | undefined {
   if (value.startsWith(CHUNK_INDEX_V2_PREFIX)) {
     const [activeText, ...retiredTexts] = value
@@ -102,15 +103,12 @@ function parseManifest(value: string, label: string): ChunkManifest | undefined 
       .split(";");
     const parseGeneration = (text: string | undefined): ChunkGeneration => {
       const match = text?.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
+      const id = match?.[1];
       const count = match ? Number(match[2]) : NaN;
-      if (
-        !match ||
-        !Number.isInteger(count) ||
-        count > MAX_KEYCHAIN_CHUNKS
-      ) {
+      if (!match || !id || !Number.isInteger(count) || count > MAX_KEYCHAIN_CHUNKS) {
         throw new Error(`Stored Enable Banking ${label} is invalid`);
       }
-      return { id: match[1], count };
+      return { id, count };
     };
     return {
       active: parseGeneration(activeText),
@@ -222,16 +220,13 @@ export class MacKeychainSecretStore implements SecretStore {
     const pendingService = `${this.service}${PENDING_SERVICE_SUFFIX}`;
     const pendingValue = await this.readRaw(pendingService);
     if (pendingValue === undefined) return;
-    const match = pendingValue.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
+    const match = /^([a-zA-Z0-9-]+),([1-9]\d*)$/.exec(pendingValue);
+    const id = match?.[1];
     const count = match ? Number(match[2]) : NaN;
-    if (
-      !match ||
-      !Number.isInteger(count) ||
-      count > MAX_KEYCHAIN_CHUNKS
-    ) {
+    if (!match || !id || !Number.isInteger(count) || count > MAX_KEYCHAIN_CHUNKS) {
       throw new Error(`Stored Enable Banking ${this.label} is invalid`);
     }
-    const pending = { id: match[1], count };
+    const pending = { id, count };
     const manifest = await this.readManifest();
     if (manifest?.active.id !== pending.id) {
       await this.deleteGeneration(pending);
@@ -247,16 +242,13 @@ export class MacKeychainSecretStore implements SecretStore {
       return undefined;
     });
     if (retiredValue !== undefined) {
-      const match = retiredValue.match(/^([a-zA-Z0-9-]+),([1-9]\d*)$/);
+      const match = /^([a-zA-Z0-9-]+),([1-9]\d*)$/.exec(retiredValue);
+      const id = match?.[1];
       const count = match ? Number(match[2]) : NaN;
-      if (
-        !match ||
-        !Number.isInteger(count) ||
-        count > MAX_KEYCHAIN_CHUNKS
-      ) {
+      if (!match || !id || !Number.isInteger(count) || count > MAX_KEYCHAIN_CHUNKS) {
         throw new Error(`Stored Enable Banking ${this.label} is invalid`);
       }
-      const retired = { id: match[1], count };
+      const retired = { id, count };
       if (manifest?.active.id !== retired.id) {
         await this.deleteGeneration(retired);
       }
@@ -297,7 +289,7 @@ export class MacKeychainSecretStore implements SecretStore {
 
   async get(): Promise<string | undefined> {
     const value = this.nativeEntry.getPassword();
-    return value === null ? this.readLegacy() : value;
+    return value ?? this.readLegacy();
   }
 
   async set(value: string): Promise<void> {
@@ -357,9 +349,8 @@ export class MacKeychainSecretStore implements SecretStore {
         .slice(CHUNK_INDEX_V2_PREFIX.length)
         .split(";");
       const generations = generationEntries
-        .map((item) => item.match(/^([a-zA-Z0-9-]+),/))
-        .filter((match): match is RegExpMatchArray => match !== null)
-        .map((match) => match[1]);
+        .map((item) => /^([a-zA-Z0-9-]+),/.exec(item)?.[1])
+        .filter((generation): generation is string => generation !== undefined);
       if (generations.length !== generationEntries.length) {
         errors.push(new Error("Unable to identify every legacy chunk generation"));
       }

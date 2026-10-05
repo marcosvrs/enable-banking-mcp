@@ -241,6 +241,7 @@ test("requires a future real RFC3339 calendar date for consent expiry", () => {
   for (const value of [
     "2099-12-01",
     "2099-02-30T00:00:00Z",
+    "2099-13-01T00:00:00Z",
     "2020-01-01T00:00:00Z",
   ]) {
     assert.throws(

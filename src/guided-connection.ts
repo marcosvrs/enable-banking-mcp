@@ -14,18 +14,18 @@ import {
 } from "./setup.js";
 import type { ApplicationSetupFlow } from "./setup.js";
 
-type EnableBankingCredentials = { appId: string; privateKey: string };
+interface EnableBankingCredentials { appId: string; privateKey: string }
 
 const APPLICATIONS_URL = "https://enablebanking.com/cp/applications";
 const CONTROL_PANEL_EMAIL_ENV = "ENABLE_BANKING_CONTROL_PANEL_EMAIL";
 
-export type ConnectBankOptions = {
+export interface ConnectBankOptions {
   appName: string;
   environment: "PRODUCTION" | "SANDBOX";
   country?: string;
   aspspName?: string;
   accessProfile: AccessProfile;
-};
+}
 
 export interface GuidedConnectionDependencies {
   applicationStore: Pick<ApplicationStore, "get">;
@@ -57,15 +57,14 @@ export async function connectBank(
   ]);
   const environmentSessionId = dependencies.getEnvironmentSessionId();
   const connected = await recoverConfiguredSession<Record<string, unknown>>({
-    storedSession,
-    environmentSessionId,
+    ...(storedSession === undefined ? {} : { storedSession }),
+    ...(environmentSessionId === undefined ? {} : { environmentSessionId }),
     read: async () => ({
       status: "connected",
       ...(await dependencies.readAuthorizedAccounts()),
     }),
     clearStoredSession: () => dependencies.sessionStore.clear(),
-    clearEnvironmentSession: () =>
-      dependencies.clearEnvironmentSession(environmentSessionId),
+    clearEnvironmentSession: () => { dependencies.clearEnvironmentSession(environmentSessionId); },
   });
   const transactionAccess =
     typeof connected?.access === "object" &&
@@ -177,8 +176,8 @@ export async function connectBank(
     client,
     mcpServer: dependencies.mcpServer,
     applicationCountries: applicationInfo.countries,
-    country: options.country,
-    aspspName: options.aspspName,
+    ...(options.country === undefined ? {} : { country: options.country }),
+    ...(options.aspspName === undefined ? {} : { aspspName: options.aspspName }),
   });
   if (selection.status !== "selected") return selection;
 

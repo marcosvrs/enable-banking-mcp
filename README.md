@@ -276,6 +276,13 @@ npm run test:coverage
 npm run test:mutation
 ```
 
+ESLint uses the JavaScript recommended rules and TypeScript's
+`strictTypeChecked` plus `stylisticTypeChecked` presets with project-aware
+type information. `tsconfig.json` also enables `noUncheckedIndexedAccess`,
+`exactOptionalPropertyTypes`, `noImplicitOverride`, `noImplicitReturns`,
+`noFallthroughCasesInSwitch`, `verbatimModuleSyntax`,
+`noUncheckedSideEffectImports`, and `noEmitOnError`.
+
 The coverage gate requires 100% statement and function coverage for `src/`;
 line and branch coverage are reported but have no minimum. Mutation testing
 requires a score of at least 99% for the deterministic configuration,
@@ -293,6 +300,13 @@ configuration changes. E2E runs on pull requests and pushes to `main`; privacy
 and secret scans run on pushes and pull requests, scanning only the new commit
 range where GitHub supplies a base SHA. CI caches npm downloads and the
 incremental mutation report.
+
+The privacy workflow also reads account-specific forbidden values from the
+GitHub Actions secret `PRIVACY_FORBIDDEN_VALUES` (one value per line); local
+scans can use an ignored `.privacy.local` file. GitHub withholds repository
+secrets from forked pull requests, so those runs receive generic PII scanning
+only. Configure the Actions secret for account-specific scanning on trusted
+pushes and same-repository pull requests.
 
 ### Publish a release
 

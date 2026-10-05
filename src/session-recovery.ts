@@ -1,12 +1,12 @@
 import { isTerminalSessionError } from "./enable-banking.js";
 
-export type SessionRecoveryOptions<T> = {
+export interface SessionRecoveryOptions<T> {
   storedSession?: string;
   environmentSessionId?: string;
   read: () => Promise<T>;
   clearStoredSession: () => Promise<void>;
   clearEnvironmentSession: () => void;
-};
+}
 
 export async function recoverConfiguredSession<T>(
   options: SessionRecoveryOptions<T>,
