@@ -40,12 +40,12 @@ when using an older/different server version.
 2. The MCP authenticates the user's Enable Banking Control Panel account. It reuses a same-name app only if exactly one local private key matches its registered certificate. Otherwise it registers a new app, even if a same-name app exists. If asked, the user may restore the matching `<application-id>.pem` from `~/Downloads` or configure `ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE`; never ask them to paste the key.
 3. The user must open the Control Panel email sign-in link if one is required. The MCP handles its loopback callback and continues setup in the background.
 4. For a new/inactive Production app, the MCP opens the Enable Banking dashboard and returns promptly with `status: "awaiting_user"`, a phase and `flow_id`. The user must link an account in the dashboard to activate the application. That dashboard linking step is **not** the later API bank session or bank consent.
-5. After activation, the MCP identifies the linked bank from the Control Panel app. It then offers a consent settings form when supported and starts the separate bank authorization in the browser. The user must sign in at the bank, complete any MFA, and explicitly consent there.
+5. After activation, the MCP identifies the linked bank from the Control Panel app. If multiple distinct linked banks exist, it reports them and stops rather than silently choosing one. Once the bank is identified, it offers a consent-settings form when supported and starts the separate bank authorization in the browser. The user signs in at the bank, completes MFA, and explicitly consents there; a local certificate-trust prompt may also require the user's approval.
 6. Check `connection_status` for progress/`next_action`. Once it reports `connected`, call `connect_bank` again to retrieve balances for every authorized account, or use the account-specific tools.
 
 ### Sandbox
 
-Pass `environment: "SANDBOX"` only when sandbox use is intended. The MCP asks for a two-letter country code and bank when needed; it may skip either prompt when a single unambiguous provider choice exists. Bank names should come from `list_banks` or the MCP's provider-backed selection form, not guessed. Sandbox does not use Production dashboard account activation.
+For a new Sandbox app, the form asks for the Control Panel email plus country and bank. For an existing Sandbox app, it asks for country and bank when needed; it may skip a prompt when a single unambiguous provider choice exists. Country is a two-letter code; bank names should come from `list_banks` or the provider-backed selection form, not be guessed. Sandbox does not use Production dashboard account activation.
 
 ### Existing app/session and resume behavior
 
