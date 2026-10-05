@@ -31,7 +31,7 @@ account and transaction reads, and safe session management.
 ## Requirements
 
 - macOS, because credentials and certificate trust use macOS Keychain (credentials use the native `@napi-rs/keyring` API; `/usr/bin/security` remains used for certificate trust and legacy credential cleanup);
-- Node.js 22 or newer;
+- Node.js 22.18 or newer;
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
 
@@ -253,17 +253,24 @@ plugin manifests after publication. Every GitHub Actions E2E job is
 credential-free and can run on pull requests, pushes, schedules, or manual
 dispatches.
 
-To install the repository's optional privacy pre-push hook explicitly:
+To install the repository's local pre-commit and pre-push hooks explicitly:
 
 ```sh
 npm run privacy:install-hooks
 ```
 
-The npm lifecycle does not modify Git configuration automatically.
+The npm lifecycle does not modify Git configuration automatically. Pre-commit
+scans staged changes for PII and secrets. Pre-push scans only commits being
+sent; when source, tests, or tooling change, it also runs lint, typecheck, and
+the 100% statement/function coverage gate. Mutation testing stays in CI rather
+than slowing every local push. Hooks are developer safeguards; CI is
+authoritative.
 
-### Run test gates
+### Run quality gates
 
 ```sh
+npm run lint
+npm run typecheck
 npm test
 npm run test:coverage
 npm run test:mutation
@@ -280,10 +287,12 @@ outside Stryker's mutant instrumentation.
 
 The only coverage exclusions are narrow defensive states and a V8 source-map
 gap on `authorize_bank`'s request literal, which is exercised by the isolated
-stdio integration test.
-CI runs coverage on every pull request and push to `main`; it runs mutation
-testing only when source, tests, or test configuration changes. CI caches npm
-downloads and the incremental mutation report.
+stdio integration test. CI runs lint, typecheck, and coverage on every pull
+request and push to `main`; mutation runs only when source, tests, or test
+configuration changes. E2E runs on pull requests and pushes to `main`; privacy
+and secret scans run on pushes and pull requests, scanning only the new commit
+range where GitHub supplies a base SHA. CI caches npm downloads and the
+incremental mutation report.
 
 ### Publish a release
 

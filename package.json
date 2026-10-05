@@ -24,6 +24,8 @@
   ],
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . --max-warnings 0",
     "prepack": "npm run build && chmod +x dist/server.js",
     "start": "node dist/server.js",
     "test": "npm run build && node --test test/*.test.mjs",
@@ -43,7 +45,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -51,11 +53,15 @@
     "zod": "4.5.2"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@stryker-mutator/core": "10.0.0",
     "@stryker-mutator/tap-runner": "10.0.0",
     "@stryker-mutator/typescript-checker": "10.0.0",
     "@types/node": "25.0.0",
     "c8": "11.0.0",
-    "typescript": "5.9.3"
+    "eslint": "10.12.0",
+    "globals": "17.13.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
   }
 }

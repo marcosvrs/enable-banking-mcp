@@ -293,7 +293,7 @@ export class EnableBankingClient {
     const transactions: unknown[] = [];
     let continuationKey: string | undefined = query.continuationKey;
     let nextContinuationKey: string | undefined;
-    let hasMore = false;
+    let hasMore: boolean;
     let pages = 0;
 
     do {

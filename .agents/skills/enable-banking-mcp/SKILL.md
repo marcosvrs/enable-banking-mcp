@@ -9,10 +9,10 @@ Use this skill whenever the user asks to connect their bank, inspect account sta
 
 This skill describes only the MCP server's tools, schemas, results, and user-facing workflows. Do not bypass those tools with direct provider calls or include provider implementation guidance.
 
-This guide documents the `0.4.0-beta.2` MCP contract. `npx skills add` installs
-the instructions only; it does not install or update the server. Ensure the
-host is connected to that release or newer, and follow the live tool schemas
-when using an older/different server version.
+This guide documents the `0.3.0-beta.10` MCP contract. `npx skills add`
+installs instructions only; it does not install or update the server. Connect
+the host to `enable-banking-mcp@0.3.0-beta.10` or a newer release, and follow
+the live tool schemas if they differ.
 
 ## Operating model and boundaries
 
@@ -27,23 +27,23 @@ when using an older/different server version.
 ## Fast decision tree
 
 1. Call `connection_status` (no arguments) before setup or account reads. It is read-only and does not return account data.
-2. If `connection` is `connected` and the user wants every balance, either call `connect_bank` to retrieve balances for all authorized accounts or use `list_accounts` followed by `get_account_balances` for each returned UID. Use account-specific tools when the request names or selects an account.
+2. If `connection` is `connected`, use `list_accounts` and `get_account_balances` for requested balances; `connect_bank` returns account/access metadata, not balances. Use account-specific tools when the request names or selects an account.
 3. If the user wants transactions, obtain account UIDs with `list_accounts`, select the requested account(s), then call `get_account_transactions`. Follow `continuationKey` while `hasMore` is true if the user asked for all results in that range.
 4. If setup is required, use `connect_bank` as the primary guided path. Follow the state and `next_action` from `connection_status`; when the user completes a browser/dashboard step, call `connect_bank` again to resume.
 5. Do not infer that an expired Control Panel login means the bank session is invalid. `control_panel_session` and `bank_session` are separate states.
 
 ## Guided onboarding: `connect_bank`
 
-`connect_bank` is the primary onboarding and resume tool. It takes optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default, or `SANDBOX`), `access_profile` (`balances_and_transactions` default, or `balances`), and optional future RFC3339 `valid_until`.
+`connect_bank` is the primary onboarding and resume tool. It accepts optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), `country` (two-letter code), `aspsp_name` (exact bank name), and `access_profile` (`balances` default or `balances_and_transactions`). It has no `valid_until` input.
 
 ### First-run Production
 
-1. Call `connect_bank` without asking the user to provide secrets in chat. If no local app exists, the MCP requires MCP form elicitation for the Control Panel email. If the client does not support/advertise `elicitation.form`, setup stops; do not replace it with an agent-owned form or environment-variable prompt.
-2. The MCP authenticates the user's Enable Banking Control Panel account. It reuses a same-name app only if exactly one local private key matches its registered certificate. Otherwise it registers a new app, even if a same-name app exists. If asked, the user may restore the matching `<application-id>.pem` from `~/Downloads` or configure `ENABLE_BANKING_APPLICATION_PRIVATE_KEY_FILE`; never ask them to paste the key.
-3. The user must open the Control Panel email sign-in link if one is required. The MCP handles its loopback callback and continues setup in the background.
-4. For a new/inactive Production app, the MCP opens the Enable Banking dashboard and returns promptly with `status: "awaiting_user"`, a phase and `flow_id`. The user must link an account in the dashboard to activate the application. Dashboard linking does not authorize MCP account-data reads.
-5. After activation, the MCP identifies the linked bank from the Control Panel app. If multiple distinct linked banks exist, it reports them and stops rather than silently choosing one. Once the bank is identified, it offers a consent-settings form when supported and starts the separate bank authorization in the browser. The user signs in at the bank, completes MFA, and explicitly consents there; a local certificate-trust prompt may also require the user's approval.
-6. Check `connection_status` for progress/`next_action`. Once it reports `connected`, call `connect_bank` again to retrieve balances for every authorized account, or use the account-specific tools.
+1. Call `connect_bank` without asking the user to provide secrets in chat. Pass a known `country` and `aspsp_name` when available; otherwise let the MCP provide supported choices or ask the user to select from those choices.
+2. If a Control Panel email is needed, the MCP uses form elicitation when supported. If the result is `needs_control_panel_email`, tell the user to set `ENABLE_BANKING_CONTROL_PANEL_EMAIL` in the local MCP server environment and retry; never ask them to disclose the email in chat.
+3. The user must open the Control Panel email sign-in link if one is required. The MCP handles its local callback and continues setup in the background.
+4. For a new/inactive Production app, follow `connection_status`/`setup_status` and their `next_action`. The user must link an account in the dashboard to activate the application. Dashboard linking does not authorize MCP account-data reads.
+5. After activation, continue with `connect_bank`. Select a country/bank from the MCP-provided choices if needed; do not guess. The user then completes the separate bank-hosted sign-in, MFA, and explicit consent. A local certificate-trust prompt may also require the user's approval.
+6. Once `connection_status` reports `connected`, use `list_accounts` and the account-specific tools to retrieve the requested data.
 
 ### Production requires two separate bank-access steps
 
@@ -54,15 +54,15 @@ The Control Panel email sign-in link may be an additional login to manage the ap
 
 ### Sandbox
 
-For a new Sandbox app, the form asks for the Control Panel email plus country and bank. For an existing Sandbox app, it asks for country and bank when needed; it may skip a prompt when a single unambiguous provider choice exists. Country is a two-letter code; bank names should come from `list_banks` or the provider-backed selection form, not be guessed. Sandbox skips the Production dashboard-link step, but the user still completes the separate bank sign-in/MFA/consent flow.
+In Sandbox, `connect_bank` accepts optional country/bank choices and may ask for missing choices through supported MCP forms; if a form is unavailable, use the returned choices and ask the user to select. Sandbox skips Production dashboard account linking, but the user still completes the separate bank sign-in/MFA/consent flow. The default `access_profile` is `balances`.
 
 ### Existing app/session and resume behavior
 
 - A stored Production app skips first-run email input. If inactive, the MCP opens the dashboard; the user links an account and then calls `connect_bank` again.
-- A valid stored bank session skips setup and `connect_bank` returns balances.
-- If an onboarding call returns `awaiting_user`, follow its stated action and call `connection_status`; do not start overlapping `connect_bank` calls while a call is still running. Resume by calling `connect_bank` after the user/provider step, not by starting a second flow.
-- `flow_id` and current onboarding phase are in-memory progress state. Application/session credentials are stored separately. After an MCP process restart, call `connect_bank` to recover/resume from stored/provider state; there is no durable in-memory flow checkpoint.
-- Consent settings form choices: `balances_and_transactions` requests balances and transaction history (default); `balances` requests balances only. `valid_until` is an optional future RFC3339 date-time. Omit it or leave it blank for a 30-day expiry calculated when bank authorization actually starts; this avoids consuming the consent period during a long Production activation. Declining the settings form stops before bank authorization. If the optional form is unsupported, supplied/default settings are used. The bank still decides the granted scope.
+- A valid stored bank session makes `connect_bank` return connected account/access metadata; use `list_accounts` and the account-specific tools for balances or transactions.
+- If an onboarding call returns `awaiting_user` or `setup_started`, follow its `next_action`, monitor with `connection_status`/`setup_status`, and resume with `connect_bank` after the user/provider step. Do not start overlapping setup calls.
+- Setup progress is in memory; application/session credentials are stored separately. After an MCP process restart, call `connect_bank` to recover/resume from stored/provider state; there is no durable in-memory flow checkpoint.
+- `connect_bank` defaults to `access_profile: "balances"`. Use `"balances_and_transactions"` only when the user requests transactions. `setup_enable_banking` and `authorize_bank` also default to balances; those advanced tools accept optional future RFC3339 `valid_until` (30-day default). The bank decides the actual granted scope.
 
 ## Checking state and progress
 
@@ -74,11 +74,10 @@ Call with `{}`. It verifies a stored provider session, reports setup/onboarding 
 - `setup_required`: no application is configured; start `connect_bank`.
 - `application_activation_required`: a Production application is inactive; link an account in the dashboard, then resume with `connect_bank`.
 - `bank_authorization_required`: app exists but no usable bank session; use `connect_bank` (or an explicitly requested advanced authorization flow).
-- `onboarding_active`: guided flow is still running; use the current `phase`/`flow_id` and check again, without starting another flow.
-- `awaiting_user`: a human/browser action is required; follow `next_action`, then resume with `connect_bank`.
+- `awaiting_user`: a browser action is required; follow `next_action`, monitor status, then resume with `connect_bank`.
 - `status_unavailable`: provider state could not be verified. This is **not** proof that the session is invalid; retry later and do not discard local credentials.
 
-Other useful fields: `application` (`configured`, `active`, `inactive`, `not_configured`, `unknown`), `bank_session` (`valid`, `missing`, `invalid`, `unknown`), `control_panel_session` (`not_stored`, `stored`, `expired`), optional `application_environment`, `phase`, `flow_id`, and `onboarding_status`, and `next_action`. An expired Control Panel session can coexist with a valid bank session.
+Other useful fields: `application` (`configured`, `active`, `inactive`, `not_configured`, `unknown`), `bank_session` (`valid`, `missing`, `invalid`, `unknown`), `control_panel_session` (`not_stored`, `stored`, `expired`), optional `application_environment`, `phase`, and `next_action`. An expired Control Panel session can coexist with a valid bank session.
 
 ### `setup_status`
 
@@ -88,7 +87,7 @@ No arguments. Informational status for an advanced `setup_enable_banking`/regist
 
 ### Fetch all authorized balances
 
-- For the shortest route after onboarding, call `connect_bank` once `connection_status.connection` is `connected`. It returns `status: "connected"`, the ASPSP, authorized accounts, a `balances` array keyed by `account_id`, and the session access information.
+- For the shortest route after onboarding, call `list_accounts` to retrieve the currently authorized account UIDs and access metadata; it does not retrieve balances.
 - For explicit account-by-account retrieval, call `list_accounts`, then call `get_account_balances({"account_id":"<uid from list_accounts>"})` for each requested authorized account. Never invent or reuse an old UID.
 
 Balance result objects are provider-defined and can contain several balance types per account, each with `balance_amount.amount`, `balance_amount.currency`, `balance_type`, `name`, and `reference_date`. Report the provider's label/type and reference date: a fresh MCP call does not guarantee a same-day balance, and `reference_date` may lag by several days. Prefer an explicitly available balance (for example a provider item labelled available) when the user asks for spendable funds; do not silently substitute a book/opening/intraday balance. Do not add amounts with different balance types or reference dates into a total unless the user asks for an aggregate and the semantics are compatible. If one account lacks an explicit available balance, state that rather than relabeling another type.
@@ -135,10 +134,10 @@ The live MCP tool schema is authoritative. This list describes the current 20 pu
 
 | Tool | Inputs | Behavior |
 |---|---|---|
-| `connect_bank` | Optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), `access_profile` (`balances_and_transactions` default or `balances`), `valid_until` (future RFC3339; omitted = 30 days at authorization start) | Primary resumable onboarding. If already connected, fetches balances for all accounts. Otherwise asks supported MCP forms, launches browser steps, and returns progress. |
+| `connect_bank` | Optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), `country` (two-letter code), `aspsp_name` (bank name), `access_profile` (default `balances`, or `balances_and_transactions`) | Primary resumable onboarding. If the stored session grants the requested access, returns authorized account/access metadata; otherwise starts or resumes setup and reports progress/choices. |
 | `connection_status` | None | Read-only provider/application/session/onboarding status and `next_action`; no account data or side effects. |
 | `setup_status` | None | Reports advanced setup progress; does not start/resume work. |
-| `control_panel_authenticate` | None | Reuses/refreshes Control Panel login or initiates email-link sign-in. Does not take email/token as a tool argument; MCP form may ask for email if needed. |
+| `control_panel_authenticate` | None | Reuses/refreshes Control Panel login or initiates email-link sign-in. Does not take email/token as a tool argument; uses MCP form elicitation when supported, or returns instructions to set `ENABLE_BANKING_CONTROL_PANEL_EMAIL` locally. |
 | `control_panel_status` | None | Reports stored/expired Control Panel login without revealing email or tokens. |
 | `control_panel_logout` | None | Removes local Control Panel authentication only; does not delete the bank session or provider application. |
 
@@ -147,8 +146,8 @@ The live MCP tool schema is authoritative. This list describes the current 20 pu
 | Tool | Inputs | Behavior |
 |---|---|---|
 | `register_application` | `app_name` default `Enable Banking MCP`; `environment` default `PRODUCTION`; `redirect_url` default `https://localhost:8765/callback`; optional/defaulted `description`, `privacy_url`, `terms_url` | Registration only. Reuses a same-name app only with exactly one local private key matching its certificate; otherwise registers a new app. Production account linking and bank authorization remain separate. |
-| `setup_enable_banking` | `aspsp_name` and `country` required; optional/defaulted `app_name`, `environment`, `redirect_url`, `description`, `privacy_url`, `terms_url`; `access_profile` default `balances_and_transactions`; optional future RFC3339 `valid_until` | Advanced full setup for a known bank/country; proceeds asynchronously through Control Panel, app activation, consent settings, browser authorization and session storage. |
-| `authorize_bank` | Required `aspsp_name`; `country` default `IE`; optional `redirect_url` (stored app's first registered redirect by default), `access_profile` (default `balances_and_transactions`), `valid_until` (30-day default) | Starts separate browser authorization for a configured app. This starts consent; the user must authorize at the bank. |
+| `setup_enable_banking` | `aspsp_name` and `country` required; optional/defaulted `app_name`, `environment`, `redirect_url`, `description`, `privacy_url`, `terms_url`; `access_profile` default `balances`; optional future RFC3339 `valid_until` (30-day default) | Advanced full setup for a known bank/country; proceeds asynchronously through Control Panel, app activation, bank authorization and session storage. |
+| `authorize_bank` | Required `aspsp_name`; `country` default `IE`; optional `redirect_url` (stored app's first registered redirect by default), `access_profile` (default `balances`), and future RFC3339 `valid_until` (30-day default) | Starts separate browser authorization for a configured app. The user must authorize at the bank. |
 | `list_banks` | Optional `country` (two-letter ISO 3166-1 code) | Lists institutions for personal AIS; requires application credentials. |
 | `get_application` | None | Gets the application bound to configured credentials. |
 | `get_health` | None | Checks whether the Enable Banking service is reachable; does not require an account session. |
@@ -175,7 +174,7 @@ All account-specific read tools validate the requested account UID against the c
 
 ## Configuration and local prerequisites
 
-The server is intended for macOS (native Keychain and local certificate trust) and Node.js 22+. Normally the user completes first-run configuration through `connect_bank`; do not ask for or copy secrets. Advanced/preconfigured deployments may use these environment variables:
+The server is intended for macOS (native Keychain and local certificate trust) and Node.js 22.18+. Normally the user completes first-run configuration through `connect_bank`; do not ask for or copy secrets. Advanced/preconfigured deployments may use these environment variables:
 
 - `ENABLE_BANKING_APP_ID` (preferred) or legacy alias `ENABLE_BANKING_ID`, with `ENABLE_BANKING_PRIVATE_KEY` for the configured application.
 - `ENABLE_BANKING_SESSION_ID` for a preconfigured session.
@@ -195,7 +194,7 @@ Credentials, application/session state and Control Panel authentication are stor
 - Account not authorized: refresh the account list from the current session and use an exact returned UID. Do not reuse account IDs across sessions/users.
 - Transaction scope/date/filter error: correct the request according to the schema. `date_to` requires `date_from`; a balance-only bank grant cannot be bypassed.
 - MCP/provider error: preserve the returned status/message and any `retry_after` value. Avoid blind retries for authorization, validation, or permission failures; retry transient read failures only when appropriate and within the returned retry guidance.
-- Elicitation declined: treat as cancellation; do not proceed to bank authorization. Required first-run input unavailable/unsupported: setup stops. Do not simulate MCP elicitation by asking for credentials in chat.
+- Elicitation declined: treat as cancellation. If Control Panel email form elicitation is unavailable and the result requests `ENABLE_BANKING_CONTROL_PANEL_EMAIL`, have the user configure it in the local MCP server environment; never ask them to share the email in chat. For missing country/bank choices, use the returned options and ask the user to choose.
 
 ## Example tool-call arguments
 

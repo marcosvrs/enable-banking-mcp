@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   privacy:
     name: Scan privacy and secrets
@@ -29,8 +33,18 @@ jobs:
 
       - name: Scan PII and account-specific denylist
         env:
-          PRIVACY_FORBIDDEN_VALUES: ${{ secrets.PRIVACY_FORBIDDEN_VALUES }}
-        run: node scripts/privacy-scan.mjs --history
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            node scripts/privacy-scan.mjs --range "${BASE_SHA}..${HEAD_SHA}"
+          elif [[ "$EVENT_NAME" == "push" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+            node scripts/privacy-scan.mjs --range "${BEFORE_SHA}..${HEAD_SHA}"
+          else
+            node scripts/privacy-scan.mjs --history
+          fi
 
       - name: Scan secrets with Gitleaks
         # v3

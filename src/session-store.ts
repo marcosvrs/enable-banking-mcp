@@ -7,7 +7,7 @@ export interface SecretStore {
   clear(): Promise<void>;
 }
 
-export interface SessionStore extends SecretStore {}
+export type SessionStore = SecretStore;
 
 type SecurityResult = {
   code: number;
