@@ -7,6 +7,11 @@ description: Use when operating this Enable Banking MCP to onboard a personal ba
 
 Use this skill whenever the user asks to connect their bank, inspect account status, retrieve account details, balances or transactions, or manage this MCP's local authentication/session state. It documents the `enable-banking` MCP server's current tool contract; the connected host's live tool schemas remain authoritative if they differ.
 
+This guide documents the `0.4.0-beta.2` MCP contract. `npx skills add` installs
+the instructions only; it does not install or update the server. Ensure the
+host is connected to that release or newer, and follow the live tool schemas
+when using an older/different server version.
+
 ## Operating model and boundaries
 
 - This is a local macOS MCP server using stdio transport. The MCP host starts its own process. If the tools are already exposed in the current agent session, call them directly; starting another `node dist/server.js` process does not connect it to the current host's tool route.
