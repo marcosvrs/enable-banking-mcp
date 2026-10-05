@@ -7,25 +7,29 @@ import { get as httpsGet } from "node:https";
 
 import { setNativeKeyringEntryFactory } from "../../dist/session-store.js";
 
-const nativeRecords = new Map();
+const nativeRecords = new Map(
+  Object.entries(JSON.parse(process.env.MCP_TEST_KEYCHAIN || "{}")).map(
+    ([service, value]) => [
+      `${service}\u0000${process.env.USER?.trim() || "default"}`,
+      value,
+    ],
+  ),
+);
 setNativeKeyringEntryFactory((service, account) => ({
   getPassword: () => nativeRecords.get(`${service}\u0000${account}`) ?? null,
   setPassword: (value) => nativeRecords.set(`${service}\u0000${account}`, value),
   deletePassword: () => {
     const key = `${service}\u0000${account}`;
     if (
-      service === "enable-banking-mcp.native" &&
+      service === "enable-banking-mcp.credentials.native" &&
       certificateDeleteAttempted &&
-      oneShotFailures.delete("delete-session")
+      oneShotFailures.delete("delete-credential-item")
     ) {
       throw new Error("Injected Keychain deletion failure");
     }
     return nativeRecords.delete(key);
   },
 }));
-const records = new Map(
-  Object.entries(JSON.parse(process.env.MCP_TEST_KEYCHAIN || "{}")),
-);
 const realSpawn = childProcess.spawn.bind(childProcess);
 const oneShotFailures = new Set(
   (process.env.MCP_TEST_FAIL_ONCE || "").split(",").filter(Boolean),
@@ -58,30 +62,6 @@ function completedChild(stdout = "", stderr = "", code = 0, delay = 0) {
 
 function runSecurity(args) {
   const operation = args[0];
-  const serviceIndex = args.indexOf("-s");
-  const service = serviceIndex === -1 ? undefined : args[serviceIndex + 1];
-  if (operation === "find-generic-password" && service) {
-    const value = records.get(service);
-    const delay =
-      service === "enable-banking-mcp.application" &&
-      process.env.MCP_TEST_DELAY_APPLICATION_LOOKUP === "true"
-        ? 250
-        : 0;
-    return value === undefined
-      ? completedChild("", "The specified item could not be found in the keychain.", 44, delay)
-      : completedChild(`${value}\n`, "", 0, delay);
-  }
-  if (operation === "delete-generic-password" && service) {
-    if (
-      service === "enable-banking-mcp" &&
-      certificateDeleteAttempted &&
-      oneShotFailures.delete("delete-session")
-    ) {
-      return completedChild("", "Injected Keychain deletion failure", 1);
-    }
-    records.delete(service);
-    return completedChild();
-  }
   if (operation === "add-trusted-cert") return completedChild();
   if (operation === "delete-certificate") {
     certificateDeleteAttempted = true;
@@ -94,21 +74,6 @@ function runSecurity(args) {
 
 childProcess.spawn = (command, args = [], options) => {
   if (command === "/usr/bin/security") {
-    if (oneShotFailures.delete("security-no-stdio")) {
-      const child = new EventEmitter();
-      child.kill = () => true;
-      return child;
-    }
-    if (oneShotFailures.delete("security-spawn-error")) {
-      const child = new EventEmitter();
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
-      child.kill = () => true;
-      queueMicrotask(() => {
-        child.emit("error", new Error("Injected security spawn error"));
-      });
-      return child;
-    }
     return runSecurity(args);
   }
   if (command === "/usr/bin/open") return completedChild();
@@ -182,7 +147,7 @@ globalThis.fetch = async (input, init = {}) => {
         kid: "fixture-app-id",
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
-        active: applicationRequests > 3,
+        active: applicationRequests > 2,
         countries: ["IE"],
         services: ["AIS"],
       });

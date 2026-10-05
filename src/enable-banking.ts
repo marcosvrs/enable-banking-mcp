@@ -1,3 +1,5 @@
+import { Effect } from "effect";
+
 import { createPrivateKey, createSign, type KeyObject } from "node:crypto";
 import type { EnableBankingCredentials } from "./config.js";
 import { parseLoopbackRedirect } from "./redirect.js";
@@ -144,25 +146,36 @@ export function createJwt(
   );
 }
 
-export async function getHealth(
+export function getHealth(
   fetchFn: typeof fetch = globalThis.fetch,
-): Promise<unknown> {
-  const response = await fetchFn(`${API_BASE_URL}/health`, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+): Effect.Effect<unknown, unknown> {
+  return Effect.gen(function* () {
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetchFn(`${API_BASE_URL}/health`, {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        }),
+      catch: (error) => error,
+    });
+    const raw = yield* Effect.tryPromise({
+      try: () => response.text(),
+      catch: (error) => error,
+    });
+    const body = parseJson(raw);
+    if (!response.ok) {
+      return yield* Effect.fail(
+        new EnableBankingApiError(
+          response.status,
+          extractErrorMessage(body) || response.statusText || "request failed",
+          extractErrorDetails(body),
+          response.headers.get("retry-after") ?? undefined,
+        ),
+      );
+    }
+    return body;
   });
-  const raw = await response.text();
-  const body = parseJson(raw);
-  if (!response.ok) {
-    throw new EnableBankingApiError(
-      response.status,
-      extractErrorMessage(body) || response.statusText || "request failed",
-      extractErrorDetails(body),
-      response.headers.get("retry-after") ?? undefined,
-    );
-  }
-  return body;
 }
 
 export class EnableBankingClient {
@@ -179,207 +192,285 @@ export class EnableBankingClient {
     this.key = privateKeyFromValue(credentials.privateKey);
   }
 
-  async listBanks(country?: string): Promise<unknown> {
-    const params = new URLSearchParams({
-      psu_type: "personal",
-      service: "AIS",
-    });
-    if (country !== undefined) {
-      const code = country.trim().toUpperCase();
-      if (!/^[A-Z]{2}$/.test(code)) {
-        throw new Error("country must be a two-letter ISO 3166-1 code");
-      }
-      params.set("country", code);
-    }
-    return this.request(`/aspsps?${params.toString()}`);
+  listBanks(country?: string): Effect.Effect<unknown, unknown> {
+    return Effect.gen(
+      function* (this: EnableBankingClient) {
+        const params = new URLSearchParams({
+          psu_type: "personal",
+          service: "AIS",
+        });
+        if (country !== undefined) {
+          const code = country.trim().toUpperCase();
+          if (!/^[A-Z]{2}$/.test(code)) {
+            return yield* Effect.fail(
+              new Error("country must be a two-letter ISO 3166-1 code"),
+            );
+          }
+          params.set("country", code);
+        }
+        return yield* this.request(`/aspsps?${params.toString()}`);
+      }.bind(this),
+    );
   }
 
-  async startAuthorization(
+  startAuthorization(
     request: AuthorizationRequest,
-  ): Promise<AuthorizationResponse> {
-    const country = request.aspsp.country.trim().toUpperCase();
-    const name = request.aspsp.name.trim();
-    if (!/^[A-Z]{2}$/.test(country)) {
-      throw new Error("country must be a two-letter ISO 3166-1 code");
-    }
-    if (!name) {
-      throw new Error("aspsp.name is required");
-    }
-    if (!/^[A-Za-z0-9_-]{43}$/.test(request.state)) {
-      throw new Error("state must be a 256-bit base64url value");
-    }
-    if (request.psu_type !== "personal") {
-      throw new Error("psu_type must be personal");
-    }
-    if (
-      typeof request.access.balances !== "boolean" ||
-      typeof request.access.transactions !== "boolean"
-    ) {
-      throw new Error("access.balances and access.transactions must be boolean");
-    }
-    parseLoopbackRedirect(request.redirect_url);
-    const validUntilTimestamp = Date.parse(request.access.valid_until);
-    if (
-      !RFC3339_DATE_TIME.test(request.access.valid_until) ||
-      !Number.isFinite(validUntilTimestamp) ||
-      validUntilTimestamp <= Date.now()
-    ) {
-      throw new Error("access.valid_until must be a future RFC3339 date-time");
-    }
-    const response = await this.request<AuthorizationResponse>("/auth", {
-      method: "POST",
-      body: {
-        ...request,
-        aspsp: { name, country },
-      },
-    });
-    validateAuthorizationUrl(response.url);
-    return response;
+  ): Effect.Effect<AuthorizationResponse, unknown> {
+    return Effect.gen(
+      function* (this: EnableBankingClient) {
+        const country = request.aspsp.country.trim().toUpperCase();
+        const name = request.aspsp.name.trim();
+        if (!/^[A-Z]{2}$/.test(country)) {
+          return yield* Effect.fail(
+            new Error("country must be a two-letter ISO 3166-1 code"),
+          );
+        }
+        if (!name) {
+          return yield* Effect.fail(new Error("aspsp.name is required"));
+        }
+        if (!/^[A-Za-z0-9_-]{43}$/.test(request.state)) {
+          return yield* Effect.fail(
+            new Error("state must be a 256-bit base64url value"),
+          );
+        }
+        if (request.psu_type !== "personal") {
+          return yield* Effect.fail(new Error("psu_type must be personal"));
+        }
+        if (
+          typeof request.access.balances !== "boolean" ||
+          typeof request.access.transactions !== "boolean"
+        ) {
+          return yield* Effect.fail(
+            new Error("access.balances and access.transactions must be boolean"),
+          );
+        }
+        parseLoopbackRedirect(request.redirect_url);
+        const validUntilTimestamp = Date.parse(request.access.valid_until);
+        if (
+          !RFC3339_DATE_TIME.test(request.access.valid_until) ||
+          !Number.isFinite(validUntilTimestamp) ||
+          validUntilTimestamp <= Date.now()
+        ) {
+          return yield* Effect.fail(
+            new Error("access.valid_until must be a future RFC3339 date-time"),
+          );
+        }
+        const response = yield* this.request<AuthorizationResponse>("/auth", {
+          method: "POST",
+          body: {
+            ...request,
+            aspsp: { name, country },
+          },
+        });
+        validateAuthorizationUrl(response.url);
+        return response;
+      }.bind(this),
+    );
   }
 
-  async createSession(code: string): Promise<SessionResponse> {
-    const authorizationCode = code.trim();
-    if (!authorizationCode) {
-      throw new Error("authorization code is required");
-    }
-    return this.request("/sessions", {
-      method: "POST",
-      body: { code: authorizationCode },
-    });
+  createSession(code: string): Effect.Effect<SessionResponse, unknown> {
+    return Effect.gen(
+      function* (this: EnableBankingClient) {
+        const authorizationCode = code.trim();
+        if (!authorizationCode) {
+          return yield* Effect.fail(new Error("authorization code is required"));
+        }
+        return yield* this.request<SessionResponse>("/sessions", {
+          method: "POST",
+          body: { code: authorizationCode },
+        });
+      }.bind(this),
+    );
   }
 
-  async getApplication(): Promise<ApplicationResponse> {
+  getApplication(): Effect.Effect<ApplicationResponse, unknown> {
     return this.request("/application");
   }
 
-  async getHealth(): Promise<unknown> {
+  getHealth(): Effect.Effect<unknown, unknown> {
     return getHealth(this.fetchFn);
   }
 
-  async getSession(sessionId: string): Promise<Record<string, unknown>> {
-    return this.request(`/sessions/${encodeURIComponent(sessionId)}`);
+  getSession(
+    sessionId: string,
+  ): Effect.Effect<Record<string, unknown>, unknown> {
+    return Effect.try({
+      try: () => encodeURIComponent(sessionId),
+      catch: (error) => error,
+    }).pipe(
+      Effect.flatMap((encodedId) =>
+        this.request(`/sessions/${encodedId}`),
+      ),
+    );
   }
 
-  async deleteSession(sessionId: string): Promise<Record<string, unknown>> {
-    return this.request(`/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-    });
+  deleteSession(
+    sessionId: string,
+  ): Effect.Effect<Record<string, unknown>, unknown> {
+    return Effect.try({
+      try: () => encodeURIComponent(sessionId),
+      catch: (error) => error,
+    }).pipe(
+      Effect.flatMap((encodedId) =>
+        this.request(`/sessions/${encodedId}`, { method: "DELETE" }),
+      ),
+    );
   }
 
-  async getAccountDetails(accountId: string): Promise<unknown> {
-    return this.request(`/accounts/${encodeURIComponent(accountId)}/details`);
+  getAccountDetails(accountId: string): Effect.Effect<unknown, unknown> {
+    return Effect.try({
+      try: () => encodeURIComponent(accountId),
+      catch: (error) => error,
+    }).pipe(
+      Effect.flatMap((encodedId) =>
+        this.request(`/accounts/${encodedId}/details`),
+      ),
+    );
   }
 
-  async getAccountBalances(accountId: string): Promise<unknown> {
-    return this.request(`/accounts/${encodeURIComponent(accountId)}/balances`);
+  getAccountBalances(accountId: string): Effect.Effect<unknown, unknown> {
+    return Effect.try({
+      try: () => encodeURIComponent(accountId),
+      catch: (error) => error,
+    }).pipe(
+      Effect.flatMap((encodedId) =>
+        this.request(`/accounts/${encodedId}/balances`),
+      ),
+    );
   }
 
-  async getAccountTransactions(
+  getAccountTransactions(
     accountId: string,
     query: TransactionQuery,
-  ): Promise<{
+  ): Effect.Effect<{
     transactions: unknown[];
     pages: number;
     hasMore: boolean;
     continuationKey?: string;
-  }> {
-    if (query.dateTo && !query.dateFrom) {
-      throw new Error("date_to requires date_from");
-    }
-    if (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > 100) {
-      throw new Error("limit must be an integer between 1 and 100");
-    }
+  }, unknown> {
+    return Effect.gen(
+      function* (this: EnableBankingClient) {
+        if (query.dateTo && !query.dateFrom) {
+          return yield* Effect.fail(new Error("date_to requires date_from"));
+        }
+        if (
+          !Number.isInteger(query.limit) ||
+          query.limit < 1 ||
+          query.limit > 100
+        ) {
+          return yield* Effect.fail(
+            new Error("limit must be an integer between 1 and 100"),
+          );
+        }
 
-    const transactions: unknown[] = [];
-    let continuationKey: string | undefined = query.continuationKey;
-    let nextContinuationKey: string | undefined;
-    let hasMore = false;
-    let pages = 0;
+        const transactions: unknown[] = [];
+        let continuationKey: string | undefined = query.continuationKey;
+        let nextContinuationKey: string | undefined;
+        let hasMore = false;
+        let pages = 0;
 
-    do {
-      const params = new URLSearchParams();
-      if (query.dateFrom) params.set("date_from", query.dateFrom);
-      if (query.dateTo) params.set("date_to", query.dateTo);
-      if (query.transactionStatus) {
-        params.set("transaction_status", query.transactionStatus);
-      }
-      if (query.strategy) params.set("strategy", query.strategy);
-      if (continuationKey) params.set("continuation_key", continuationKey);
-      const suffix = params.toString() ? `?${params.toString()}` : "";
+        do {
+          const params = new URLSearchParams();
+          if (query.dateFrom) params.set("date_from", query.dateFrom);
+          if (query.dateTo) params.set("date_to", query.dateTo);
+          if (query.transactionStatus) {
+            params.set("transaction_status", query.transactionStatus);
+          }
+          if (query.strategy) params.set("strategy", query.strategy);
+          if (continuationKey) params.set("continuation_key", continuationKey);
+          const suffix = params.toString() ? `?${params.toString()}` : "";
 
-      const page = await this.request<TransactionPage>(
-        `/accounts/${encodeURIComponent(accountId)}/transactions${suffix}`,
-      );
-      pages += 1;
+          const encodedAccountId = yield* Effect.try({
+            try: () => encodeURIComponent(accountId),
+            catch: (error) => error,
+          });
+          const page = yield* this.request<TransactionPage>(
+            `/accounts/${encodedAccountId}/transactions${suffix}`,
+          );
+          pages += 1;
+          const pageTransactions = page.transactions ?? [];
+          // Provider pages are indivisible, so a final page may exceed limit.
+          transactions.push(...pageTransactions);
 
-      const pageTransactions = page.transactions ?? [];
-      // `limit` is a target, not a hard cap: provider pages are indivisible,
-      // so a final page may exceed it rather than losing its unreturned tail.
-      transactions.push(...pageTransactions);
-
-      const providerContinuation = page.continuation_key ?? undefined;
-      if (providerContinuation && providerContinuation === continuationKey) {
-        throw new Error("provider returned a repeated continuation key");
-      }
-      hasMore = Boolean(providerContinuation);
-      if (providerContinuation) nextContinuationKey = providerContinuation;
-      continuationKey =
-        transactions.length >= query.limit
-          ? undefined
-          : providerContinuation;
-    } while (continuationKey);
-    return {
-      transactions,
-      pages,
-      hasMore,
-      ...(nextContinuationKey ? { continuationKey: nextContinuationKey } : {}),
-    };
-  }
-
-  async getTransactionDetails(
-    accountId: string,
-    transactionId: string,
-  ): Promise<unknown> {
-    return this.request(
-      `/accounts/${encodeURIComponent(accountId)}/transactions/${encodeURIComponent(transactionId)}`,
+          const providerContinuation = page.continuation_key ?? undefined;
+          if (providerContinuation && providerContinuation === continuationKey) {
+            return yield* Effect.fail(
+              new Error("provider returned a repeated continuation key"),
+            );
+          }
+          hasMore = Boolean(providerContinuation);
+          if (providerContinuation) nextContinuationKey = providerContinuation;
+          continuationKey =
+            transactions.length >= query.limit
+              ? undefined
+              : providerContinuation;
+        } while (continuationKey);
+        return {
+          transactions,
+          pages,
+          hasMore,
+          ...(nextContinuationKey ? { continuationKey: nextContinuationKey } : {}),
+        };
+      }.bind(this),
     );
   }
 
-  private async request<T>(
+  getTransactionDetails(
+    accountId: string,
+    transactionId: string,
+  ): Effect.Effect<unknown, unknown> {
+    return Effect.try({
+      try: () =>
+        `/accounts/${encodeURIComponent(accountId)}/transactions/${encodeURIComponent(transactionId)}`,
+      catch: (error) => error,
+    }).pipe(Effect.flatMap((path) => this.request(path)));
+  }
+
+  private request<T>(
     path: string,
     options: {
       method?: "GET" | "POST" | "DELETE";
       body?: unknown;
     } = {},
-  ): Promise<T> {
-    const token = this.authorizationToken();
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-    };
-    const init: RequestInit = {
-      method: options.method ?? "GET",
-      headers,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    };
-    if (options.body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      init.body = JSON.stringify(options.body);
-    }
-    const response = await this.fetchFn(`${API_BASE_URL}${path}`, init);
-
-    const raw = await response.text();
-    const body = parseJson(raw);
-    if (!response.ok) {
-      throw new EnableBankingApiError(
-        response.status,
-        extractErrorMessage(body) || response.statusText || "request failed",
-        extractErrorDetails(body),
-        response.headers.get("retry-after") ?? undefined,
-      );
-    }
-
-    return body as T;
+  ): Effect.Effect<T, unknown> {
+    return Effect.gen(
+      function* (this: EnableBankingClient) {
+        const token = this.authorizationToken();
+        const headers: Record<string, string> = {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+        };
+        const init: RequestInit = {
+          method: options.method ?? "GET",
+          headers,
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        };
+        if (options.body !== undefined) {
+          headers["Content-Type"] = "application/json";
+          init.body = JSON.stringify(options.body);
+        }
+        const response = yield* Effect.tryPromise({
+          try: () => this.fetchFn(`${API_BASE_URL}${path}`, init),
+          catch: (error) => error,
+        });
+        const raw = yield* Effect.tryPromise({
+          try: () => response.text(),
+          catch: (error) => error,
+        });
+        const body = parseJson(raw);
+        if (!response.ok) {
+          return yield* Effect.fail(
+            new EnableBankingApiError(
+              response.status,
+              extractErrorMessage(body) || response.statusText || "request failed",
+              extractErrorDetails(body),
+              response.headers.get("retry-after") ?? undefined,
+            ),
+          );
+        }
+        return body as T;
+      }.bind(this),
+    );
   }
 
   private authorizationToken(): string {

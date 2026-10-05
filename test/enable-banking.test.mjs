@@ -1,3 +1,5 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import { generateKeyPairSync, verify } from "node:crypto";
 import test from "node:test";
@@ -10,6 +12,12 @@ import {
   privateKeyFromValue,
 } from "../dist/enable-banking.js";
 import { loadCredentials } from "../dist/config.js";
+
+async function effectFailure(effect) {
+  const result = await Effect.runPromise(Effect.either(effect));
+  assert.equal(result._tag, "Left");
+  return result.left;
+}
 test("loads the configured application ID aliases", () => {
   const privateKey = "private-key";
   assert.equal(
@@ -51,7 +59,7 @@ test("starts bank authorization and exchanges its callback code", async () => {
     },
   );
 
-  const authorization = await client.startAuthorization({
+  const authorization = await Effect.runPromise(client.startAuthorization({
     aspsp: { name: "Example Bank", country: "ie" },
     access: {
       balances: true,
@@ -61,8 +69,8 @@ test("starts bank authorization and exchanges its callback code", async () => {
     state: "A".repeat(43),
     redirect_url: "https://localhost:8765/callback",
     psu_type: "personal",
-  });
-  const session = await client.createSession("callback-code");
+  }));
+  const session = await Effect.runPromise(client.createSession("callback-code"));
 
   assert.equal(authorization.authorization_id, "authorization-id");
   assert.deepEqual(session, { session_id: "session-id" });
@@ -94,7 +102,7 @@ test("rejects non-personal authorization requests", async () => {
   );
 
   await assert.rejects(
-    client.startAuthorization({
+    Effect.runPromise(client.startAuthorization({
       aspsp: { name: "Example Bank", country: "IE" },
       access: {
         balances: true,
@@ -104,7 +112,7 @@ test("rejects non-personal authorization requests", async () => {
       state: "A".repeat(43),
       redirect_url: "https://localhost:8765/callback",
       psu_type: "business",
-    }),
+    })),
     /psu_type must be personal/,
   );
 });
@@ -119,7 +127,7 @@ test("lists all ASPSPs when country is omitted", async () => {
       return new Response(JSON.stringify({ aspsps: [] }), { status: 200 });
     },
   );
-  await client.listBanks();
+  await Effect.runPromise(client.listBanks());
   assert.equal(new URL(requestedUrl).searchParams.get("psu_type"), "personal");
   assert.equal(new URL(requestedUrl).searchParams.get("service"), "AIS");
   assert.equal(new URL(requestedUrl).searchParams.get("country"), null);
@@ -137,7 +145,7 @@ test("rejects invalid bank-list countries before requesting provider data", asyn
   );
 
   await assert.rejects(
-    client.listBanks("FIN"),
+    Effect.runPromise(client.listBanks("FIN")),
     /country must be a two-letter ISO 3166-1 code/,
   );
   assert.equal(requestCount, 0);
@@ -206,11 +214,11 @@ test("fetches provider pages until reaching the requested transaction target", a
     },
   );
 
-  const result = await client.getAccountTransactions("account-uid", {
+  const result = await Effect.runPromise(client.getAccountTransactions("account-uid", {
     dateFrom: "2026-08-01",
     dateTo: "2026-08-31",
     limit: 2,
-  });
+  }));
 
   assert.deepEqual(result.transactions, [{ id: "first" }, { id: "second" }]);
   assert.equal(result.pages, 2);
@@ -220,11 +228,11 @@ test("fetches provider pages until reaching the requested transaction target", a
   assert.match(calls[0].url, /date_to=2026-08-31/);
   assert.match(calls[1].url, /continuation_key=next/);
   assert.match(calls[0].options.headers.Authorization, /^Bearer /);
-  const limited = await client.getAccountTransactions("account-uid", {
+  const limited = await Effect.runPromise(client.getAccountTransactions("account-uid", {
     dateFrom: "2026-08-01",
     dateTo: "2026-08-31",
     limit: 1,
-  });
+  }));
   assert.deepEqual(limited.transactions, [{ id: "first" }]);
   assert.equal(limited.pages, 1);
   assert.equal(limited.hasMore, true);
@@ -244,10 +252,10 @@ test("returns complete provider pages that exceed the transaction target", async
       ),
   );
 
-  const result = await client.getAccountTransactions("account-uid", {
+  const result = await Effect.runPromise(client.getAccountTransactions("account-uid", {
     dateFrom: "2026-08-01",
     limit: 2,
-  });
+  }));
 
   assert.deepEqual(result.transactions, [
     { id: "first" },
@@ -269,10 +277,10 @@ test("rejects date_to without date_from before making a request", async () => {
   );
 
   await assert.rejects(
-    client.getAccountTransactions("account-uid", {
+    Effect.runPromise(client.getAccountTransactions("account-uid", {
       dateTo: "2026-08-31",
       limit: 10,
-    }),
+    })),
     /date_to requires date_from/,
   );
 });
@@ -286,7 +294,7 @@ test("bounds transaction retrieval before making a request", async () => {
   );
 
   await assert.rejects(
-    client.getAccountTransactions("account-uid", { limit: 101 }),
+    Effect.runPromise(client.getAccountTransactions("account-uid", { limit: 101 })),
     /limit must be an integer between 1 and 100/,
   );
 });
@@ -327,19 +335,19 @@ test("covers the documented read-only session and account operations", async () 
     },
   );
 
-  await client.listBanks("ie");
-  await client.getApplication();
-  await client.getHealth();
-  await client.getSession("session-id");
-  await client.deleteSession("session-id");
-  await client.getAccountDetails("account-id");
-  await client.getAccountBalances("account-id");
-  await client.getAccountTransactions("account-id", {
+  await Effect.runPromise(client.listBanks("ie"));
+  await Effect.runPromise(client.getApplication());
+  await Effect.runPromise(client.getHealth());
+  await Effect.runPromise(client.getSession("session-id"));
+  await Effect.runPromise(client.deleteSession("session-id"));
+  await Effect.runPromise(client.getAccountDetails("account-id"));
+  await Effect.runPromise(client.getAccountBalances("account-id"));
+  await Effect.runPromise(client.getAccountTransactions("account-id", {
     transactionStatus: "BOOK",
     strategy: "longest",
     limit: 2,
-  });
-  await client.getTransactionDetails("account-id", "transaction-id");
+  }));
+  await Effect.runPromise(client.getTransactionDetails("account-id", "transaction-id"));
 
   const listBanksCall = calls.find(({ url }) => url.includes("/aspsps"));
   assert.equal(new URL(listBanksCall.url).searchParams.get("psu_type"), "personal");
@@ -370,13 +378,10 @@ test("surfaces API status and message without exposing credentials", async () =>
       }),
   );
 
-  await assert.rejects(
-    client.getSession("session-id"),
-    (error) =>
-      error instanceof EnableBankingApiError &&
-      error.status === 401 &&
-      error.message === "Enable Banking API 401: expired session",
-  );
+  const error = await effectFailure(client.getSession("session-id"));
+  assert.ok(error instanceof EnableBankingApiError);
+  assert.equal(error.status, 401);
+  assert.equal(error.message, "Enable Banking API 401: expired session");
 });
 
 test("retains structured API error details", async () => {
@@ -395,14 +400,11 @@ test("retains structured API error details", async () => {
       ),
   );
 
-  await assert.rejects(
-    client.getSession("session-id"),
-    (error) =>
-      error instanceof EnableBankingApiError &&
-      error.details.code === 401 &&
-      error.details.error === "EXPIRED_SESSION" &&
-      error.details.detail === "The session is no longer valid",
-  );
+  const error = await effectFailure(client.getSession("session-id"));
+  assert.ok(error instanceof EnableBankingApiError);
+  assert.equal(error.details.code, 401);
+  assert.equal(error.details.error, "EXPIRED_SESSION");
+  assert.equal(error.details.detail, "The session is no longer valid");
 });
 
 test("clears only explicitly terminal provider sessions", () => {
@@ -443,21 +445,18 @@ test("preserves provider retry-after metadata", async () => {
       }),
   );
 
-  await assert.rejects(
-    client.getSession("session-id"),
-    (error) =>
-      error instanceof EnableBankingApiError &&
-      error.status === 429 &&
-      error.retryAfter === "60",
-  );
+  const error = await effectFailure(client.getSession("session-id"));
+  assert.ok(error instanceof EnableBankingApiError);
+  assert.equal(error.status, 429);
+  assert.equal(error.retryAfter, "60");
 });
 
 test("checks public API health without credentials", async () => {
   let request;
-  const result = await getHealth(async (url, options) => {
+  const result = await Effect.runPromise(getHealth(async (url, options) => {
     request = { url: String(url), options };
     return new Response(JSON.stringify("OK"), { status: 200 });
-  });
+  }));
 
   assert.equal(result, "OK");
   assert.equal(request.url, "https://api.enablebanking.com/health");
@@ -474,7 +473,7 @@ test("rejects invalid authorization expiry before requesting authorization", asy
   );
 
   await assert.rejects(
-    client.startAuthorization({
+    Effect.runPromise(client.startAuthorization({
       aspsp: { name: "Example Bank", country: "IE" },
       access: {
         balances: true,
@@ -484,7 +483,7 @@ test("rejects invalid authorization expiry before requesting authorization", asy
       state: "A".repeat(43),
       redirect_url: "https://localhost:8765/callback",
       psu_type: "personal",
-    }),
+    })),
     /access\.valid_until must be a future RFC3339 date-time/,
   );
 });
@@ -506,10 +505,10 @@ test("rejects a repeated provider continuation key instead of looping", async ()
   );
 
   await assert.rejects(
-    client.getAccountTransactions("account-1", {
+    Effect.runPromise(client.getAccountTransactions("account-1", {
       limit: 10,
       continuationKey: "cursor-a",
-    }),
+    })),
     /provider returned a repeated continuation key/,
   );
   assert.equal(requests.length, 1);
@@ -527,7 +526,7 @@ test("returns an empty first transaction page when the provider omits transactio
   );
 
   assert.deepEqual(
-    await client.getAccountTransactions("account-1", { limit: 1 }),
+    await Effect.runPromise(client.getAccountTransactions("account-1", { limit: 1 })),
     { transactions: [], pages: 1, hasMore: false },
   );
 });
@@ -590,7 +589,7 @@ test("rejects invalid authorization fields before making a provider request", as
   ];
 
   for (const [request, error] of invalidRequests) {
-    await assert.rejects(client.startAuthorization(request), error);
+    await assert.rejects(Effect.runPromise(client.startAuthorization(request)), error);
   }
   assert.equal(requests, 0);
 });
@@ -606,7 +605,7 @@ test("rejects an empty authorization code before exchanging it", async () => {
     },
   );
 
-  await assert.rejects(client.createSession(" \n "), /authorization code is required/);
+  await assert.rejects(Effect.runPromise(client.createSession(" \n ")), /authorization code is required/);
   assert.equal(requests, 0);
 });
 
@@ -629,7 +628,7 @@ test("rejects malformed and unsafe provider authorization URLs", async () => {
         }),
     );
     await assert.rejects(
-      client.startAuthorization({
+      Effect.runPromise(client.startAuthorization({
         aspsp: { name: "Example Bank", country: "IE" },
         access: {
           balances: true,
@@ -639,7 +638,7 @@ test("rejects malformed and unsafe provider authorization URLs", async () => {
         state: "A".repeat(43),
         redirect_url: "https://localhost:8765/callback",
         psu_type: "personal",
-      }),
+      })),
       /Enable Banking returned an invalid authorization URL/,
     );
   }
@@ -660,51 +659,41 @@ test("uses provider error fallbacks and retains only structured API details", as
       ),
   );
 
-  await assert.rejects(client.getApplication(), (error) => {
-    assert.ok(error instanceof EnableBankingApiError);
-    assert.equal(
-      error.message,
-      "Enable Banking API 502: UPSTREAM_FAILURE",
-    );
-    assert.deepEqual(error.details, {
-      code: 502,
-      error: "UPSTREAM_FAILURE",
-      detail: "Provider gateway unavailable",
-    });
-    return true;
+  const error = await effectFailure(client.getApplication());
+  assert.ok(error instanceof EnableBankingApiError);
+  assert.equal(error.message, "Enable Banking API 502: UPSTREAM_FAILURE");
+  assert.deepEqual(error.details, {
+    code: 502,
+    error: "UPSTREAM_FAILURE",
+    detail: "Provider gateway unavailable",
   });
 
   const emptyErrorClient = new EnableBankingClient(
     { appId: "app-id", privateKey },
     async () => new Response("", { status: 503, statusText: "Service Unavailable" }),
   );
-  await assert.rejects(emptyErrorClient.getApplication(), (error) => {
-    assert.ok(error instanceof EnableBankingApiError);
-    assert.equal(error.message, "Enable Banking API 503: Service Unavailable");
-    assert.deepEqual(error.details, {});
-    return true;
-  });
+  const emptyError = await effectFailure(emptyErrorClient.getApplication());
+  assert.ok(emptyError instanceof EnableBankingApiError);
+  assert.equal(emptyError.message, "Enable Banking API 503: Service Unavailable");
+  assert.deepEqual(emptyError.details, {});
 
   const genericFallbackClient = new EnableBankingClient(
     { appId: "app-id", privateKey },
     async () => new Response("", { status: 502, statusText: "" }),
   );
-  await assert.rejects(genericFallbackClient.getApplication(), (error) => {
-    assert.ok(error instanceof EnableBankingApiError);
-    assert.equal(error.message, "Enable Banking API 502: request failed");
-    assert.deepEqual(error.details, {});
-    return true;
-  });
+  const genericError = await effectFailure(genericFallbackClient.getApplication());
+  assert.ok(genericError instanceof EnableBankingApiError);
+  assert.equal(genericError.message, "Enable Banking API 502: request failed");
+  assert.deepEqual(genericError.details, {});
 
-  await assert.rejects(
+  const healthError = await effectFailure(
     getHealth(async () =>
       new Response("", { status: 503, statusText: "Health unavailable" }),
     ),
-    (error) =>
-      error instanceof EnableBankingApiError &&
-      error.message === "Enable Banking API 503: Health unavailable" &&
-      Object.keys(error.details).length === 0,
   );
+  assert.ok(healthError instanceof EnableBankingApiError);
+  assert.equal(healthError.message, "Enable Banking API 503: Health unavailable");
+  assert.deepEqual(healthError.details, {});
 });
 
 test("preserves malformed JSON response text as the observable response message", async () => {
@@ -713,17 +702,15 @@ test("preserves malformed JSON response text as the observable response message"
     { appId: "app-id", privateKey },
     async () => new Response("{broken", { status: 200 }),
   );
-  assert.deepEqual(await client.getApplication(), { message: "{broken" });
+  assert.deepEqual(await Effect.runPromise(client.getApplication()), { message: "{broken" });
 
   const failedClient = new EnableBankingClient(
     { appId: "app-id", privateKey },
     async () =>
       new Response("{broken", { status: 502, statusText: "Bad Gateway" }),
   );
-  await assert.rejects(failedClient.getApplication(), (error) => {
-    assert.ok(error instanceof EnableBankingApiError);
-    assert.equal(error.message, "Enable Banking API 502: {broken");
-    assert.deepEqual(error.details, {});
-    return true;
-  });
+  const error = await effectFailure(failedClient.getApplication());
+  assert.ok(error instanceof EnableBankingApiError);
+  assert.equal(error.message, "Enable Banking API 502: {broken");
+  assert.deepEqual(error.details, {});
 });
