@@ -46,10 +46,10 @@ export type BrowserOpener = (
   url: string,
 ) => Effect.Effect<void, unknown>;
 
-export type CallbackListener = {
+export interface CallbackListener {
   wait: Effect.Effect<string, unknown>;
   close: Effect.Effect<void, unknown>;
-};
+}
 
 export interface CallbackTlsOptions {
   key: Buffer;
@@ -138,7 +138,9 @@ export class BankAuthorizationFlow {
     options: BankAuthorizationOptions,
   ): Effect.Effect<AuthorizationStartResult, unknown> {
     return Effect.gen(this, function* () {
-      yield* Effect.sync(() => this.reserve());
+      yield* Effect.sync(() => {
+        this.reserve();
+      });
       return yield* this.startReserved(client, options);
     });
   }
@@ -200,7 +202,7 @@ export class BankAuthorizationFlow {
         }),
       );
       if (authorizationResult._tag === "Failure") {
-        if (this.pending?.listener === listener) {
+        if (this.pending.listener === listener) {
           this.pending = undefined;
         }
         yield* listener.close.pipe(Effect.catchAllCause(() => Effect.void));
@@ -224,7 +226,7 @@ export class BankAuthorizationFlow {
   private finish(
     client: EnableBankingClient,
     listener: CallbackListener,
-  ): Effect.Effect<void, never> {
+  ): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       const completion = Effect.gen(this, function* () {
         const code = yield* listener.wait;
@@ -336,11 +338,15 @@ function createCallbackListener(
     const wait = Effect.async<string, unknown>((resume) => {
       resumeCallback = resume;
       timeout = setTimeout(
-        () => resume(Effect.fail(new Error("Bank authorization timed out"))),
+        () => {
+          resume(Effect.fail(new Error("Bank authorization timed out")));
+        },
         CALLBACK_TIMEOUT_MS,
       );
       timeout.unref();
-      return Effect.sync(() => clearTimeout(timeout));
+      return Effect.sync(() => {
+        clearTimeout(timeout);
+      });
     });
     const handleCallback = (
       request: IncomingMessage,
@@ -381,11 +387,13 @@ function createCallbackListener(
       try: () => createHttpsServer(tlsOptions, handleCallback),
       catch: (error) => error,
     });
-    yield* Effect.async<void, unknown>((resume) => {
-      server.once("error", (error) => resume(Effect.fail(error)));
-      server.listen(redirect.port, redirect.hostname, () =>
-        resume(Effect.succeed(undefined)),
-      );
+    yield* Effect.async<undefined, unknown>((resume) => {
+      server.once("error", (error) => {
+        resume(Effect.fail(error));
+      });
+      server.listen(redirect.port, redirect.hostname, () => {
+        resume(Effect.succeed(undefined));
+      });
       return Effect.sync(() => {
         if (!server.listening) server.close();
       });
@@ -396,7 +404,7 @@ function createCallbackListener(
       if (closed) return Effect.void;
       closed = true;
       clearTimeout(timeout);
-      return Effect.async<void, unknown>((resume) => {
+      return Effect.async<undefined, unknown>((resume) => {
         if (!server.listening) {
           resume(Effect.succeed(undefined));
           return;

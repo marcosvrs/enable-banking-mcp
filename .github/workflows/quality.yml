@@ -86,7 +86,7 @@ jobs:
           fi
 
   coverage:
-    name: 96.8% statements and 84.5% functions
+    name: 96.5% statements and 84.5% functions
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

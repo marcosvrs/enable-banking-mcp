@@ -83,7 +83,7 @@ export class ControlPanelClient {
     return Effect.gen(
       function* (this: ControlPanelClient) {
         const normalizedEmail = email.trim();
-        if (!normalizedEmail || !normalizedEmail.includes("@")) {
+        if (!normalizedEmail.includes("@")) {
           return yield* Effect.fail(
             new Error("control_panel_email must be a valid email address"),
           );
@@ -114,7 +114,7 @@ export class ControlPanelClient {
   ): Effect.Effect<ControlPanelAuth, unknown> {
     return Effect.gen(
       function* (this: ControlPanelClient) {
-        const result = yield* this.request<unknown>(
+        const result = yield* this.request(
           "/api/relyingparty/emailLinkSignin",
           {
             body: {
@@ -224,7 +224,7 @@ export class ControlPanelClient {
   ): Effect.Effect<{ app_id: string }, unknown> {
     return Effect.gen(
       function* (this: ControlPanelClient) {
-        const result = yield* this.requestAuthenticated<unknown>(
+        const result = yield* this.requestAuthenticated(
           auth,
           "/api/applications",
           { body: request },
@@ -408,9 +408,8 @@ export class ControlPanelAuthFlow {
       function* (this: ControlPanelAuthFlow) {
         const normalizedEmail = email.trim();
         if (
-          existingAuth &&
-          existingAuth.email.trim().toLowerCase() ===
-            normalizedEmail.toLowerCase()
+          existingAuth?.email.trim().toLowerCase() ===
+          normalizedEmail.toLowerCase()
         ) {
           if (
             existingAuth.expiresAt !== undefined &&
@@ -464,7 +463,7 @@ export function createControlPanelCallbackListener():
     const callbackUrl = `${callbackPath}?state=${encodeURIComponent(expectedState)}`;
     const { promise: codePromise, resolve, reject } =
       Promise.withResolvers<string>();
-    void codePromise.catch(() => {});
+    void codePromise.catch(() => undefined);
     let settled = false;
     const server = createServer((request, response) => {
       let requestUrl: URL;
@@ -536,7 +535,9 @@ export function createControlPanelCallbackListener():
         Effect.tryPromise({
           try: () =>
             new Promise<void>((resolveClose) => {
-              server.close(() => resolveClose());
+              server.close(() => {
+                resolveClose();
+              });
             }),
           catch: () => error,
         }).pipe(Effect.flatMap(() => Effect.fail(error))),

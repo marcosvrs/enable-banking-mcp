@@ -256,7 +256,7 @@ type information. `tsconfig.json` also enables `noUncheckedIndexedAccess`,
 `noFallthroughCasesInSwitch`, `verbatimModuleSyntax`,
 `noUncheckedSideEffectImports`, and `noEmitOnError`.
 
-The coverage gate enforces at least 96.8% statement and 84.5% function coverage
+The coverage gate enforces at least 96.5% statement and 84.5% function coverage
 for `src/`; these thresholds reflect the existing suite's measured coverage
 baseline. Line and branch coverage are reported without a minimum. Mutation testing
 requires a score of at least 99% for the deterministic configuration,

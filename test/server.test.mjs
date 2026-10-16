@@ -432,7 +432,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     const retry = toolValue(await callTool(client, "clear_local_credentials"));
     assert.equal(retry.cleared, false);
     assert.deepEqual(retry.failed_items, ["application"]);
-    const cleared = toolValue(await callTool(client, "clear_local_credentials"));
+    await callTool(client, "clear_local_credentials");
 
     const idle = toolValue(await callTool(client, "setup_status"));
     assert.equal(idle.phase, "idle");

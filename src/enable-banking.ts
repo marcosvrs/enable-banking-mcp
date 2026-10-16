@@ -233,7 +233,8 @@ export class EnableBankingClient {
             new Error("state must be a 256-bit base64url value"),
           );
         }
-        if (request.psu_type !== "personal") {
+        const psuType: unknown = request.psu_type;
+        if (psuType !== "personal") {
           return yield* Effect.fail(new Error("psu_type must be personal"));
         }
         if (
@@ -366,7 +367,7 @@ export class EnableBankingClient {
         const transactions: unknown[] = [];
         let continuationKey: string | undefined = query.continuationKey;
         let nextContinuationKey: string | undefined;
-        let hasMore = false;
+        let hasMore: boolean;
         let pages = 0;
 
         do {

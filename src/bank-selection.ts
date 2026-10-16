@@ -8,7 +8,10 @@ export interface BankCatalogClient {
 }
 
 
-export type BankChoice = { name: string; country: string };
+export interface BankChoice {
+  name: string;
+  country: string;
+}
 
 type ChoiceResult =
   | { status: "selected"; value: string }
@@ -239,7 +242,7 @@ function promptForChoice(
   field: string,
   title: string,
   message: string,
-  choices: Array<{ value: string; title: string }>,
+  choices: { value: string; title: string }[],
 ): Effect.Effect<ChoiceResult, unknown> {
   if (choices.length === 0) return Effect.succeed({ status: "invalid" });
   return Effect.gen(function* () {

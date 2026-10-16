@@ -348,7 +348,7 @@ export class ApplicationSetupFlow {
     });
   }
 
-  waitForCompletion(): Effect.Effect<SetupStatus, never> {
+  waitForCompletion(): Effect.Effect<SetupStatus> {
     return Effect.gen(this, function* () {
       while (this.current.pending) yield* Effect.sleep(500);
       return this.status;
@@ -393,7 +393,7 @@ export class ApplicationSetupFlow {
 
   private runApplicationRegistration(
     options: NormalizedApplicationRegistrationOptions,
-  ): Effect.Effect<void, never> {
+  ): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       let application: StoredApplication | undefined;
       yield* this.createApplication(options)
@@ -450,7 +450,7 @@ export class ApplicationSetupFlow {
     });
   }
 
-  private run(options: NormalizedSetupOptions): Effect.Effect<void, never> {
+  private run(options: NormalizedSetupOptions): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       let application: StoredApplication | undefined;
       const workflow = Effect.gen(this, function* () {
@@ -744,7 +744,7 @@ function waitForActivation(
   configuredSleep?: (milliseconds: number) => Effect.Effect<void, unknown>,
 ): Effect.Effect<void, unknown> {
   return Effect.gen(function* () {
-    while (true) {
+    for (;;) {
       if ((yield* client.getApplication()).active) return;
       yield* (configuredSleep ?? Effect.sleep)(ACTIVATION_POLL_MS);
     }
@@ -916,7 +916,7 @@ export function callbackTlsFromApplication(
   };
 }
 
-type CommandResult = {
+interface CommandResult {
   code: number;
   stderr: string;
 }
@@ -937,16 +937,16 @@ function runCommand(
         child.stderr.on("data", (chunk: string) => {
           stderr += chunk;
         });
-        child.once("error", () =>
+        child.once("error", () => {
           resume(
             Effect.fail(
               new Error("Required local setup command is unavailable"),
             ),
-          ),
-        );
-        child.once("close", (code) =>
-          resume(Effect.succeed({ code: code ?? 1, stderr })),
-        );
+          );
+        });
+        child.once("close", (code) => {
+          resume(Effect.succeed({ code: code ?? 1, stderr }));
+        });
         return Effect.sync(() => {
           child.kill();
         });
