@@ -42,6 +42,7 @@ let failFirstSessionCreate =
 let certificateDeleteAttempted = false;
 let delayApplicationRegistration =
   process.env.MCP_TEST_DELAY_REGISTRATION === "true";
+let applicationActivationDeadline;
 
 function completedChild(stdout = "", stderr = "", code = 0, delay = 0) {
   const child = new EventEmitter();
@@ -142,6 +143,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.hostname === "api.enablebanking.com") {
     if (url.pathname === "/application") {
       applicationRequests += 1;
+      if (process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true") {
+        applicationActivationDeadline ??= Date.now() + 8_000;
+      }
       return Response.json({
         name: "Fixture application",
         kid: "fixture-app-id",
@@ -149,7 +153,8 @@ globalThis.fetch = async (input, init = {}) => {
         redirect_urls: ["https://localhost:8765/callback"],
         active:
           process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true"
-            ? applicationRequests > 3
+            ? Date.now() >=
+              (applicationActivationDeadline ?? Number.POSITIVE_INFINITY)
             : applicationRequests > 2,
         countries: ["IE"],
         services: ["AIS"],
