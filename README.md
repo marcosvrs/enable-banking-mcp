@@ -35,6 +35,9 @@ account and transaction reads, and safe session management.
 - an Enable Banking Control Panel account and an eligible personal bank account; and
 - an MCP client or AI host you trust with sensitive financial data.
 
+Concurrent server processes serialize changes to shared Keychain credentials,
+including while a Keychain authorization prompt is open.
+
 For first-time onboarding, call `connect_bank`. The MCP server always asks for
 the Control Panel email, bank country, and bank together in one form; it does
 not infer them from conversation history, environment variables, or a stored

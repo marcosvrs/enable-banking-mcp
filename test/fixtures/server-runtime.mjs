@@ -160,7 +160,9 @@ globalThis.fetch = async (input, init = {}) => {
       const callback = new URL(request.redirect_url);
       callback.searchParams.set("code", "fixture-bank-code");
       callback.searchParams.set("state", request.state);
-      setTimeout(() => sendLocalCallback(callback, true), 250);
+      const callbackDelay =
+        process.env.MCP_TEST_DELAY_BANK_CALLBACK === "true" ? 1000 : 250;
+      setTimeout(() => sendLocalCallback(callback, true), callbackDelay);
       return Response.json({
         url: "https://bank.example/authorize",
         authorization_id: "fixture-authorization-id",

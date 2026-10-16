@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Effect } from "effect";
@@ -51,17 +51,24 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
   const child = spawn(
     process.execPath,
     [sessionStoreWorker, keychainPath, slot, value, String(delayWrite)],
-    { stdio: ["pipe", "pipe", "pipe"] },
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, HOME: dirname(keychainPath) },
+    },
   );
   let stdout = "";
   let stderr = "";
   let resolveReady;
   let rejectReady;
+  let resolveBlocked;
   let resolveCompletion;
   let rejectCompletion;
   const ready = new Promise((resolve, reject) => {
     resolveReady = resolve;
     rejectReady = reject;
+  });
+  const blocked = new Promise((resolve) => {
+    resolveBlocked = resolve;
   });
   const completed = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
@@ -73,6 +80,7 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
   child.stdout.on("data", (chunk) => {
     stdout += chunk;
     if (stdout.includes("READY\n")) resolveReady();
+    if (stdout.includes("BLOCKED\n")) resolveBlocked();
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
@@ -89,7 +97,7 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
     else rejectCompletion(new Error(`Keychain worker failed: ${stderr}`));
   });
 
-  return { child, ready, completed };
+  return { child, ready, blocked, completed };
 }
 
 
@@ -171,6 +179,57 @@ test("a stale vault clear cannot resurrect another process's cleared slot", asyn
     undefined,
   );
 });
+test("keeps the credential lock alive while a Keychain call blocks the event loop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "enable-banking-blocking-keychain-"));
+  const keychainPath = join(directory, "records.json");
+  writeFileSync(keychainPath, "{}", { mode: 0o600 });
+  const sessionWorker = spawnVaultWriter(
+    keychainPath,
+    "session",
+    "session-placeholder",
+    7000,
+  );
+  void sessionWorker.completed.catch(() => {});
+  let applicationWorker;
+
+  try {
+    await sessionWorker.ready;
+    sessionWorker.child.stdin.end("go\n");
+    await sessionWorker.blocked;
+
+    applicationWorker = spawnVaultWriter(
+      keychainPath,
+      "application",
+      "application-placeholder",
+      false,
+    );
+    void applicationWorker.ready.catch(() => {});
+    void applicationWorker.completed.catch(() => {});
+    const acquiredEarly = await Promise.race([
+      applicationWorker.ready.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 5500)),
+    ]);
+    assert.equal(acquiredEarly, false);
+
+    await sessionWorker.completed;
+    await applicationWorker.ready;
+    applicationWorker.child.stdin.end("go\n");
+    await applicationWorker.completed;
+
+    const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+    const bundle = JSON.parse(
+      records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+    );
+    assert.equal(bundle.session, "session-placeholder");
+    assert.equal(bundle.application, "application-placeholder");
+  } finally {
+    for (const worker of [sessionWorker, applicationWorker].filter(Boolean)) {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 
 test("concurrent processes preserve distinct credential slots", async () => {
   const directory = mkdtempSync(join(tmpdir(), "enable-banking-vault-test-"));

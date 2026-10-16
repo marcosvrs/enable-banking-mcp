@@ -24,8 +24,16 @@ setNativeKeyringEntryFactory((service) => ({
     return readRecords()[service] ?? null;
   },
   setPassword(password) {
-    if (delayWrite === "true") {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    const delayMilliseconds =
+      delayWrite === "true" ? 250 : Number(delayWrite);
+    if (delayMilliseconds > 0) {
+      process.stdout.write("BLOCKED\n");
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)),
+        0,
+        0,
+        delayMilliseconds,
+      );
     }
     const records = readRecords();
     records[service] = password;

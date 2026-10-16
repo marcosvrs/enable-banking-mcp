@@ -1,9 +1,10 @@
-import { lock as acquireCredentialLock } from "proper-lockfile";
 import { Effect } from "effect";
 import { Entry } from "@napi-rs/keyring";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface SecretStore {
   get(): Effect.Effect<string | undefined, unknown>;
@@ -59,26 +60,63 @@ const CREDENTIAL_LOCK_PATH = join(
   "enable-banking-mcp",
   "credential-vault",
 );
-const CREDENTIAL_LOCK_OPTIONS = {
-  realpath: false,
-  stale: 30_000,
-  update: 10_000,
-  retries: { retries: 50, factor: 1, minTimeout: 50, maxTimeout: 200 },
-};
+const LOCK_KEEPER_PATH = fileURLToPath(
+  new URL("./credential-lock-keeper.js", import.meta.url),
+);
+
+type LockKeeper = ChildProcess;
+
+async function waitForLockKeeper(child: LockKeeper): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes("LOCKED\n")) resolve();
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (!stdout.includes("LOCKED\n")) {
+        reject(
+          new Error(
+            `Unable to acquire the Enable Banking credential lock: ${stderr.trim() || `lock keeper exited with code ${code}`}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+async function releaseLockKeeper(child: LockKeeper): Promise<void> {
+  const closed = new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    child.once("close", () => resolve());
+  });
+  child.stdin?.end();
+  await closed;
+}
 
 async function withCredentialLock<T>(operation: () => T): Promise<T> {
   mkdirSync(join(homedir(), ".config", "enable-banking-mcp"), {
     recursive: true,
     mode: 0o700,
   });
-  const release = await acquireCredentialLock(
-    CREDENTIAL_LOCK_PATH,
-    CREDENTIAL_LOCK_OPTIONS,
-  );
+  const child = spawn(process.execPath, [LOCK_KEEPER_PATH, CREDENTIAL_LOCK_PATH], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  await waitForLockKeeper(child);
   try {
     return operation();
   } finally {
-    await release();
+    await releaseLockKeeper(child);
   }
 }
 

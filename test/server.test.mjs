@@ -213,6 +213,7 @@ async function waitForToolValue(client, name, predicate) {
 test("runs MCP handlers against isolated provider and Keychain boundaries", async () => {
   const server = await startIsolatedServer({
     MCP_TEST_FAIL_ONCE: "delete-certificate,delete-credential-item",
+    MCP_TEST_DELAY_BANK_CALLBACK: "true",
   });
   try {
     const { client } = server;
@@ -310,7 +311,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     );
     assert.equal(pendingStatus.connection, "awaiting_user");
     const pendingSession = await callTool(client, "get_session");
-    assert.equal(pendingSession.isError, true);
+    assert.equal(pendingSession.isError, true, JSON.stringify(pendingSession));
     assert.match(pendingSession.content[0].text, /authorization is pending/);
 
     const session = await waitForToolValue(
