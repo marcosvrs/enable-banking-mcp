@@ -57,7 +57,7 @@ export function inspectConnectionStatus(
     for (const sessionId of input.sessionIds) {
       const sessionResult = yield* Effect.either(input.client.getSession(sessionId));
       if (Either.isRight(sessionResult)) {
-        const session = sessionResult.right;
+        const session: unknown = sessionResult.right;
         if (
           typeof session !== "object" ||
           session === null ||
@@ -121,7 +121,13 @@ export function inspectConnectionStatus(
   if (Either.isLeft(applicationResult)) {
     return unavailable(input, controlPanelSession, bankSession);
   }
-  const application = applicationResult.right;
+  const application: unknown = applicationResult.right;
+  const applicationRecord =
+    typeof application === "object" &&
+    application !== null &&
+    !Array.isArray(application)
+      ? (application as Record<string, unknown>)
+      : undefined;
   if (
     !applicationRecord ||
     typeof applicationRecord.active !== "boolean"

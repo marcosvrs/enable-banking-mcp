@@ -53,16 +53,17 @@ export function connectBank(
     let application = storedApplication;
     const environmentSessionId = dependencies.getEnvironmentSessionId();
     const connected = yield* recoverConfiguredSession<Record<string, unknown>>({
-      storedSession,
-      environmentSessionId,
+      ...(storedSession === undefined ? {} : { storedSession }),
+      ...(environmentSessionId === undefined ? {} : { environmentSessionId }),
       read: () =>
         Effect.map(dependencies.readAuthorizedBalances(), (accounts) => ({
           status: "connected",
           ...accounts,
         })),
       clearStoredSession: () => dependencies.sessionStore.clear(),
-      clearEnvironmentSession: () =>
-        dependencies.clearEnvironmentSession(environmentSessionId),
+      clearEnvironmentSession: () => {
+        dependencies.clearEnvironmentSession(environmentSessionId);
+      },
     });
     if (connected && hasRequestedAccess(connected, options.accessProfile)) {
       return connected;
@@ -87,6 +88,8 @@ export function connectBank(
       }
     }
     if (dependencies.authorizationFlow.status.pending) {
+      // Status changes while the Effect is suspended, so poll the live value.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       while (dependencies.authorizationFlow.status.pending) {
         yield* Effect.sleep(250);
       }
@@ -205,6 +208,8 @@ export function connectBank(
       redirectUrl: application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
       accessProfile: options.accessProfile,
     });
+    // start() forks callback completion; this status changes while the Effect suspends.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     while (dependencies.authorizationFlow.status.pending) {
       yield* Effect.sleep(250);
     }
@@ -307,8 +312,12 @@ function collectConnectionInput(
         },
       } as const;
     }
-    const country = elicited.value.country.trim().toUpperCase();
-    const bank = elicited.value.bank.trim();
+    const country = typeof elicited.value.country === "string"
+      ? elicited.value.country.trim().toUpperCase()
+      : "";
+    const bank = typeof elicited.value.bank === "string"
+      ? elicited.value.bank.trim()
+      : "";
     const email = includeEmail
       ? elicited.value.control_panel_email?.trim() ?? ""
       : "";

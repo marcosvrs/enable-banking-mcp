@@ -280,16 +280,15 @@ function authorizedBalances(): Effect.Effect<Record<string, unknown>, unknown> {
     }
     const balances = yield* Effect.all(
       session.accounts.map((account) => {
-        if (
-          typeof account !== "object" ||
-          account === null ||
-          typeof (account as Record<string, unknown>).uid !== "string"
-        ) {
+        const accountId =
+          typeof account === "object" && account !== null
+            ? (account as Record<string, unknown>).uid
+            : undefined;
+        if (typeof accountId !== "string") {
           return Effect.fail(
             new Error("Enable Banking session returned an invalid account UID"),
           );
         }
-        const accountId = (account as Record<string, string>).uid;
         return Effect.map(client.getAccountBalances(accountId), (result) => ({
           account_id: accountId,
           balances: result,
@@ -359,11 +358,13 @@ function readConnectionStatus(): Effect.Effect<unknown, unknown> {
         : undefined;
     return yield* inspectConnectionStatus({
       configuration,
-      client,
+      ...(client === undefined ? {} : { client }),
       sessionIds,
-      controlPanelAuth,
-      configuredEnvironment: application?.environment,
-      pendingPhase,
+      ...(controlPanelAuth === undefined ? {} : { controlPanelAuth }),
+      ...(application?.environment === undefined
+        ? {}
+        : { configuredEnvironment: application.environment }),
+      ...(pendingPhase === undefined ? {} : { pendingPhase }),
     });
   });
 }
@@ -537,7 +538,7 @@ server.registerTool(
       connectBank({
         appName: app_name,
         environment,
-        accessProfile: access_profile as AccessProfile,
+        accessProfile: access_profile,
       }),
     ),
 );
@@ -621,8 +622,8 @@ server.registerTool(
           description,
           privacyUrl: privacy_url,
           termsUrl: terms_url,
-          validUntil: valid_until,
-          accessProfile: access_profile as AccessProfile,
+          ...(valid_until === undefined ? {} : { validUntil: valid_until }),
+          accessProfile: access_profile,
         };
         return yield* setupFlow.start(options);
       }),
@@ -785,11 +786,16 @@ server.registerTool(
                   redirect_url ??
                   application?.redirectUrls[0] ??
                   DEFAULT_REDIRECT_URL,
-                validUntil: valid_until,
-                accessProfile: access_profile as AccessProfile,
+                ...(valid_until === undefined
+                  ? {}
+                  : { validUntil: valid_until }),
+                accessProfile: access_profile,
               });
             }),
-          () => Effect.sync(() => authorizationFlow.release()),
+          () =>
+            Effect.sync(() => {
+              authorizationFlow.release();
+            }),
         );
       }),
     ),
@@ -964,11 +970,15 @@ server.registerTool(
       Effect.gen(function* () {
         const client = yield* authorizedAccountClient(account_id);
         return yield* client.getAccountTransactions(account_id, {
-          dateFrom: date_from,
-          dateTo: date_to,
-          continuationKey: continuation_key,
-          transactionStatus: transaction_status,
-          strategy,
+          ...(date_from === undefined ? {} : { dateFrom: date_from }),
+          ...(date_to === undefined ? {} : { dateTo: date_to }),
+          ...(continuation_key === undefined
+            ? {}
+            : { continuationKey: continuation_key }),
+          ...(transaction_status === undefined
+            ? {}
+            : { transactionStatus: transaction_status }),
+          ...(strategy === undefined ? {} : { strategy }),
           limit,
         });
       }),

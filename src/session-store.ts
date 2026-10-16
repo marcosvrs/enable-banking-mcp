@@ -14,7 +14,7 @@ export interface SecretStore {
 
 export type SessionStore = SecretStore;
 
-export type NativeKeyringEntry = {
+export interface NativeKeyringEntry {
   getPassword(): string | null;
   setPassword(value: string): void;
   deletePassword(): boolean;
@@ -26,19 +26,19 @@ export type NativeKeyringEntryFactory = (
 
 type CredentialSlot = "session" | "application" | "controlPanel";
 type CredentialBundle = Partial<Record<CredentialSlot, string>>;
-type EntryCandidate = {
+interface EntryCandidate {
   service: string;
   slot?: CredentialSlot;
   entry: NativeKeyringEntry;
-};
+}
 
 const DEFAULT_ACCOUNT = process.env.USER?.trim() || "default";
 const BUNDLE_PREFIX = "enable-banking-mcp:credential-bundle:v1:";
 const DEFAULT_CREDENTIAL_SERVICE = "enable-banking-mcp.credentials.native";
-const CREDENTIAL_CANDIDATES: ReadonlyArray<{
+const CREDENTIAL_CANDIDATES: readonly {
   service: string;
   slot?: CredentialSlot;
-}> = [
+}[] = [
   { service: DEFAULT_CREDENTIAL_SERVICE },
   { service: "enable-banking-mcp.control-panel.native", slot: "controlPanel" },
   { service: "enable-banking-mcp.application.native", slot: "application" },
@@ -98,7 +98,9 @@ async function releaseLockKeeper(child: LockKeeper): Promise<void> {
       resolve();
       return;
     }
-    child.once("close", () => resolve());
+    child.once("close", () => {
+      resolve();
+    });
   });
   child.stdin?.end();
   await closed;
@@ -204,7 +206,11 @@ export class MacKeychainCredentialVault {
     );
     const selected = storedBundle ?? existing[0];
     if (!selected) {
-      this.activeEntry = this.candidates[0].entry;
+      const firstCandidate = this.candidates[0];
+      if (!firstCandidate) {
+        throw new Error("Enable Banking Keychain credential candidates are unavailable");
+      }
+      this.activeEntry = firstCandidate.entry;
       this.bundle = {};
       this.initialized = true;
       return;
@@ -330,7 +336,7 @@ export class MacKeychainCredentialVault {
           this.initialize();
           if (this.bundle[slot] === undefined) return;
           const next = { ...this.bundle };
-          delete next[slot];
+          Reflect.deleteProperty(next, slot);
           if (Object.keys(next).length === 0) {
             const entry = this.activeEntry;
             if (!entry) {

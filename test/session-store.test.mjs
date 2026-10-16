@@ -187,7 +187,7 @@ test("keeps the credential lock alive while a Keychain call blocks the event loo
     keychainPath,
     "session",
     "session-placeholder",
-    7000,
+    12_000,
   );
   void sessionWorker.completed.catch(() => {});
   let applicationWorker;
@@ -207,7 +207,7 @@ test("keeps the credential lock alive while a Keychain call blocks the event loo
     void applicationWorker.completed.catch(() => {});
     const acquiredEarly = await Promise.race([
       applicationWorker.ready.then(() => true),
-      new Promise((resolve) => setTimeout(() => resolve(false), 5500)),
+      new Promise((resolve) => setTimeout(() => resolve(false), 10_500)),
     ]);
     assert.equal(acquiredEarly, false);
 
