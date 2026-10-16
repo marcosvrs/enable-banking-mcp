@@ -79,7 +79,7 @@ export class ControlPanelClient {
     callbackPath: string,
   ): Promise<void> {
     const normalizedEmail = email.trim();
-    if (!normalizedEmail || !normalizedEmail.includes("@")) {
+    if (!normalizedEmail.includes("@")) {
       throw new Error("control_panel_email must be a valid email address");
     }
     if (
@@ -104,7 +104,7 @@ export class ControlPanelClient {
     email: string,
     confirmationCode: string,
   ): Promise<ControlPanelAuth> {
-    const result = await this.request<unknown>(
+    const result = await this.request(
       "/api/relyingparty/emailLinkSignin",
       {
         body: {
@@ -189,7 +189,7 @@ export class ControlPanelClient {
     auth: ControlPanelAuth,
     request: ApplicationRegistrationRequest,
   ): Promise<{ app_id: string }> {
-    const result = await this.requestAuthenticated<unknown>(
+    const result = await this.requestAuthenticated(
       auth,
       "/api/applications",
       {
@@ -252,12 +252,12 @@ export class ControlPanelClient {
   }
 }
 
-export type ControlPanelCallbackListener = {
+export interface ControlPanelCallbackListener {
   port: number;
   path: string;
   wait: Promise<string>;
   close: () => Promise<void>;
-};
+}
 
 export type ControlPanelCallbackListenerFactory = () => Promise<ControlPanelCallbackListener>;
 
@@ -329,9 +329,8 @@ export class ControlPanelAuthFlow {
   ): Promise<ControlPanelAuth> {
     const normalizedEmail = email.trim();
     if (
-      existingAuth &&
-      existingAuth.email.trim().toLowerCase() ===
-        normalizedEmail.toLowerCase()
+      existingAuth?.email.trim().toLowerCase() ===
+      normalizedEmail.toLowerCase()
     ) {
       if (
         existingAuth.expiresAt !== undefined &&
@@ -468,6 +467,8 @@ export async function createControlPanelCallbackListener(): Promise<ControlPanel
     clearTimeout(timeout);
     if (!server.listening) return;
     const { promise: closedPromise, resolve: markClosed, reject: failClosed } =
+    // `withResolvers` call-expression type arguments are not recognized by this rule.
+    // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Completion-only close promise.
       Promise.withResolvers<void>();
     server.close((error) => {
       if (error) failClosed(error);

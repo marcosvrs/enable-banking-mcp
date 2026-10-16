@@ -799,6 +799,7 @@ async function main() {
   const clients = requestedClients();
   const mcpOnly = hasFlag("--mcp-only");
   try {
+    await verifyPluginWiring();
     if (!hasFlag("--skip-mcp")) {
       await runMcpContract(artifactRoot);
     }

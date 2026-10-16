@@ -1,7 +1,6 @@
 import type { ApplicationEnvironment } from "./application-store.js";
 import {
   isTerminalSessionError,
-  type ApplicationResponse,
   type EnableBankingClient,
 } from "./enable-banking.js";
 import type { ControlPanelAuth } from "./control-panel.js";
@@ -54,7 +53,7 @@ export async function inspectConnectionStatus(
     let invalidSessionFound = false;
     for (const sessionId of input.sessionIds) {
       try {
-        const session = await input.client.getSession(sessionId);
+        const session: unknown = await input.client.getSession(sessionId);
         if (
           typeof session !== "object" ||
           session === null ||
@@ -115,27 +114,34 @@ export async function inspectConnectionStatus(
     return unavailable(input, controlPanelSession, bankSession);
   }
 
-  let application: Pick<ApplicationResponse, "active" | "environment">;
+  let application: unknown;
   try {
     application = await input.client.getApplication();
   } catch {
     return unavailable(input, controlPanelSession, bankSession);
   }
+  const applicationRecord =
+    typeof application === "object" &&
+    application !== null &&
+    !Array.isArray(application)
+      ? (application as Record<string, unknown>)
+      : undefined;
   if (
-    typeof application !== "object" ||
-    application === null ||
-    Array.isArray(application) ||
-    typeof application.active !== "boolean"
+    !applicationRecord ||
+    typeof applicationRecord.active !== "boolean"
   ) {
     return unavailable(input, controlPanelSession, bankSession);
   }
 
-  const environment = application.environment ?? input.configuredEnvironment;
+  const isActive = applicationRecord.active;
+  const providerEnvironment = applicationRecord.environment;
+  const environment =
+    providerEnvironment === "PRODUCTION" || providerEnvironment === "SANDBOX"
+      ? providerEnvironment
+      : input.configuredEnvironment;
   const environmentField =
-    environment === "PRODUCTION" || environment === "SANDBOX"
-      ? { application_environment: environment }
-      : {};
-  if (!application.active && environment === "PRODUCTION") {
+    environment === undefined ? {} : { application_environment: environment };
+  if (!isActive && environment === "PRODUCTION") {
     return {
       connection: "application_activation_required",
       application: "inactive",
@@ -147,7 +153,7 @@ export async function inspectConnectionStatus(
     };
   }
 
-  if (!application.active) {
+  if (!isActive) {
     return {
       connection: "bank_authorization_required",
       application: "inactive",

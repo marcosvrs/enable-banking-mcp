@@ -4,11 +4,38 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-node scripts/privacy-scan.mjs --push
+updates_file=$(mktemp)
+trap 'rm -f "$updates_file"' 0 HUP INT TERM
+cat > "$updates_file"
+
+node scripts/privacy-scan.mjs --push < "$updates_file"
 
 if ! command -v gitleaks >/dev/null 2>&1; then
   printf '%s\n' 'pre-push blocked: install Gitleaks and retry (https://github.com/gitleaks/gitleaks).' >&2
   exit 1
 fi
 
-gitleaks git --redact --no-banner --no-color
+run_quality=0
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  case "$local_sha" in
+    *[!0]*) ;;
+    *) continue ;;
+  esac
+  case "${remote_sha:-}" in
+    *[!0]*) log_opts="$remote_sha..$local_sha" ;;
+    *) log_opts="$local_sha"; run_quality=1 ;;
+  esac
+  gitleaks git --log-opts="$log_opts" --redact --no-banner --no-color
+
+  if [ "$run_quality" -eq 0 ] && ! git diff --quiet "$remote_sha" "$local_sha" -- \
+    src/ test/ scripts/ package.json package-lock.json tsconfig.json \
+    stryker.config.mjs eslint.config.mjs .githooks/ .github/workflows/; then
+    run_quality=1
+  fi
+done < "$updates_file"
+
+if [ "$run_quality" -eq 1 ]; then
+  npm run lint
+  npm run test:coverage
+fi

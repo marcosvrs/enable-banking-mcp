@@ -1,4 +1,4 @@
-name: Coverage and mutation gates
+name: Static, coverage and mutation gates
 
 on:
   pull_request:
@@ -12,7 +12,36 @@ permissions:
 env:
   NODE_VERSION: "24"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  static:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
   mutation-scope:
     name: Detect mutation-relevant changes
     runs-on: ubuntu-latest
@@ -81,9 +110,12 @@ jobs:
         run: npm run test:coverage
 
   mutation:
-    name: 99% mutation score
-    needs: [mutation-scope, coverage]
-    if: needs.mutation-scope.outputs.run == 'true' && needs.coverage.result == 'success'
+    name: 99% focused mutation score
+    needs: [mutation-scope, coverage, static]
+    if: >-
+      needs.mutation-scope.outputs.run == 'true' &&
+      needs.coverage.result == 'success' &&
+      needs.static.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

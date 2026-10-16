@@ -473,14 +473,15 @@ export function normalizeApplicationRegistrationOptions(
   const description = options.description?.trim();
   const privacyUrl = options.privacyUrl?.trim();
   const termsUrl = options.termsUrl?.trim();
+  const runtimeEnvironment: unknown = options.environment;
 
   if (
-    options.environment !== "PRODUCTION" &&
-    options.environment !== "SANDBOX"
+    runtimeEnvironment !== "PRODUCTION" &&
+    runtimeEnvironment !== "SANDBOX"
   ) {
     throw new Error("environment must be PRODUCTION or SANDBOX");
   }
-  if (!controlPanelEmail || !controlPanelEmail.includes("@")) {
+  if (!controlPanelEmail.includes("@")) {
     throw new Error("control_panel_email must be a valid email address");
   }
   if (!appName) throw new Error("app_name is required");
@@ -491,7 +492,7 @@ export function normalizeApplicationRegistrationOptions(
   let normalizedPrivacyUrl = privacyUrl;
   let normalizedTermsUrl = termsUrl;
 
-  if (options.environment === "PRODUCTION") {
+  if (runtimeEnvironment === "PRODUCTION") {
     normalizedDescription = description || DEFAULT_PRODUCTION_DESCRIPTION;
     normalizedGdprEmail = controlPanelEmail;
     normalizedPrivacyUrl =
@@ -519,7 +520,7 @@ export function normalizeSetupOptions(
   const normalized = normalizeApplicationRegistrationOptions(options);
   const aspspName = options.aspspName.trim();
   const country = options.country.trim().toUpperCase();
-  const accessProfile = options.accessProfile ?? "balances";
+  const accessProfile: unknown = options.accessProfile ?? "balances";
 
   if (!aspspName) throw new Error("aspsp_name is required");
   if (!/^[A-Z]{2}$/.test(country)) {
@@ -743,15 +744,17 @@ export function callbackTlsFromApplication(
 }
 
 function sleep(milliseconds: number): Promise<void> {
+  // `withResolvers` uses a type-argument call, which the rule does not recognize as a generic type reference.
+  // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- Sleep is a completion-only promise.
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, milliseconds);
   return promise;
 }
 
-type CommandResult = {
+interface CommandResult {
   code: number;
   stderr: string;
-};
+}
 
 function runCommand(
   command: string,
@@ -764,7 +767,7 @@ function runCommand(
   child.stderr.on("data", (chunk: string) => {
     stderr += chunk;
   });
-  child.once("error", () => reject(new Error("Required local setup command is unavailable")));
+  child.once("error", () => { reject(new Error("Required local setup command is unavailable")); });
   child.once("close", (code) => {
     resolve({ code: code ?? 1, stderr });
   });
