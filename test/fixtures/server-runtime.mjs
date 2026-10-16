@@ -147,7 +147,10 @@ globalThis.fetch = async (input, init = {}) => {
         kid: "fixture-app-id",
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
-        active: applicationRequests > 2,
+        active:
+          process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true"
+            ? applicationRequests > 3
+            : applicationRequests > 2,
         countries: ["IE"],
         services: ["AIS"],
       });

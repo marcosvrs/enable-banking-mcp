@@ -191,7 +191,7 @@ export class MacKeychainCredentialVault {
     }));
   }
 
-  private initialize(): void {
+  private initialize(persistMigration = false): void {
     if (this.initialized) return;
     const found = this.candidates.map((candidate) => ({
       ...candidate,
@@ -259,8 +259,9 @@ export class MacKeychainCredentialVault {
 
     this.activeEntry = selected.entry;
     if (
-      !selected.value.startsWith(BUNDLE_PREFIX) ||
-      existing.some((candidate) => candidate.entry !== selected.entry)
+      persistMigration &&
+      (!selected.value.startsWith(BUNDLE_PREFIX) ||
+        existing.some((candidate) => candidate.entry !== selected.entry))
     ) {
       selected.entry.setPassword(
         `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...merged })}`,
@@ -269,7 +270,7 @@ export class MacKeychainCredentialVault {
 
     const cleanupErrors: unknown[] = [];
     for (const candidate of existing) {
-      if (candidate.entry === selected.entry) continue;
+      if (!persistMigration || candidate.entry === selected.entry) continue;
       try {
         candidate.entry.deletePassword();
         if (candidate.entry.getPassword() !== null) {
@@ -298,7 +299,7 @@ export class MacKeychainCredentialVault {
       try: () =>
         withCredentialLock(() => {
           this.initialized = false;
-          this.initialize();
+          this.initialize(false);
           return this.bundle[slot];
         }),
       catch: (error) => error,
@@ -314,7 +315,7 @@ export class MacKeychainCredentialVault {
             throw new Error(`Cannot store an empty Enable Banking ${slot}`);
           }
           this.initialized = false;
-          this.initialize();
+          this.initialize(true);
           if (!this.activeEntry) {
             throw new Error("Enable Banking Keychain entry is unavailable");
           }
@@ -333,7 +334,7 @@ export class MacKeychainCredentialVault {
       try: () =>
         withCredentialLock(() => {
           this.initialized = false;
-          this.initialize();
+          this.initialize(true);
           if (this.bundle[slot] === undefined) return;
           const next = { ...this.bundle };
           Reflect.deleteProperty(next, slot);

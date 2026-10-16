@@ -268,7 +268,7 @@ test("concurrent processes preserve distinct credential slots", async () => {
   }
 });
 
-test("reuses an existing entry and consolidates prior per-service records", async () => {
+test("reads legacy credentials without mutating Keychain and consolidates on write", async () => {
   const state = createVault(
     new Map([
       ["enable-banking-mcp.control-panel.native", "control-panel-placeholder"],
@@ -281,8 +281,25 @@ test("reuses an existing entry and consolidates prior per-service records", asyn
   const controlPanel = new MacKeychainSecretStore("controlPanel", state.vault);
 
   assert.equal(await Effect.runPromise(session.get()), "session-placeholder");
-  assert.equal(await Effect.runPromise(application.get()), "application-placeholder");
-  assert.equal(await Effect.runPromise(controlPanel.get()), "control-panel-placeholder");
+  assert.equal(
+    await Effect.runPromise(application.get()),
+    "application-placeholder",
+  );
+  assert.equal(
+    await Effect.runPromise(controlPanel.get()),
+    "control-panel-placeholder",
+  );
+  assert.deepEqual([...state.records], [
+    ["enable-banking-mcp.control-panel.native", "control-panel-placeholder"],
+    ["enable-banking-mcp.application.native", "application-placeholder"],
+    ["enable-banking-mcp.native", "session-placeholder"],
+  ]);
+  assert.equal(
+    state.calls.some(([operation]) => operation === "set" || operation === "delete"),
+    false,
+  );
+
+  await Effect.runPromise(session.set("updated-session-placeholder"));
   assert.equal(state.records.size, 1);
   const [[service, stored]] = state.records;
   assert.equal(service, "enable-banking-mcp.control-panel.native");
@@ -290,22 +307,34 @@ test("reuses an existing entry and consolidates prior per-service records", asyn
     version: 1,
     controlPanel: "control-panel-placeholder",
     application: "application-placeholder",
-    session: "session-placeholder",
+    session: "updated-session-placeholder",
   });
 });
-test("migrates a recognized legacy item in place before writing", async () => {
+test("migrates a recognized legacy item on write", async () => {
   const state = createVault(
     new Map([["enable-banking-mcp.application", "legacy-app-placeholder"]]),
   );
   const application = new MacKeychainSecretStore("application", state.vault);
 
-  assert.equal(await Effect.runPromise(application.get()), "legacy-app-placeholder");
+  assert.equal(
+    await Effect.runPromise(application.get()),
+    "legacy-app-placeholder",
+  );
+  assert.deepEqual([...state.records], [
+    ["enable-banking-mcp.application", "legacy-app-placeholder"],
+  ]);
+  assert.equal(
+    state.calls.some(([operation]) => operation === "set" || operation === "delete"),
+    false,
+  );
+
+  await Effect.runPromise(application.set("updated-app-placeholder"));
   assert.equal(state.records.size, 1);
   const [[service, stored]] = state.records;
   assert.equal(service, "enable-banking-mcp.application");
   assert.deepEqual(JSON.parse(stored.slice(bundlePrefix.length)), {
     version: 1,
-    application: "legacy-app-placeholder",
+    application: "updated-app-placeholder",
   });
 });
 

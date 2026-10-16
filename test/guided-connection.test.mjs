@@ -57,6 +57,7 @@ async function runConnection({
     browserUrls: [],
     elicitationRequests: [],
     authorizationPending,
+    productionActivationPending: false,
   };
   const dependencies = {
     applicationStore: state.applicationStore,
@@ -128,6 +129,18 @@ async function runConnection({
         state.browserUrls.push(url);
         if (activateApplicationOnBrowserOpen) applicationInfo.active = true;
       });
+    },
+    beginProductionActivationWait() {
+      if (state.productionActivationPending) {
+        throw new Error("Production activation is already pending");
+      }
+      state.productionActivationPending = true;
+    },
+    endProductionActivationWait() {
+      state.productionActivationPending = false;
+    },
+    isProductionActivationPending() {
+      return state.productionActivationPending;
     },
     mcpServer: mcpServer.server,
   };
@@ -270,6 +283,7 @@ test("inactive Production applications open the dashboard before polling", async
     "https://enablebanking.com/cp/applications",
   ]);
   assert.equal(result.status, "connected");
+  assert.equal(state.productionActivationPending, false);
 });
 
 test("an existing application asks country and bank together and completes authorization", async () => {

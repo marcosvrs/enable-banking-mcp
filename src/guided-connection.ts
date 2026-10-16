@@ -38,6 +38,9 @@ export interface GuidedConnectionDependencies {
   resolveCredentials(): Effect.Effect<EnableBankingCredentials, unknown>;
   createBankClient(credentials: EnableBankingCredentials): EnableBankingClient;
   openBrowser(url: string): Effect.Effect<void, unknown>;
+  beginProductionActivationWait: () => void;
+  endProductionActivationWait: () => void;
+  isProductionActivationPending(): boolean;
   mcpServer: McpServer["server"];
 }
 
@@ -46,6 +49,14 @@ export function connectBank(
   dependencies: GuidedConnectionDependencies,
 ): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
+    if (dependencies.isProductionActivationPending()) {
+      return {
+        status: "awaiting_user",
+        phase: "production_activation",
+        message:
+          "A connect_bank request is already monitoring Production activation; complete dashboard activation and do not rerun the tool.",
+      };
+    }
     const [storedSession, storedApplication] = yield* Effect.all([
       dependencies.sessionStore.get(),
       dependencies.applicationStore.get(),
@@ -180,11 +191,18 @@ export function connectBank(
     const client = dependencies.createBankClient(credentials);
     let applicationInfo = yield* client.getApplication();
     if (application.environment === "PRODUCTION" && !applicationInfo.active) {
-      yield* dependencies.openBrowser(APPLICATIONS_URL);
-      while (!applicationInfo.active) {
-        yield* Effect.sleep(5_000);
-        applicationInfo = yield* client.getApplication();
-      }
+      yield* Effect.acquireUseRelease(
+        Effect.sync(dependencies.beginProductionActivationWait),
+        () =>
+          Effect.gen(function* () {
+            yield* dependencies.openBrowser(APPLICATIONS_URL);
+            while (!applicationInfo.active) {
+              yield* Effect.sleep(5_000);
+              applicationInfo = yield* client.getApplication();
+            }
+          }),
+        () => Effect.sync(dependencies.endProductionActivationWait),
+      );
     }
 
     const selection = yield* resolveBankSelection({

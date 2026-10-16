@@ -305,6 +305,18 @@ function authorizedBalances(): Effect.Effect<Record<string, unknown>, unknown> {
   });
 }
 
+let productionActivationPending = false;
+
+function beginProductionActivationWait(): void {
+  authorizationFlow.reserve();
+  productionActivationPending = true;
+}
+
+function endProductionActivationWait(): void {
+  productionActivationPending = false;
+  authorizationFlow.release();
+}
+
 function readConnectionStatus(): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
     const [application, storedSession, controlPanelAuth] = yield* Effect.all(
@@ -353,9 +365,11 @@ function readConnectionStatus(): Effect.Effect<unknown, unknown> {
     const setupStatus = setupFlow.status;
     const pendingPhase = setupStatus.pending
       ? setupStatus.phase
-      : authorizationFlow.status.pending
-        ? "bank_authorization"
-        : undefined;
+      : productionActivationPending
+        ? "production_activation"
+        : authorizationFlow.status.pending
+          ? "bank_authorization"
+          : undefined;
     return yield* inspectConnectionStatus({
       configuration,
       ...(client === undefined ? {} : { client }),
@@ -390,6 +404,9 @@ function connectBank(
     readAuthorizedBalances: authorizedBalances,
     resolveCredentials,
     createBankClient: (credentials) => new EnableBankingClient(credentials),
+    beginProductionActivationWait,
+    endProductionActivationWait,
+    isProductionActivationPending: () => productionActivationPending,
     openBrowser: launchBrowser,
     mcpServer: server.server,
   });
@@ -1014,7 +1031,7 @@ server.registerTool(
         if (setupFlow.status.pending || authorizationFlow.status.pending) {
           return yield* Effect.fail(
             new Error(
-              "Cannot clear credentials while setup or authorization is pending",
+              "Cannot clear credentials while setup, activation, or authorization is pending",
             ),
           );
         }

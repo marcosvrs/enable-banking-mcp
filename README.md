@@ -342,7 +342,8 @@ the Production application's data-protection contact. To use `SANDBOX`, pass
 Call `connection_status` to distinguish MCP transport connectivity from a
 usable bank session. It verifies the stored provider session and reports
 application activation, consent, pending, or unavailable status without
-returning accounts, opening a browser, or starting consent.
+returning accounts, opening a browser, starting consent, or changing local
+credential storage.
 `connection: "connected"` means Enable Banking accepted the stored session.
 `control_panel_session` reports Control Panel login storage/expiry separately;
 it is not bank authorization. `status_unavailable` means the provider state
@@ -466,8 +467,8 @@ target ASPSP name and country directly.
 - `clear_local_credentials` clears local session, application, and Control Panel records and attempts to remove the locally trusted callback certificate. If stored application metadata is invalid or certificate removal fails, it preserves the application record and reports cleanup failure.
 
 Logout and credential cleanup are refused while Control Panel authentication,
-bank authorization, or setup is pending, preventing a later callback from
-restoring credentials after removal.
+setup, bank authorization, or Production activation monitoring is pending,
+preventing a later callback from restoring credentials after removal.
 
 Local cleanup does not revoke bank consent, unlink accounts, delete provider-side records not covered by the session call, remove environment variables, erase MCP-client or AI-host history, or erase backups. Perform those actions through the relevant provider and operating-system controls.
 

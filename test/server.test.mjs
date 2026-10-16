@@ -459,6 +459,58 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
   }
 });
 
+test("tracks the guided Production activation wait and blocks credential cleanup", async () => {
+  const server = await startIsolatedServer(
+    { MCP_TEST_DELAY_APPLICATION_ACTIVATION: "true" },
+    {
+      action: "accept",
+      content: { country: "IE", bank: "Fixture Bank" },
+    },
+  );
+  try {
+    const registration = await callTool(server.client, "register_application", {
+      environment: "PRODUCTION",
+    });
+    assert.equal(registration.isError, undefined);
+    await waitForToolValue(
+      server.client,
+      "setup_status",
+      (status) => status.phase === "account_link" && !status.pending,
+    );
+
+    const inactive = toolValue(
+      await callTool(server.client, "connection_status"),
+    );
+    assert.equal(inactive.connection, "application_activation_required");
+
+    const connection = callTool(server.client, "connect_bank");
+    const pending = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) => status.phase === "production_activation",
+    );
+    assert.equal(pending.connection, "awaiting_user");
+    assert.match(pending.next_action, /do not rerun a tool/i);
+
+    const duplicate = toolValue(await callTool(server.client, "connect_bank"));
+    assert.equal(duplicate.status, "awaiting_user");
+    assert.equal(duplicate.phase, "production_activation");
+
+    const cleanup = await callTool(server.client, "clear_local_credentials");
+    assert.equal(cleanup.isError, true);
+    assert.match(cleanup.content[0].text, /activation.*pending/i);
+
+    const connected = toolValue(await connection);
+    assert.equal(connected.status, "connected");
+    assert.equal(
+      toolValue(await callTool(server.client, "clear_local_credentials")).cleared,
+      true,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("connect_bank owns fresh MCP onboarding through balance retrieval", async () => {
   const server = await startIsolatedServer({}, {
     action: "accept",
@@ -692,7 +744,7 @@ test("blocks logout, authorization, and credential cleanup while registration is
     assert.equal(cleanup.isError, true);
     assert.match(
       cleanup.content[0].text,
-      /Cannot clear credentials while setup or authorization is pending/,
+      /Cannot clear credentials while setup, activation, or authorization is pending/,
     );
 
     const logout = await callTool(server.client, "control_panel_logout");
