@@ -38,7 +38,8 @@ jobs:
         run: |
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             node scripts/privacy-scan.mjs --range "${BASE_SHA}..${HEAD_SHA}"
-          elif [[ "$EVENT_NAME" == "push" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+          elif [[ "$EVENT_NAME" == "push" && ! "$BEFORE_SHA" =~ ^0+$ ]] \
+            && git merge-base --is-ancestor "$BEFORE_SHA" "$HEAD_SHA"; then
             node scripts/privacy-scan.mjs --range "${BEFORE_SHA}..${HEAD_SHA}"
           else
             node scripts/privacy-scan.mjs --history
