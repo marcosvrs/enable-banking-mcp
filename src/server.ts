@@ -115,12 +115,16 @@ interface ToolResult {
   isError?: boolean;
 }
 
-function safely<T>(operation: Effect.Effect<T, unknown>): Promise<ToolResult> {
+function safely<T>(
+  operation: Effect.Effect<T, unknown>,
+  signal: AbortSignal,
+): Promise<ToolResult> {
   return Effect.runPromise(
     Effect.matchCause(operation, {
       onFailure: (cause) => failure(Cause.squash(cause)),
       onSuccess: success,
     }),
+    { signal },
   );
 }
 
@@ -459,27 +463,24 @@ server.registerTool(
     description:
       "Reuse or refresh a stored Control Panel session, or request a sign-in link. If no local email or stored identity exists, use MCP form elicitation when supported; the email and tokens are never tool arguments or results.",
   },
-  () =>
-    safely(
-      controlPanelAuth.withAuthentication((authenticate) =>
-        Effect.gen(function* () {
-          const existingAuth = yield* controlPanelAuthStore.get();
-          const email = yield* resolveControlPanelEmail(
-            CONTROL_PANEL_EMAIL_ENV,
-            existingAuth?.email,
-          );
-          if (typeof email !== "string") return email;
-          const auth = yield* authenticate(email, existingAuth);
-          if (auth !== existingAuth) {
-            yield* controlPanelAuthStore.set(auth);
-          }
-          return {
-            authenticated: true,
-            ...(auth.expiresAt ? { expires_at: auth.expiresAt } : {}),
-          };
-        }),
-      ),
-    ),
+  extra => safely(controlPanelAuth.withAuthentication((authenticate) =>
+    Effect.gen(function* () {
+      const existingAuth = yield* controlPanelAuthStore.get();
+      const email = yield* resolveControlPanelEmail(
+        CONTROL_PANEL_EMAIL_ENV,
+        existingAuth?.email,
+      );
+      if (typeof email !== "string") return email;
+      const auth = yield* authenticate(email, existingAuth);
+      if (auth !== existingAuth) {
+        yield* controlPanelAuthStore.set(auth);
+      }
+      return {
+        authenticated: true,
+        ...(auth.expiresAt ? { expires_at: auth.expiresAt } : {}),
+      };
+    }),
+  ), extra.signal),
 );
 server.registerTool(
   "control_panel_status",
@@ -487,22 +488,19 @@ server.registerTool(
     description:
       "Show Control Panel authentication state without exposing the email or access and refresh tokens",
   },
-  () =>
-    safely(
-      Effect.gen(function* () {
-        const auth = yield* controlPanelAuthStore.get();
-        if (!auth) return { authenticated: false };
-        return {
-          authenticated: true,
-          ...(auth.expiresAt
-            ? {
-                expires_at: auth.expiresAt,
-                expired: auth.expiresAt <= Date.now(),
-              }
-            : {}),
-        };
-      }),
-    ),
+  extra => safely(Effect.gen(function* () {
+    const auth = yield* controlPanelAuthStore.get();
+    if (!auth) return { authenticated: false };
+    return {
+      authenticated: true,
+      ...(auth.expiresAt
+        ? {
+            expires_at: auth.expiresAt,
+            expired: auth.expiresAt <= Date.now(),
+          }
+        : {}),
+    };
+  }), extra.signal),
 );
 
 
@@ -511,22 +509,19 @@ server.registerTool(
   {
     description: "Clear the persisted Control Panel session from macOS Keychain",
   },
-  () =>
-    safely(
+  extra => safely(Effect.gen(function* () {
+    if (setupFlow.status.pending) {
+      return yield* Effect.fail(
+        new Error("Cannot log out while application setup is pending"),
+      );
+    }
+    return yield* controlPanelAuth.withCredentialCleanup(() =>
       Effect.gen(function* () {
-        if (setupFlow.status.pending) {
-          return yield* Effect.fail(
-            new Error("Cannot log out while application setup is pending"),
-          );
-        }
-        return yield* controlPanelAuth.withCredentialCleanup(() =>
-          Effect.gen(function* () {
-            yield* controlPanelAuthStore.clear();
-            return { authenticated: false };
-          }),
-        );
+        yield* controlPanelAuthStore.clear();
+        return { authenticated: false };
       }),
-    ),
+    );
+  }), extra.signal),
 );
 
 server.registerTool(
@@ -550,14 +545,11 @@ server.registerTool(
         .describe("Whether the consent may include transaction history"),
     },
   },
-  ({ app_name, environment, access_profile }) =>
-    safely(
-      connectBank({
-        appName: app_name,
-        environment,
-        accessProfile: access_profile,
-      }),
-    ),
+  ({ app_name, environment, access_profile }, extra) => safely(connectBank({
+    appName: app_name,
+    environment,
+    accessProfile: access_profile,
+  }), extra.signal),
 );
 
 server.registerTool(
@@ -619,32 +611,29 @@ server.registerTool(
     terms_url,
     valid_until,
     access_profile,
-  }) =>
-    safely(
-      Effect.gen(function* () {
-        assertNoEnvironmentCredentials();
-        const storedAuth = yield* controlPanelAuthStore.get();
-        const controlPanelEmail = yield* resolveControlPanelEmail(
-          CONTROL_PANEL_EMAIL_ENV,
-          storedAuth?.email,
-        );
-        if (typeof controlPanelEmail !== "string") return controlPanelEmail;
-        const options: SetupOptions = {
-          controlPanelEmail,
-          appName: app_name,
-          environment,
-          redirectUrl: redirect_url,
-          aspspName: aspsp_name,
-          country,
-          description,
-          privacyUrl: privacy_url,
-          termsUrl: terms_url,
-          ...(valid_until === undefined ? {} : { validUntil: valid_until }),
-          accessProfile: access_profile,
-        };
-        return yield* setupFlow.start(options);
-      }),
-    ),
+  }, extra) => safely(Effect.gen(function* () {
+    assertNoEnvironmentCredentials();
+    const storedAuth = yield* controlPanelAuthStore.get();
+    const controlPanelEmail = yield* resolveControlPanelEmail(
+      CONTROL_PANEL_EMAIL_ENV,
+      storedAuth?.email,
+    );
+    if (typeof controlPanelEmail !== "string") return controlPanelEmail;
+    const options: SetupOptions = {
+      controlPanelEmail,
+      appName: app_name,
+      environment,
+      redirectUrl: redirect_url,
+      aspspName: aspsp_name,
+      country,
+      description,
+      privacyUrl: privacy_url,
+      termsUrl: terms_url,
+      ...(valid_until === undefined ? {} : { validUntil: valid_until }),
+      accessProfile: access_profile,
+    };
+    return yield* setupFlow.start(options);
+  }), extra.signal),
 );
 
 server.registerTool(
@@ -685,28 +674,25 @@ server.registerTool(
     description,
     privacy_url,
     terms_url,
-  }) =>
-    safely(
-      Effect.gen(function* () {
-        assertNoEnvironmentCredentials();
-        const storedAuth = yield* controlPanelAuthStore.get();
-        const controlPanelEmail = yield* resolveControlPanelEmail(
-          CONTROL_PANEL_EMAIL_ENV,
-          storedAuth?.email,
-        );
-        if (typeof controlPanelEmail !== "string") return controlPanelEmail;
-        const options: ApplicationRegistrationOptions = {
-          controlPanelEmail,
-          appName: app_name,
-          environment,
-          redirectUrl: redirect_url,
-          description,
-          privacyUrl: privacy_url,
-          termsUrl: terms_url,
-        };
-        return yield* setupFlow.registerApplication(options);
-      }),
-    ),
+  }, extra) => safely(Effect.gen(function* () {
+    assertNoEnvironmentCredentials();
+    const storedAuth = yield* controlPanelAuthStore.get();
+    const controlPanelEmail = yield* resolveControlPanelEmail(
+      CONTROL_PANEL_EMAIL_ENV,
+      storedAuth?.email,
+    );
+    if (typeof controlPanelEmail !== "string") return controlPanelEmail;
+    const options: ApplicationRegistrationOptions = {
+      controlPanelEmail,
+      appName: app_name,
+      environment,
+      redirectUrl: redirect_url,
+      description,
+      privacyUrl: privacy_url,
+      termsUrl: terms_url,
+    };
+    return yield* setupFlow.registerApplication(options);
+  }), extra.signal),
 );
 
 server.registerTool(
@@ -715,7 +701,7 @@ server.registerTool(
     description:
       "Report setup progress without credentials. Informational only; the active connect_bank or setup_enable_banking flow monitors provider callbacks and status itself.",
   },
-  () => safely(setupFlow.getStatus()),
+  extra => safely(setupFlow.getStatus(), extra.signal),
 );
 
 server.registerTool(
@@ -730,7 +716,7 @@ server.registerTool(
       openWorldHint: true,
     },
   },
-  () => safely(readConnectionStatus()),
+  extra => safely(readConnectionStatus(), extra.signal),
 );
 
 
@@ -768,78 +754,72 @@ server.registerTool(
     redirect_url,
     valid_until,
     access_profile,
-  }) =>
-    safely(
-      Effect.gen(function* () {
-        if (setupFlow.status.pending) {
-          return yield* Effect.fail(
-            new Error(
-              "Enable Banking setup is already in progress; call setup_status or connect_bank instead",
-            ),
-          );
-        }
-        return yield* Effect.acquireUseRelease(
-          Effect.try({
-            try: () => {
-              authorizationFlow.reserve();
-            },
-            catch: (error) => error,
-          }),
-          () =>
-            Effect.gen(function* () {
-              const application = yield* applicationStore.get();
-              const credentials = application
-                ? { appId: application.appId, privateKey: application.privateKey }
-                : yield* resolveCredentials();
-              const client = yield* Effect.try({
-                try: () => new EnableBankingClient(credentials),
-                catch: (error) => error,
-              });
-              /* c8 ignore next 6 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
-              return yield* authorizationFlow.startReserved(client, {
-                aspspName: aspsp_name,
-                country,
-                redirectUrl:
-                  redirect_url ??
-                  application?.redirectUrls[0] ??
-                  DEFAULT_REDIRECT_URL,
-                ...(valid_until === undefined
-                  ? {}
-                  : { validUntil: valid_until }),
-                accessProfile: access_profile,
-              });
-            }),
-          () =>
-            Effect.sync(() => {
-              authorizationFlow.release();
-            }),
-        );
+  }, extra) => safely(Effect.gen(function* () {
+    if (setupFlow.status.pending) {
+      return yield* Effect.fail(
+        new Error(
+          "Enable Banking setup is already in progress; call setup_status or connect_bank instead",
+        ),
+      );
+    }
+    return yield* Effect.acquireUseRelease(
+      Effect.try({
+        try: () => {
+          authorizationFlow.reserve();
+        },
+        catch: (error) => error,
       }),
-    ),
+      () =>
+        Effect.gen(function* () {
+          const application = yield* applicationStore.get();
+          const credentials = application
+            ? { appId: application.appId, privateKey: application.privateKey }
+            : yield* resolveCredentials();
+          const client = yield* Effect.try({
+            try: () => new EnableBankingClient(credentials),
+            catch: (error) => error,
+          });
+          /* c8 ignore next 6 -- V8 omits this returned MCP argument literal from source-mapped coverage; stdio integration exercises authorize_bank end to end. */
+          return yield* authorizationFlow.startReserved(client, {
+            aspspName: aspsp_name,
+            country,
+            redirectUrl:
+              redirect_url ??
+              application?.redirectUrls[0] ??
+              DEFAULT_REDIRECT_URL,
+            ...(valid_until === undefined
+              ? {}
+              : { validUntil: valid_until }),
+            accessProfile: access_profile,
+          });
+        }),
+      () =>
+        Effect.sync(() => {
+          authorizationFlow.release();
+        }),
+    );
+  }), extra.signal),
 );
 server.registerTool(
   "get_application",
   {
     description: "Get the Enable Banking application bound to the current credentials",
   },
-  () =>
-    safely(
-      Effect.gen(function* () {
-        const credentials = yield* resolveCredentials();
-        const client = yield* Effect.try({
-          try: () => new EnableBankingClient(credentials),
-          catch: (error) => error,
-        });
-        return yield* client.getApplication();
-      }),
-    ),
+  extra => safely(Effect.gen(function* () {
+    const credentials = yield* resolveCredentials();
+    const client = yield* Effect.try({
+      try: () => new EnableBankingClient(credentials),
+      catch: (error) => error,
+    });
+    return yield* client.getApplication();
+  }), extra.signal),
 );
 server.registerTool(
   "get_health",
   {
     description: "Check Enable Banking API health",
   },
-  () => safely(getHealth()),
+  extra => safely(getHealth(), extra.signal),
 );
 server.registerTool(
   "list_banks",
@@ -854,30 +834,24 @@ server.registerTool(
         .describe("Optional two-letter ISO 3166-1 country code"),
     },
   },
-  ({ country }) =>
-    safely(
-      Effect.gen(function* () {
-        const credentials = yield* resolveCredentials();
-        const client = yield* Effect.try({
-          try: () => new EnableBankingClient(credentials),
-          catch: (error) => error,
-        });
-        return yield* client.listBanks(country);
-      }),
-    ),
+  ({ country }, extra) => safely(Effect.gen(function* () {
+    const credentials = yield* resolveCredentials();
+    const client = yield* Effect.try({
+      try: () => new EnableBankingClient(credentials),
+      catch: (error) => error,
+    });
+    return yield* client.listBanks(country);
+  }), extra.signal),
 );
 server.registerTool(
   "get_session",
   {
     description: "Get the current stored Enable Banking session",
   },
-  () =>
-    safely(
-      Effect.gen(function* () {
-        const { client, sessionId } = yield* sessionClient();
-        return yield* client.getSession(sessionId);
-      }),
-    ),
+  extra => safely(Effect.gen(function* () {
+    const { client, sessionId } = yield* sessionClient();
+    return yield* client.getSession(sessionId);
+  }), extra.signal),
 );
 server.registerTool(
   "delete_session",
@@ -885,24 +859,21 @@ server.registerTool(
     description:
       "Delete the current Enable Banking session from the provider and local Keychain",
   },
-  () =>
-    safely(
-      Effect.gen(function* () {
-        const { client, sessionId } = yield* sessionClient();
-        const result = yield* client.deleteSession(sessionId);
-        if ((yield* sessionStore.get()) === sessionId) {
-          yield* sessionStore.clear();
-        }
-        return result;
-      }),
-    ),
+  extra => safely(Effect.gen(function* () {
+    const { client, sessionId } = yield* sessionClient();
+    const result = yield* client.deleteSession(sessionId);
+    if ((yield* sessionStore.get()) === sessionId) {
+      yield* sessionStore.clear();
+    }
+    return result;
+  }), extra.signal),
 );
 server.registerTool(
   "list_accounts",
   {
     description: "List accounts authorized in the current personal AIS session",
   },
-  () => safely(authorizedAccounts()),
+  extra => safely(authorizedAccounts(), extra.signal),
 );
 server.registerTool(
   "get_account_details",
@@ -912,13 +883,10 @@ server.registerTool(
       account_id: z.string().min(1).describe("Enable Banking account UID"),
     },
   },
-  ({ account_id }) =>
-    safely(
-      Effect.gen(function* () {
-        const client = yield* authorizedAccountClient(account_id);
-        return yield* client.getAccountDetails(account_id);
-      }),
-    ),
+  ({ account_id }, extra) => safely(Effect.gen(function* () {
+    const client = yield* authorizedAccountClient(account_id);
+    return yield* client.getAccountDetails(account_id);
+  }), extra.signal),
 );
 server.registerTool(
   "get_account_balances",
@@ -928,13 +896,10 @@ server.registerTool(
       account_id: z.string().min(1).describe("Enable Banking account UID"),
     },
   },
-  ({ account_id }) =>
-    safely(
-      Effect.gen(function* () {
-        const client = yield* authorizedAccountClient(account_id);
-        return yield* client.getAccountBalances(account_id);
-      }),
-    ),
+  ({ account_id }, extra) => safely(Effect.gen(function* () {
+    const client = yield* authorizedAccountClient(account_id);
+    return yield* client.getAccountBalances(account_id);
+  }), extra.signal),
 );
 server.registerTool(
   "get_account_transactions",
@@ -982,24 +947,21 @@ server.registerTool(
     transaction_status,
     strategy,
     limit,
-  }) =>
-    safely(
-      Effect.gen(function* () {
-        const client = yield* authorizedAccountClient(account_id);
-        return yield* client.getAccountTransactions(account_id, {
-          ...(date_from === undefined ? {} : { dateFrom: date_from }),
-          ...(date_to === undefined ? {} : { dateTo: date_to }),
-          ...(continuation_key === undefined
-            ? {}
-            : { continuationKey: continuation_key }),
-          ...(transaction_status === undefined
-            ? {}
-            : { transactionStatus: transaction_status }),
-          ...(strategy === undefined ? {} : { strategy }),
-          limit,
-        });
-      }),
-    ),
+  }, extra) => safely(Effect.gen(function* () {
+    const client = yield* authorizedAccountClient(account_id);
+    return yield* client.getAccountTransactions(account_id, {
+      ...(date_from === undefined ? {} : { dateFrom: date_from }),
+      ...(date_to === undefined ? {} : { dateTo: date_to }),
+      ...(continuation_key === undefined
+        ? {}
+        : { continuationKey: continuation_key }),
+      ...(transaction_status === undefined
+        ? {}
+        : { transactionStatus: transaction_status }),
+      ...(strategy === undefined ? {} : { strategy }),
+      limit,
+    });
+  }), extra.signal),
 );
 server.registerTool(
   "get_transaction_details",
@@ -1010,13 +972,10 @@ server.registerTool(
       transaction_id: z.string().min(1).describe("Enable Banking transaction ID"),
     },
   },
-  ({ account_id, transaction_id }) =>
-    safely(
-      Effect.gen(function* () {
-        const client = yield* authorizedAccountClient(account_id);
-        return yield* client.getTransactionDetails(account_id, transaction_id);
-      }),
-    ),
+  ({ account_id, transaction_id }, extra) => safely(Effect.gen(function* () {
+    const client = yield* authorizedAccountClient(account_id);
+    return yield* client.getTransactionDetails(account_id, transaction_id);
+  }), extra.signal),
 );
 
 server.registerTool(
@@ -1025,88 +984,85 @@ server.registerTool(
     description:
       "Clear locally stored Enable Banking credentials, session state, Control Panel authentication, and localhost certificate trust",
   },
-  () =>
-    safely(
-      Effect.gen(function* () {
-        if (setupFlow.status.pending || authorizationFlow.status.pending) {
-          return yield* Effect.fail(
-            new Error(
-              "Cannot clear credentials while setup, activation, or authorization is pending",
-            ),
+  extra => safely(Effect.gen(function* () {
+    if (setupFlow.status.pending || authorizationFlow.status.pending) {
+      return yield* Effect.fail(
+        new Error(
+          "Cannot clear credentials while setup, activation, or authorization is pending",
+        ),
+      );
+    }
+  
+    const clearLocalCredentialStores = () =>
+      controlPanelAuth.withCredentialCleanup(
+        () =>
+          Effect.gen(function* () {
+          const failures: string[] = [];
+          let trustedCertificateRemoved = false;
+          let applicationCanBeCleared = true;
+          const applicationResult = yield* Effect.either(
+            applicationStore.get(),
           );
-        }
-
-        const clearLocalCredentialStores = () =>
-          controlPanelAuth.withCredentialCleanup(
-            () =>
-              Effect.gen(function* () {
-              const failures: string[] = [];
-              let trustedCertificateRemoved = false;
-              let applicationCanBeCleared = true;
-              const applicationResult = yield* Effect.either(
-                applicationStore.get(),
-              );
-              let application: StoredApplication | undefined;
-              if (applicationResult._tag === "Right") {
-                application = applicationResult.right;
-              } else {
-                failures.push("trusted_certificate");
-                applicationCanBeCleared = false;
-              }
-
-              if (application?.certificate) {
-                const certificateResult = yield* Effect.either(
-                  removeTrustedCertificate(application.certificate),
-                );
-                if (certificateResult._tag === "Right") {
-                  trustedCertificateRemoved = true;
-                } else {
-                  failures.push("trusted_certificate");
-                  applicationCanBeCleared = false;
-                }
-              }
-
-              const clearStore = (
-                name: string,
-                operation: Effect.Effect<void, unknown>,
-              ) =>
-                Effect.catchAllCause(operation, () =>
-                  Effect.sync(() => failures.push(name)),
-                );
-              yield* clearStore("session", sessionStore.clear());
-              if (applicationCanBeCleared) {
-                yield* clearStore("application", applicationStore.clear());
-              } else {
-                failures.push("application");
-              }
-              yield* clearStore(
-                "control_panel_auth",
-                controlPanelAuthStore.clear(),
-              );
-
-              const cleared = failures.length === 0;
-              if (cleared) {
-                setupFlow.reset();
-                authorizationFlow.resetError();
-              }
-              const environmentCredentialsPresent = Boolean(
-                process.env.ENABLE_BANKING_APP_ID?.trim() ||
-                  process.env.ENABLE_BANKING_ID?.trim() ||
-                  process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
-              );
-              return {
-                cleared,
-                trusted_certificate_removed: trustedCertificateRemoved,
-                environment_credentials_present: environmentCredentialsPresent,
-                ...(failures.length > 0 ? { failed_items: failures } : {}),
-              };
-            }),
+          let application: StoredApplication | undefined;
+          if (applicationResult._tag === "Right") {
+            application = applicationResult.right;
+          } else {
+            failures.push("trusted_certificate");
+            applicationCanBeCleared = false;
+          }
+  
+          if (application?.certificate) {
+            const certificateResult = yield* Effect.either(
+              removeTrustedCertificate(application.certificate),
+            );
+            if (certificateResult._tag === "Right") {
+              trustedCertificateRemoved = true;
+            } else {
+              failures.push("trusted_certificate");
+              applicationCanBeCleared = false;
+            }
+          }
+  
+          const clearStore = (
+            name: string,
+            operation: Effect.Effect<void, unknown>,
+          ) =>
+            Effect.catchAllCause(operation, () =>
+              Effect.sync(() => failures.push(name)),
+            );
+          yield* clearStore("session", sessionStore.clear());
+          if (applicationCanBeCleared) {
+            yield* clearStore("application", applicationStore.clear());
+          } else {
+            failures.push("application");
+          }
+          yield* clearStore(
+            "control_panel_auth",
+            controlPanelAuthStore.clear(),
           );
-        return yield* setupFlow.withCredentialCleanup(() =>
-          authorizationFlow.withCredentialCleanup(clearLocalCredentialStores),
-        );
-      }),
-    ),
+  
+          const cleared = failures.length === 0;
+          if (cleared) {
+            setupFlow.reset();
+            authorizationFlow.resetError();
+          }
+          const environmentCredentialsPresent = Boolean(
+            process.env.ENABLE_BANKING_APP_ID?.trim() ||
+              process.env.ENABLE_BANKING_ID?.trim() ||
+              process.env.ENABLE_BANKING_PRIVATE_KEY?.trim(),
+          );
+          return {
+            cleared,
+            trusted_certificate_removed: trustedCertificateRemoved,
+            environment_credentials_present: environmentCredentialsPresent,
+            ...(failures.length > 0 ? { failed_items: failures } : {}),
+          };
+        }),
+      );
+    return yield* setupFlow.withCredentialCleanup(() =>
+      authorizationFlow.withCredentialCleanup(clearLocalCredentialStores),
+    );
+  }), extra.signal),
 );
 
 function main(): Effect.Effect<void, unknown> {

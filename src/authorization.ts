@@ -1,4 +1,4 @@
-import { Cause, Effect } from "effect";
+import { Cause, Effect, Fiber } from "effect";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -67,9 +67,17 @@ export type CallbackListenerFactory = (
   tlsOptionsProvider?: CallbackTlsOptionsProvider,
 ) => Effect.Effect<CallbackListener, unknown>;
 
-interface PendingAuthorization {
-  listener: CallbackListener;
-}
+type PendingAuthorization =
+  | {
+      listener: CallbackListener;
+      authorizationUrl?: undefined;
+      interrupt?: undefined;
+    }
+  | {
+      listener: CallbackListener;
+      authorizationUrl: string;
+      interrupt: () => Effect.Effect<void>;
+    };
 
 export class BankAuthorizationFlow {
   private starting = false;
@@ -110,6 +118,22 @@ export class BankAuthorizationFlow {
 
   resetError(): void {
     this.lastError = undefined;
+  }
+
+  cancelPending(authorizationUrl: string): Effect.Effect<void> {
+    return Effect.gen(this, function* () {
+      const pending = this.pending;
+      if (pending?.authorizationUrl !== authorizationUrl) return;
+
+      yield* pending.interrupt();
+      yield* pending.listener.close.pipe(
+        Effect.catchAllCause(() => Effect.void),
+      );
+      if (this.pending?.listener === pending.listener) {
+        this.pending = undefined;
+      }
+      this.lastError = undefined;
+    });
   }
 
   withCredentialCleanup<T>(
@@ -208,7 +232,16 @@ export class BankAuthorizationFlow {
         yield* listener.close.pipe(Effect.catchAllCause(() => Effect.void));
         return yield* Effect.fail(Cause.squash(authorizationResult.cause));
       }
-      yield* Effect.forkDaemon(this.finish(client, listener));
+      const fiber = yield* Effect.forkDaemon(this.finish(client, listener));
+      // The daemon may finish before this fiber resumes after the fork.
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      if (this.pending?.listener === listener) {
+        this.pending = {
+          listener,
+          authorizationUrl: authorizationResult.value,
+          interrupt: () => Fiber.interrupt(fiber).pipe(Effect.asVoid),
+        };
+      }
       return {
         status: "awaiting_user" as const,
         authorization_url: authorizationResult.value,
@@ -251,6 +284,7 @@ export class BankAuthorizationFlow {
         this.pending = undefined;
       }
     });
+
   }
 }
 function messageForCause(cause: Cause.Cause<unknown>): string {

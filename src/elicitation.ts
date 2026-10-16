@@ -45,12 +45,13 @@ export function elicitForm(
       },
     } satisfies ElicitRequestFormParams;
     const result = yield* Effect.tryPromise({
-      try: () =>
+      try: (signal) =>
         capabilities.form
-          ? server.elicitInput(params)
+          ? server.elicitInput(params, { signal })
           : server.request(
               { method: "elicitation/create", params },
               ElicitResultSchema,
+              { signal },
             ),
       catch: (error) => error,
     });

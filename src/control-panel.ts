@@ -154,6 +154,7 @@ export class ControlPanelClient {
       function* (this: ControlPanelClient) {
         const firebaseApiKey =
           this.firebaseApiKey || CONTROL_PANEL_FIREBASE_WEB_KEY;
+        const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
         const headers = {
           Accept: "application/json",
           "Content-Type": "application/x-www-form-urlencoded",
@@ -163,14 +164,14 @@ export class ControlPanelClient {
           refresh_token: auth.refreshToken,
         });
         const response = yield* Effect.tryPromise({
-          try: () =>
+          try: (signal) =>
             this.fetchFn(
               `${FIREBASE_SECURE_TOKEN_URL}?key=${encodeURIComponent(firebaseApiKey)}`,
               {
                 method: "POST",
                 headers,
                 body: body.toString(),
-                signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+                signal: AbortSignal.any([signal, timeoutSignal]),
               },
             ),
           catch: (error) => error,
@@ -268,10 +269,11 @@ export class ControlPanelClient {
           Accept: "application/json",
           ...options.headers,
         };
+        const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
         const init: RequestInit = {
           method: "POST",
           headers,
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: timeoutSignal,
         };
         if (options.body !== undefined) {
           headers["Content-Type"] = "application/json";
@@ -279,7 +281,11 @@ export class ControlPanelClient {
         }
 
         const response = yield* Effect.tryPromise({
-          try: () => this.fetchFn(url, init),
+          try: (signal) =>
+            this.fetchFn(url, {
+              ...init,
+              signal: AbortSignal.any([signal, timeoutSignal]),
+            }),
           catch: (error) => error,
         });
         const raw = yield* Effect.tryPromise({

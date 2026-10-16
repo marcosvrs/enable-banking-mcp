@@ -30,7 +30,7 @@ export interface GuidedConnectionDependencies {
   applicationStore: Pick<ApplicationStore, "get">;
   sessionStore: Pick<SessionStore, "get" | "clear">;
   setupFlow: Pick<ApplicationSetupFlow, "status" | "runToCompletion" | "waitForCompletion">;
-  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start">;
+  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start" | "cancelPending">;
   assertNoEnvironmentCredentials(): void;
   getEnvironmentSessionId(): string | undefined;
   clearEnvironmentSession(sessionId: string | undefined): void;
@@ -227,10 +227,18 @@ export function connectBank(
       accessProfile: options.accessProfile,
     });
     // start() forks callback completion; this status changes while the Effect suspends.
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    while (dependencies.authorizationFlow.status.pending) {
-      yield* Effect.sleep(250);
-    }
+    const waitForAuthorization = Effect.gen(function* () {
+      while (dependencies.authorizationFlow.status.pending) {
+        yield* Effect.sleep(250);
+      }
+    });
+    yield* waitForAuthorization.pipe(
+      Effect.onInterrupt(() =>
+        dependencies.authorizationFlow.cancelPending(
+          authorization.authorization_url,
+        ),
+      ),
+    );
     const authorizationError = dependencies.authorizationFlow.status.lastError;
     if (authorizationError) {
       return {

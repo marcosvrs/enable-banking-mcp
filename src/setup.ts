@@ -343,7 +343,13 @@ export class ApplicationSetupFlow {
           }),
         ),
       );
-      yield* this.run(normalized);
+      yield* this.run(normalized).pipe(
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            this.current = previous;
+          }),
+        ),
+      );
       return this.status;
     });
   }
@@ -438,11 +444,14 @@ export class ApplicationSetupFlow {
           Effect.catchAllCause((cause) =>
             Effect.sync(() => {
               const error = Cause.squash(cause);
+              const message = error instanceof Error ? error.message : String(error);
               this.update({
                 phase: "failed",
                 pending: false,
                 ...(application?.appId ? { appId: application.appId } : {}),
-                error: error instanceof Error ? error.message : String(error),
+                error: message
+                  .split(options.controlPanelEmail)
+                  .join("[email redacted]"),
               });
             }),
           ),
@@ -510,6 +519,12 @@ export class ApplicationSetupFlow {
           this.dependencies.authorizationFlow,
           this.dependencies.sleep,
           this.dependencies.now,
+        ).pipe(
+          Effect.onInterrupt(() =>
+            this.dependencies.authorizationFlow.cancelPending(
+              authorization.authorization_url,
+            ),
+          ),
         );
         this.update({
           phase: "complete",
@@ -519,15 +534,20 @@ export class ApplicationSetupFlow {
           message: "Enable Banking setup is complete",
         });
       });
+
       yield* workflow.pipe(
         Effect.catchAllCause((cause) =>
           Effect.sync(() => {
             const error = Cause.squash(cause);
+            const message =
+              error instanceof Error ? error.message : String(error);
             this.current = {
               phase: "failed",
               pending: false,
               ...(application?.appId ? { appId: application.appId } : {}),
-              error: error instanceof Error ? error.message : String(error),
+              error: message
+                .split(options.controlPanelEmail)
+                .join("[email redacted]"),
             };
           }),
         ),

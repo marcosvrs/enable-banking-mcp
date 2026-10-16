@@ -176,8 +176,8 @@ async function startIsolatedServer(overrides = {}, elicitationResponse) {
   return { client, close: () => client.close() };
 }
 
-async function callTool(client, name, args = {}) {
-  return client.callTool({ name, arguments: args });
+async function callTool(client, name, args = {}, options) {
+  return client.callTool({ name, arguments: args }, undefined, options);
 }
 
 function toolValue(result) {
@@ -198,8 +198,8 @@ async function availablePort() {
   return address.port;
 }
 
-async function waitForToolValue(client, name, predicate) {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
+async function waitForToolValue(client, name, predicate, maxAttempts = 500) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const result = await callTool(client, name);
     if (!result.isError) {
       const value = toolValue(result);
@@ -530,6 +530,107 @@ test("connect_bank owns fresh MCP onboarding through balance retrieval", async (
     assert.equal(connected.accounts[0].uid, "fixture-account");
     assert.equal(connected.balances[0].balances.balances[0].currency, "EUR");
   } finally {
+    await server.close();
+  }
+});
+
+test("redacts elicited Control Panel email from retained setup failures", async () => {
+  const email = "private@example.net";
+  const server = await startIsolatedServer(
+    {
+      MCP_TEST_FAIL_APPLICATION_REGISTRATION: "true",
+      MCP_TEST_PROVIDER_ERROR_EMAIL: email,
+    },
+    {
+      action: "accept",
+      content: {
+        control_panel_email: email,
+        country: "IE",
+        bank: "Fixture Bank",
+      },
+    },
+  );
+  try {
+    const connection = toolValue(
+      await callTool(server.client, "connect_bank", {
+        environment: "SANDBOX",
+      }),
+    );
+    assert.equal(connection.status, "failed");
+    assert.match(connection.error, /\[email redacted\]/);
+    assert.equal(JSON.stringify(connection).includes(email), false);
+
+    const status = toolValue(await callTool(server.client, "setup_status"));
+    assert.equal(status.phase, "failed");
+    assert.equal(JSON.stringify(status).includes(email), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("cancelling connect_bank closes its authorization listener and releases cleanup", async () => {
+  const server = await startIsolatedServer(
+    {
+      MCP_TEST_APPLICATION_ACTIVE: "true",
+      MCP_TEST_BANK_CALLBACK_DELAY_MS: "10000",
+    },
+    {
+      action: "accept",
+      content: {
+        control_panel_email: "user@example.com",
+        country: "IE",
+        bank: "Fixture Bank",
+      },
+    },
+  );
+  const controller = new AbortController();
+  let connection;
+  try {
+    connection = callTool(
+      server.client,
+      "connect_bank",
+      { environment: "SANDBOX" },
+      { signal: controller.signal },
+    );
+    const settled = connection.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    const pending = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) =>
+        status.connection === "awaiting_user" &&
+        status.phase === "bank_authorization",
+      100,
+    );
+    assert.equal(pending.phase, "bank_authorization");
+    controller.abort();
+    const cancellationSettled = await Promise.race([
+      settled.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+    ]);
+    assert.equal(cancellationSettled, true);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const setupStatus = toolValue(
+      await callTool(server.client, "setup_status", {}, { timeout: 5000 }),
+    );
+    assert.equal(setupStatus.pending, false, JSON.stringify(setupStatus));
+    const cleanupResult = await callTool(
+      server.client,
+      "clear_local_credentials",
+      {},
+      { timeout: 5000 },
+    );
+    assert.equal(
+      cleanupResult.isError,
+      undefined,
+      cleanupResult.content?.[0]?.text,
+    );
+    assert.equal(toolValue(cleanupResult).cleared, true);
+  } finally {
+    controller.abort();
     await server.close();
   }
 });

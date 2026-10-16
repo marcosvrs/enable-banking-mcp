@@ -133,6 +133,14 @@ globalThis.fetch = async (input, init = {}) => {
     });
   }
   if (url.hostname === "enablebanking.com" && url.pathname === "/api/applications") {
+    if (process.env.MCP_TEST_FAIL_APPLICATION_REGISTRATION === "true") {
+      return Response.json(
+        {
+          message: `fixture provider rejected ${process.env.MCP_TEST_PROVIDER_ERROR_EMAIL ?? "registration"}`,
+        },
+        { status: 400 },
+      );
+    }
     if (delayApplicationRegistration) {
       delayApplicationRegistration = false;
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -152,10 +160,11 @@ globalThis.fetch = async (input, init = {}) => {
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
         active:
-          process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true"
+          process.env.MCP_TEST_APPLICATION_ACTIVE === "true" ||
+          (process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true"
             ? Date.now() >=
               (applicationActivationDeadline ?? Number.POSITIVE_INFINITY)
-            : applicationRequests > 2,
+            : applicationRequests > 2),
         countries: ["IE"],
         services: ["AIS"],
       });
@@ -169,8 +178,13 @@ globalThis.fetch = async (input, init = {}) => {
       callback.searchParams.set("code", "fixture-bank-code");
       callback.searchParams.set("state", request.state);
       const callbackDelay =
-        process.env.MCP_TEST_DELAY_BANK_CALLBACK === "true" ? 1000 : 250;
-      setTimeout(() => sendLocalCallback(callback, true), callbackDelay);
+        Number(process.env.MCP_TEST_BANK_CALLBACK_DELAY_MS) ||
+        (process.env.MCP_TEST_DELAY_BANK_CALLBACK === "true" ? 1000 : 250);
+      const callbackTimer = setTimeout(
+        () => sendLocalCallback(callback, true),
+        callbackDelay,
+      );
+      callbackTimer.unref();
       return Response.json({
         url: "https://bank.example/authorize",
         authorization_id: "fixture-authorization-id",

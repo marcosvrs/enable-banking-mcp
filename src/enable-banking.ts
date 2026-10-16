@@ -441,17 +441,22 @@ export class EnableBankingClient {
           Accept: "application/json",
           Authorization: `Bearer ${token}`,
         };
+        const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
         const init: RequestInit = {
           method: options.method ?? "GET",
           headers,
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: timeoutSignal,
         };
         if (options.body !== undefined) {
           headers["Content-Type"] = "application/json";
           init.body = JSON.stringify(options.body);
         }
         const response = yield* Effect.tryPromise({
-          try: () => this.fetchFn(`${API_BASE_URL}${path}`, init),
+          try: (signal) =>
+            this.fetchFn(`${API_BASE_URL}${path}`, {
+              ...init,
+              signal: AbortSignal.any([signal, timeoutSignal]),
+            }),
           catch: (error) => error,
         });
         const raw = yield* Effect.tryPromise({
