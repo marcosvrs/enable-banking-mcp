@@ -170,6 +170,8 @@ globalThis.fetch = async (input, init = {}) => {
       });
     }
     if (url.pathname === "/aspsps") {
+      const delay = Number(process.env.MCP_TEST_DELAY_BANK_LIST_MS) || 0;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       return Response.json({ aspsps: [{ name: "Fixture Bank", country: "IE" }] });
     }
     if (url.pathname === "/auth") {

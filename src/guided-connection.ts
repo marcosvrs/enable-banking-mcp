@@ -30,7 +30,10 @@ export interface GuidedConnectionDependencies {
   applicationStore: Pick<ApplicationStore, "get">;
   sessionStore: Pick<SessionStore, "get" | "clear">;
   setupFlow: Pick<ApplicationSetupFlow, "status" | "runToCompletion" | "waitForCompletion">;
-  authorizationFlow: Pick<BankAuthorizationFlow, "status" | "start" | "cancelPending">;
+  authorizationFlow: Pick<
+    BankAuthorizationFlow,
+    "status" | "start" | "startReserved" | "release" | "cancelPending"
+  >;
   assertNoEnvironmentCredentials(): void;
   getEnvironmentSessionId(): string | undefined;
   clearEnvironmentSession(sessionId: string | undefined): void;
@@ -190,42 +193,60 @@ export function connectBank(
     const credentials = yield* dependencies.resolveCredentials();
     const client = dependencies.createBankClient(credentials);
     let applicationInfo = yield* client.getApplication();
-    if (application.environment === "PRODUCTION" && !applicationInfo.active) {
-      yield* Effect.acquireUseRelease(
-        Effect.sync(dependencies.beginProductionActivationWait),
-        () =>
-          Effect.gen(function* () {
-            yield* dependencies.openBrowser(APPLICATIONS_URL);
-            while (!applicationInfo.active) {
-              yield* Effect.sleep(5_000);
-              applicationInfo = yield* client.getApplication();
-            }
-          }),
-        () => Effect.sync(dependencies.endProductionActivationWait),
-      );
-    }
-
-    const selection = yield* resolveBankSelection({
-      client,
-      mcpServer: dependencies.mcpServer,
-      applicationCountries: applicationInfo.countries,
-      country: input.country,
-      aspspName: input.aspspName,
-    });
-    if (selection.status !== "selected") {
-      return {
-        status: "failed",
-        phase: "bank_selection",
-        message: selection.message,
-      };
-    }
-
-    const authorization = yield* dependencies.authorizationFlow.start(client, {
-      aspspName: selection.bank.name,
-      country: selection.country,
-      redirectUrl: application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
-      accessProfile: options.accessProfile,
-    });
+    const activationNeeded =
+      application.environment === "PRODUCTION" && !applicationInfo.active;
+    const selectBankAndAuthorize = (reserved: boolean) =>
+      Effect.gen(function* () {
+        const selection = yield* resolveBankSelection({
+          client,
+          mcpServer: dependencies.mcpServer,
+          applicationCountries: applicationInfo.countries,
+          country: input.country,
+          aspspName: input.aspspName,
+        });
+        if (selection.status !== "selected") {
+          return {
+            status: "failed" as const,
+            phase: "bank_selection" as const,
+            message: selection.message,
+          };
+        }
+        return yield* (reserved
+          ? dependencies.authorizationFlow.startReserved(client, {
+              aspspName: selection.bank.name,
+              country: selection.country,
+              redirectUrl: application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
+              accessProfile: options.accessProfile,
+            })
+          : dependencies.authorizationFlow.start(client, {
+              aspspName: selection.bank.name,
+              country: selection.country,
+              redirectUrl: application.redirectUrls[0] ?? DEFAULT_REDIRECT_URL,
+              accessProfile: options.accessProfile,
+            }));
+      });
+    const selectionResult = activationNeeded
+      ? yield* Effect.acquireUseRelease(
+          Effect.sync(dependencies.beginProductionActivationWait),
+          () =>
+            Effect.gen(function* () {
+              yield* dependencies.openBrowser(APPLICATIONS_URL);
+              while (!applicationInfo.active) {
+                yield* Effect.sleep(5_000);
+                applicationInfo = yield* client.getApplication();
+              }
+              dependencies.endProductionActivationWait();
+              return yield* selectBankAndAuthorize(true);
+            }),
+          () =>
+            Effect.sync(() => {
+              dependencies.endProductionActivationWait();
+              dependencies.authorizationFlow.release();
+            }),
+        )
+      : yield* selectBankAndAuthorize(false);
+    if (selectionResult.status === "failed") return selectionResult;
+    const authorization = selectionResult;
     // start() forks callback completion; this status changes while the Effect suspends.
     const waitForAuthorization = Effect.gen(function* () {
       while (dependencies.authorizationFlow.status.pending) {

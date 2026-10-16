@@ -96,6 +96,12 @@ async function runConnection({
           };
         });
       },
+      startReserved(_client, options) {
+        return this.start(_client, options);
+      },
+      release() {
+        state.authorizationPending = false;
+      },
     },
     assertNoEnvironmentCredentials() {},
     getEnvironmentSessionId() {
@@ -135,6 +141,7 @@ async function runConnection({
         throw new Error("Production activation is already pending");
       }
       state.productionActivationPending = true;
+      state.authorizationPending = true;
     },
     endProductionActivationWait() {
       state.productionActivationPending = false;

@@ -655,6 +655,64 @@ test("real HTTPS callback rejects invalid requests and stores an accepted sessio
   assert.deepEqual(await waitForAuthorizationToFinish(flow), { pending: false });
 });
 
+test("buffers a bank callback received before the completion waiter starts", async () => {
+  const port = await getAvailablePort();
+  const redirectUrl = `https://127.0.0.1:${port}/callback`;
+  const store = new MemorySessionStore();
+  let authorizationRequest;
+  let sessionCode;
+  const flow = new BankAuthorizationFlow(
+    store,
+    () =>
+      Effect.tryPromise({
+        try: async () => {
+          const callback = new URL(redirectUrl);
+          callback.searchParams.set("state", authorizationRequest.state);
+          callback.searchParams.set("code", "early-callback-code");
+          assert.equal(await requestHttpsStatus(callback), 200);
+        },
+        catch: (error) => error,
+      }),
+    undefined,
+    getTlsOptions,
+  );
+  const client = {
+    startAuthorization(request) {
+      return Effect.sync(() => {
+        authorizationRequest = request;
+        return { url: "https://bank.example/authorize" };
+      });
+    },
+    createSession(code) {
+      return Effect.sync(() => {
+        sessionCode = code;
+        return { session_id: "early-callback-session" };
+      });
+    },
+  };
+  const options = {
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl,
+    validUntil: "2099-12-01T00:00:00.000Z",
+  };
+
+  try {
+    const authorization = await Effect.runPromise(flow.start(client, options));
+    assert.equal(authorization.status, "awaiting_user");
+    assert.equal(
+      await waitForSession(store),
+      "early-callback-session",
+    );
+    assert.equal(sessionCode, "early-callback-code");
+    assert.deepEqual(await waitForAuthorizationToFinish(flow), { pending: false });
+  } finally {
+    await Effect.runPromise(
+      flow.cancelPending("https://bank.example/authorize"),
+    );
+  }
+});
+
 test("real HTTPS callback handles denied bank consent without storing a session", async () => {
   const port = await getAvailablePort();
   const redirectUrl = `https://127.0.0.1:${port}/callback`;

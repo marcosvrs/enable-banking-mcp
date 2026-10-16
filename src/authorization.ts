@@ -369,17 +369,37 @@ function createCallbackListener(
     let timeout: NodeJS.Timeout | undefined;
     const tlsOptions = yield* tlsOptionsProvider();
     let resumeCallback: ((effect: Effect.Effect<string, unknown>) => void) | undefined;
+    let bufferedResult: Effect.Effect<string, unknown> | undefined;
+    let settled = false;
+    const settle = (result: Effect.Effect<string, unknown>) => {
+      if (settled) return;
+      settled = true;
+      if (resumeCallback) {
+        const resume = resumeCallback;
+        resumeCallback = undefined;
+        resume(result);
+      } else {
+        bufferedResult = result;
+      }
+    };
     const wait = Effect.async<string, unknown>((resume) => {
+      if (bufferedResult) {
+        const result = bufferedResult;
+        bufferedResult = undefined;
+        resume(result);
+        return Effect.void;
+      }
       resumeCallback = resume;
       timeout = setTimeout(
         () => {
-          resume(Effect.fail(new Error("Bank authorization timed out")));
+          settle(Effect.fail(new Error("Bank authorization timed out")));
         },
         CALLBACK_TIMEOUT_MS,
       );
       timeout.unref();
       return Effect.sync(() => {
         clearTimeout(timeout);
+        if (resumeCallback === resume) resumeCallback = undefined;
       });
     });
     const handleCallback = (
@@ -404,7 +424,7 @@ function createCallbackListener(
       if (requestUrl.searchParams.has("error")) {
         response.writeHead(400, { "content-type": "text/plain" });
         response.end("Bank authorization was denied.");
-        resumeCallback?.(Effect.fail(new Error("Bank authorization was denied")));
+        settle(Effect.fail(new Error("Bank authorization was denied")));
         return;
       }
       const code = requestUrl.searchParams.get("code");
@@ -415,7 +435,7 @@ function createCallbackListener(
       }
       response.writeHead(200, { "content-type": "text/plain" });
       response.end("Bank authorization complete. You may close this window.");
-      resumeCallback?.(Effect.succeed(code));
+      settle(Effect.succeed(code));
     };
     const server = yield* Effect.try({
       try: () => createHttpsServer(tlsOptions, handleCallback),

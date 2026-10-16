@@ -318,7 +318,6 @@ function beginProductionActivationWait(): void {
 
 function endProductionActivationWait(): void {
   productionActivationPending = false;
-  authorizationFlow.release();
 }
 
 function readConnectionStatus(): Effect.Effect<unknown, unknown> {

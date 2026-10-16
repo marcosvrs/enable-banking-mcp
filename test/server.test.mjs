@@ -170,7 +170,11 @@ async function startIsolatedServer(overrides = {}, elicitationResponse) {
       : {},
   );
   if (elicitationResponse) {
-    client.setRequestHandler(ElicitRequestSchema, async () => elicitationResponse);
+    client.setRequestHandler(ElicitRequestSchema, async (params) =>
+      typeof elicitationResponse === "function"
+        ? elicitationResponse(params)
+        : elicitationResponse,
+    );
   }
   await client.connect(transport);
   return { client, close: () => client.close() };
@@ -459,9 +463,12 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
   }
 });
 
-test("tracks the guided Production activation wait and blocks credential cleanup", async () => {
+test("tracks the guided Production activation reservation through bank selection", async () => {
   const server = await startIsolatedServer(
-    { MCP_TEST_DELAY_APPLICATION_ACTIVATION: "true" },
+    {
+      MCP_TEST_DELAY_APPLICATION_ACTIVATION: "true",
+      MCP_TEST_DELAY_BANK_LIST_MS: "5000",
+    },
     {
       action: "accept",
       content: { country: "IE", bank: "Fixture Bank" },
@@ -492,16 +499,40 @@ test("tracks the guided Production activation wait and blocks credential cleanup
     assert.equal(pending.connection, "awaiting_user");
     assert.match(pending.next_action, /do not rerun a tool/i);
 
-    const duplicate = toolValue(await callTool(server.client, "connect_bank"));
-    assert.equal(duplicate.status, "awaiting_user");
-    assert.equal(duplicate.phase, "production_activation");
+    const duplicateDuringActivation = toolValue(
+      await callTool(server.client, "connect_bank"),
+    );
+    assert.equal(duplicateDuringActivation.status, "awaiting_user");
+    assert.equal(duplicateDuringActivation.phase, "production_activation");
 
-    const cleanup = await callTool(server.client, "clear_local_credentials");
-    assert.equal(cleanup.isError, true);
-    assert.match(cleanup.content[0].text, /activation.*pending/i);
+    const cleanupDuringActivation = await callTool(
+      server.client,
+      "clear_local_credentials",
+    );
+    assert.equal(cleanupDuringActivation.isError, true);
+    assert.match(cleanupDuringActivation.content[0].text, /activation.*pending/i);
+
+    const pendingBankSelection = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) => status.phase === "bank_authorization",
+    );
+    assert.equal(pendingBankSelection.connection, "awaiting_user");
+
+    const duplicateDuringSelection = callTool(server.client, "connect_bank");
+    const cleanupDuringSelection = await callTool(
+      server.client,
+      "clear_local_credentials",
+    );
+    assert.equal(cleanupDuringSelection.isError, true);
+    assert.match(
+      cleanupDuringSelection.content[0].text,
+      /authorization.*pending/i,
+    );
 
     const connected = toolValue(await connection);
     assert.equal(connected.status, "connected");
+    assert.equal(toolValue(await duplicateDuringSelection).status, "connected");
     assert.equal(
       toolValue(await callTool(server.client, "clear_local_credentials")).cleared,
       true,
