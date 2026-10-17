@@ -43,6 +43,8 @@ async function runConnection({
   setupApplicationAfterWait,
   authorizationPending = false,
   completeAuthorizationWhenObserved = false,
+  failBalancesWithoutSession = false,
+  storeSessionOnAuthorization = false,
   accessProfile = "balances",
   activateApplicationOnBrowserOpen = false,
 } = {}) {
@@ -90,6 +92,9 @@ async function runConnection({
         state.authorizationCalls.push(options);
         return Effect.sync(() => {
           state.authorizationPending = false;
+          if (storeSessionOnAuthorization) {
+            state.sessionStore.value = "authorized-session";
+          }
           return {
             status: "awaiting_user",
             authorization_url: "https://bank.example/authorize",
@@ -110,6 +115,9 @@ async function runConnection({
     clearEnvironmentSession() {},
     readAuthorizedBalances() {
       state.balanceReads += 1;
+      if (failBalancesWithoutSession && state.sessionStore.value === undefined) {
+        return Effect.fail(new Error("No Enable Banking session is stored"));
+      }
       return Effect.succeed({
         aspsp: { name: "Example Bank", country: "FI" },
         accounts: [{ uid: "account-1" }],
@@ -369,7 +377,7 @@ test("a pending authorization without transaction access continues into reauthor
     accessProfile: "balances_and_transactions",
   }]);
   assert.equal(result.status, "connected");
-  assert.equal(state.balanceReads, 2);
+  assert.equal(state.balanceReads, 1);
 });
 test("redacts elicited email from setup failures", async () => {
   const { result, toolResponse } = await runConnection({
@@ -392,4 +400,24 @@ test("redacts elicited email from setup failures", async () => {
   assert.equal(result.status, "failed");
   assert.equal(result.error, "Provider rejected [email redacted]");
   assert.doesNotMatch(JSON.stringify(toolResponse), /person@example\.com/);
+});
+
+test("a cancelled authorization waiter without a stored session starts a new authorization", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application(),
+    authorizationPending: true,
+    completeAuthorizationWhenObserved: true,
+    failBalancesWithoutSession: true,
+    storeSessionOnAuthorization: true,
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: { country: "FI", bank: "Example Bank" },
+    },
+  });
+
+  assert.equal(result.status, "connected");
+  assert.equal(state.elicitationRequests.length, 1);
+  assert.equal(state.authorizationCalls.length, 1);
+  assert.equal(state.balanceReads, 1);
 });

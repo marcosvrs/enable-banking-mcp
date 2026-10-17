@@ -66,29 +66,67 @@ const LOCK_KEEPER_PATH = fileURLToPath(
 
 type LockKeeper = ChildProcess;
 
-async function waitForLockKeeper(child: LockKeeper): Promise<void> {
+async function waitForLockKeeper(
+  child: LockKeeper,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
   await new Promise<void>((resolve, reject) => {
     let stdout = "";
     let stderr = "";
+    let settled = false;
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      stdout += chunk;
-      if (stdout.includes("LOCKED\n")) resolve();
-    });
-    child.stderr?.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.once("error", reject);
-    child.once("close", (code) => {
-      if (!stdout.includes("LOCKED\n")) {
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      child.stdout?.off("data", onStdout);
+      child.stderr?.off("data", onStderr);
+      child.off("error", onError);
+      child.off("close", onClose);
+      if (error === undefined) {
+        resolve();
+      } else {
         reject(
+          error instanceof Error
+            ? error
+            : new Error("Credential operation failed"),
+        );
+      }
+    };
+    const onStdout = (chunk: string) => {
+      stdout += chunk;
+      if (stdout.includes("LOCKED\n")) finish();
+    };
+    const onStderr = (chunk: string) => {
+      stderr += chunk;
+    };
+    const onError = (error: Error) => {
+      finish(error);
+    };
+    const onClose = (code: number | null) => {
+      if (!stdout.includes("LOCKED\n")) {
+        finish(
           new Error(
             `Unable to acquire the Enable Banking credential lock: ${stderr.trim() || `lock keeper exited with code ${code}`}`,
           ),
         );
       }
-    });
+    };
+    const onAbort = () => {
+      finish(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new Error("Credential operation cancelled"),
+      );
+    };
+    child.stdout?.on("data", onStdout);
+    child.stderr?.on("data", onStderr);
+    child.once("error", onError);
+    child.once("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
   });
 }
 
@@ -106,7 +144,11 @@ async function releaseLockKeeper(child: LockKeeper): Promise<void> {
   await closed;
 }
 
-async function withCredentialLock<T>(operation: () => T): Promise<T> {
+async function withCredentialLock<T>(
+  operation: () => T,
+  signal: AbortSignal,
+): Promise<T> {
+  signal.throwIfAborted();
   mkdirSync(join(homedir(), ".config", "enable-banking-mcp"), {
     recursive: true,
     mode: 0o700,
@@ -114,8 +156,9 @@ async function withCredentialLock<T>(operation: () => T): Promise<T> {
   const child = spawn(process.execPath, [LOCK_KEEPER_PATH, CREDENTIAL_LOCK_PATH], {
     stdio: ["pipe", "pipe", "pipe"],
   });
-  await waitForLockKeeper(child);
   try {
+    await waitForLockKeeper(child, signal);
+    signal.throwIfAborted();
     return operation();
   } finally {
     await releaseLockKeeper(child);
@@ -296,19 +339,19 @@ export class MacKeychainCredentialVault {
 
   get(slot: CredentialSlot): Effect.Effect<string | undefined, unknown> {
     return Effect.tryPromise({
-      try: () =>
+      try: (signal) =>
         withCredentialLock(() => {
           this.initialized = false;
           this.initialize(false);
           return this.bundle[slot];
-        }),
+        }, signal),
       catch: (error) => error,
     });
   }
 
   set(slot: CredentialSlot, value: string): Effect.Effect<void, unknown> {
     return Effect.tryPromise({
-      try: () =>
+      try: (signal) =>
         withCredentialLock(() => {
           const normalized = value.trim();
           if (!normalized) {
@@ -324,14 +367,14 @@ export class MacKeychainCredentialVault {
             `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
           );
           this.bundle = next;
-        }),
+        }, signal),
       catch: (error) => error,
     });
   }
 
   clear(slot: CredentialSlot): Effect.Effect<void, unknown> {
     return Effect.tryPromise({
-      try: () =>
+      try: (signal) =>
         withCredentialLock(() => {
           this.initialized = false;
           this.initialize(true);
@@ -356,7 +399,7 @@ export class MacKeychainCredentialVault {
             `${BUNDLE_PREFIX}${JSON.stringify({ version: 1, ...next })}`,
           );
           this.bundle = next;
-        }),
+        }, signal),
       catch: (error) => error,
     });
   }

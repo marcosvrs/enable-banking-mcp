@@ -47,10 +47,10 @@ const sessionStoreWorker = fileURLToPath(
   new URL("./fixtures/session-store-worker.mjs", import.meta.url),
 );
 
-function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
+function spawnVaultWriter(keychainPath, slot, value, delayWrite, operation = "set") {
   const child = spawn(
     process.execPath,
-    [sessionStoreWorker, keychainPath, slot, value, String(delayWrite)],
+    [sessionStoreWorker, keychainPath, slot, value, String(delayWrite), operation],
     {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, HOME: dirname(keychainPath) },
@@ -61,6 +61,7 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
   let resolveReady;
   let rejectReady;
   let resolveBlocked;
+  let resolveCancelled;
   let resolveCompletion;
   let rejectCompletion;
   const ready = new Promise((resolve, reject) => {
@@ -69,6 +70,9 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
   });
   const blocked = new Promise((resolve) => {
     resolveBlocked = resolve;
+  });
+  const cancelled = new Promise((resolve) => {
+    resolveCancelled = resolve;
   });
   const completed = new Promise((resolve, reject) => {
     resolveCompletion = resolve;
@@ -81,6 +85,7 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
     stdout += chunk;
     if (stdout.includes("READY\n")) resolveReady();
     if (stdout.includes("BLOCKED\n")) resolveBlocked();
+    if (stdout.includes("CANCELLED\n")) resolveCancelled();
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
@@ -97,7 +102,7 @@ function spawnVaultWriter(keychainPath, slot, value, delayWrite) {
     else rejectCompletion(new Error(`Keychain worker failed: ${stderr}`));
   });
 
-  return { child, ready, blocked, completed };
+  return { child, ready, blocked, cancelled, completed };
 }
 
 
@@ -402,3 +407,60 @@ test("rejects empty secret values without creating the vault item", async () => 
   );
   assert.equal(state.records.size, 0);
 });
+
+for (const operation of ["cancel-set", "cancel-clear"]) {
+  test(`cancelling queued ${operation === "cancel-set" ? "set" : "clear"} releases its lock keeper`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), "enable-banking-cancelled-lock-"));
+    const keychainPath = join(directory, "records.json");
+    writeFileSync(
+      keychainPath,
+      JSON.stringify({
+        "enable-banking-mcp.credentials.native":
+          `${bundlePrefix}${JSON.stringify({ version: 1, session: "session-placeholder" })}`,
+      }),
+      { mode: 0o600 },
+    );
+    const holder = spawnVaultWriter(
+      keychainPath,
+      "application",
+      "application-placeholder",
+      1_200,
+    );
+    let queued;
+
+    try {
+      await holder.ready;
+      holder.child.stdin.end("go\n");
+      await holder.blocked;
+      queued = spawnVaultWriter(
+        keychainPath,
+        "session",
+        "updated-session-placeholder",
+        false,
+        operation,
+      );
+      await queued.ready;
+      queued.child.stdin.end("cancel\n");
+      await queued.cancelled;
+      const exitedBeforeUnlock = await Promise.race([
+        queued.completed.then(() => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      await holder.completed;
+      await queued.completed;
+
+      assert.equal(exitedBeforeUnlock, true);
+      const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+      const bundle = JSON.parse(
+        records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+      );
+      assert.equal(bundle.session, "session-placeholder");
+      assert.equal(bundle.application, "application-placeholder");
+    } finally {
+      for (const worker of [holder, queued].filter(Boolean)) {
+        if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}

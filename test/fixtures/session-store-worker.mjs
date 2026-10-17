@@ -7,7 +7,7 @@ import {
   setNativeKeyringEntryFactory,
 } from "../../dist/session-store.js";
 
-const [, , keychainPath, slot, value, delayWrite] = process.argv;
+const [, , keychainPath, slot, value, delayWrite, operation = "set"] = process.argv;
 
 function readRecords() {
   return JSON.parse(readFileSync(keychainPath, "utf8"));
@@ -51,8 +51,24 @@ setNativeKeyringEntryFactory((service) => ({
 const store = slot === "session"
   ? new MacKeychainSessionStore()
   : new MacKeychainSecretStore("application");
-await Effect.runPromise(store.get());
-process.stdout.write("READY\n");
-await new Promise((resolve) => process.stdin.once("data", resolve));
-await Effect.runPromise(store.set(value));
-process.stdout.write("DONE\n");
+if (operation === "cancel-set" || operation === "cancel-clear") {
+  const controller = new AbortController();
+  const effect = operation === "cancel-clear" ? store.clear() : store.set(value);
+  const pending = Effect.runPromise(effect, { signal: controller.signal });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  process.stdout.write("READY\n");
+  await new Promise((resolve) => process.stdin.once("data", resolve));
+  controller.abort();
+  try {
+    await pending;
+  } catch (error) {
+    if (!controller.signal.aborted) throw error;
+  }
+  process.stdout.write("CANCELLED\n");
+} else {
+  await Effect.runPromise(store.get());
+  process.stdout.write("READY\n");
+  await new Promise((resolve) => process.stdin.once("data", resolve));
+  await Effect.runPromise(store.set(value));
+  process.stdout.write("DONE\n");
+}

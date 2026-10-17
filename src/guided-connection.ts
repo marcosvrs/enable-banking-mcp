@@ -111,11 +111,14 @@ export function connectBank(
       if (error) {
         return { status: "failed", phase: "bank_authorization", error };
       }
-      const result = {
-        status: "connected",
-        ...(yield* dependencies.readAuthorizedBalances()),
-      };
-      if (hasRequestedAccess(result, options.accessProfile)) return result;
+      const completedSession = yield* dependencies.sessionStore.get();
+      if (completedSession !== undefined) {
+        const result = {
+          status: "connected",
+          ...(yield* dependencies.readAuthorizedBalances()),
+        };
+        if (hasRequestedAccess(result, options.accessProfile)) return result;
+      }
     }
     if (!application) dependencies.assertNoEnvironmentCredentials();
 
