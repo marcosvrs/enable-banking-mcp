@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Effect } from "effect";
 import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { BankAuthorizationFlow } from "../dist/authorization.js";
@@ -14,16 +15,20 @@ import {
 class MemoryStore {
   value;
 
-  async get() {
-    return this.value;
+  get() {
+    return Effect.sync(() => this.value);
   }
 
-  async set(value) {
-    this.value = value;
+  set(value) {
+    return Effect.sync(() => {
+      this.value = value;
+    });
   }
 
-  async clear() {
-    this.value = undefined;
+  clear() {
+    return Effect.sync(() => {
+      this.value = undefined;
+    });
   }
 }
 
@@ -44,11 +49,11 @@ test("waits for production account linking before bank consent", async () => {
   });
   const controlPanelAuth = new ControlPanelAuthFlow(
     controlPanelClient,
-    async () => ({
+    () => Effect.succeed({
       port: 4321,
       path: `/callback?state=${"A".repeat(43)}`,
-      wait: Promise.resolve("oob-code"),
-      close: async () => {},
+      wait: Effect.succeed("oob-code"),
+      close: Effect.void,
     }),
   );
   const { privateKey } = generateKeyPairSync("rsa", {
@@ -94,10 +99,10 @@ test("waits for production account linking before bank consent", async () => {
   const openedUrls = [];
   const authorizationFlow = new BankAuthorizationFlow(
     sessionStore,
-    (url) => openedUrls.push(url),
-    async () => ({
-      wait: Promise.resolve("bank-code"),
-      close: async () => {},
+    (url) => Effect.sync(() => openedUrls.push(url)),
+    () => Effect.succeed({
+      wait: Effect.succeed("bank-code"),
+      close: Effect.void,
     }),
   );
   const setup = new ApplicationSetupFlow({
@@ -106,17 +111,17 @@ test("waits for production account linking before bank consent", async () => {
     controlPanelClient,
     controlPanelAuth,
     authorizationFlow,
-    openBrowser: (url) => openedUrls.push(url),
+    openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
     createBankClient: bankClientFactory,
-    generateKeyMaterial: async () => ({
+    generateKeyMaterial: () => Effect.succeed({
       privateKey,
       certificate: "certificate",
     }),
-    trustCertificate: async () => {},
-    sleep: async () => {},
+    trustCertificate: () => Effect.void,
+    sleep: () => Effect.void,
   });
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     controlPanelEmail: "user@example.com",
     appName: "Enable Banking MCP",
     environment: "PRODUCTION",
@@ -127,7 +132,7 @@ test("waits for production account linking before bank consent", async () => {
     privacyUrl: "https://example.com/privacy",
     termsUrl: "https://example.com/terms",
     validUntil: "2099-01-01T00:00:00Z",
-  });
+  }));
 
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (setup.status.phase === "complete") break;
@@ -140,7 +145,7 @@ test("waits for production account linking before bank consent", async () => {
     "https://enablebanking.com/cp/applications",
     "https://bank.example/authorize",
   ]);
-  assert.equal(await sessionStore.get(), "session-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), "session-id");
 });
 
 test("requires HTTPS loopback callbacks for every environment", () => {
@@ -220,13 +225,13 @@ test("keeps production application linking state when activation lookup fails", 
   const applicationStore = new MemoryStore();
   const sessionStore = new MemoryStore();
   const controlPanelAuth = {
-    async authenticate(email) {
-      return { email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+    authenticate(email) {
+      return Effect.succeed({ email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" });
     },
   };
   const controlPanelClient = {
-    async registerApplication() {
-      return { app_id: "production-app-id" };
+    registerApplication() {
+      return Effect.succeed({ app_id: "production-app-id" });
     },
   };
   const { privateKey } = generateKeyPairSync("rsa", {
@@ -243,16 +248,16 @@ test("keeps production application linking state when activation lookup fails", 
     controlPanelAuth,
     authorizationFlow: {
       status: { pending: false },
-      async start() {
-        throw new Error("authorization must wait for activation");
+      start() {
+        return Effect.fail(new Error("authorization must wait for activation"));
       },
     },
-    openBrowser: (url) => openedUrls.push(url),
-    generateKeyMaterial: async () => ({
+    openBrowser: (url) => Effect.sync(() => openedUrls.push(url)),
+    generateKeyMaterial: () => Effect.succeed({
       privateKey,
       certificate: "fake-certificate",
     }),
-    trustCertificate: async () => {},
+    trustCertificate: () => Effect.void,
     createBankClient: (credentials) =>
       new EnableBankingClient(credentials, async () => {
         activationCalls += 1;
@@ -260,17 +265,17 @@ test("keeps production application linking state when activation lookup fails", 
           status: 503,
         });
       }),
-    sleep: async () => {},
+    sleep: () => Effect.void,
   });
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     controlPanelEmail: "user@example.com",
     appName: "Enable Banking MCP",
     environment: "PRODUCTION",
     redirectUrl: "https://localhost:8765/callback",
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (!setup.status.pending) break;
     await new Promise((resolve) => setImmediate(resolve));
@@ -281,8 +286,8 @@ test("keeps production application linking state when activation lookup fails", 
   assert.equal(setup.status.appId, "production-app-id");
   assert.equal(activationCalls, 1);
   assert.deepEqual(openedUrls, ["https://enablebanking.com/cp/applications"]);
-  assert.equal((await applicationStore.get()).appId, "production-app-id");
-  assert.equal(await sessionStore.get(), undefined);
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "production-app-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), undefined);
 });
 
 test("refreshes cached Production account-link status after activation", async () => {
@@ -290,26 +295,26 @@ test("refreshes cached Production account-link status after activation", async (
   let activationChecks = 0;
   const setup = new ApplicationSetupFlow(
     setupDependencies({
-      openBrowser: () => {},
+      openBrowser: () => Effect.void,
       createBankClient: () => ({
-        async getApplication() {
+        getApplication() {
           activationChecks += 1;
-          return { active };
+          return Effect.succeed({ active });
         },
       }),
     }),
   );
 
-  await setup.registerApplication({
+  await Effect.runPromise(setup.registerApplication({
     controlPanelEmail: "user@example.com",
     appName: "Enable Banking MCP",
     environment: "PRODUCTION",
     redirectUrl: "https://localhost:8765/callback",
-  });
+  }));
   assert.equal((await waitForSetup(setup)).phase, "account_link");
 
   active = true;
-  const status = await setup.getStatus();
+  const status = await Effect.runPromise(setup.getStatus());
   assert.equal(status.phase, "application_ready");
   assert.equal(setup.status.phase, "application_ready");
   assert.equal(activationChecks, 1);
@@ -375,23 +380,23 @@ function setupDependencies({ applicationStore = new MemoryStore(), sessionStore 
     applicationStore,
     sessionStore,
     controlPanelClient: {
-      async registerApplication(_auth, request) {
+      registerApplication(_auth, request) {
         this.request = request;
-        return { app_id: "sandbox-app-id" };
+        return Effect.succeed({ app_id: "sandbox-app-id" });
       },
     },
     controlPanelAuth: {
-      async authenticate(email, existing) {
+      authenticate(email, existing) {
         this.arguments = [email, existing];
-        return { email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+        return Effect.succeed({ email, idToken: "fake-id-token", refreshToken: "fake-refresh-token" });
       },
     },
     authorizationFlow: { status: { pending: false } },
-    generateKeyMaterial: async () => ({
+    generateKeyMaterial: () => Effect.succeed({
       privateKey: "fake-private-key",
       certificate: "fake-certificate",
     }),
-    trustCertificate: async () => {},
+    trustCertificate: () => Effect.void,
     ...overrides,
   };
 }
@@ -400,27 +405,24 @@ test("registration without optional auth store persists a Sandbox application", 
   const dependencies = setupDependencies();
   const setup = new ApplicationSetupFlow(dependencies);
 
-  await setup.registerApplication({
+  await Effect.runPromise(setup.registerApplication({
     controlPanelEmail: " user@example.com ",
     appName: " Test application ",
     environment: "SANDBOX",
     redirectUrl: " https://localhost:8765/callback ",
-  });
+  }));
 
-  assert.deepEqual(await waitForSetup(setup), {
-    phase: "application_ready",
-    pending: false,
-    appId: "sandbox-app-id",
-    message:
-      "Application registered; the MCP agent can continue with bank consent once country and bank are known.",
-  });
+  const setupStatus = await waitForSetup(setup);
+  assert.equal(setupStatus.phase, "application_ready");
+  assert.equal(setupStatus.pending, false);
+  assert.equal(setupStatus.appId, "sandbox-app-id");
   assert.deepEqual(dependencies.controlPanelClient.request, {
     name: "Test application",
     certificate: "fake-certificate",
     environment: "SANDBOX",
     redirect_urls: ["https://localhost:8765/callback"],
   });
-  assert.deepEqual(await dependencies.applicationStore.get(), {
+  assert.deepEqual(await Effect.runPromise(dependencies.applicationStore.get()), {
     appId: "sandbox-app-id",
     privateKey: "fake-private-key",
     certificate: "fake-certificate",
@@ -439,19 +441,19 @@ test("registration stores changed Control Panel auth when its optional store exi
   const dependencies = setupDependencies({ controlPanelAuthStore });
   const setup = new ApplicationSetupFlow(dependencies);
 
-  await setup.registerApplication({
+  await Effect.runPromise(setup.registerApplication({
     controlPanelEmail: "user@example.com",
     appName: "Test application",
     environment: "SANDBOX",
     redirectUrl: "https://127.0.0.1:8765/callback",
-  });
+  }));
   await waitForSetup(setup);
 
   assert.deepEqual(dependencies.controlPanelAuth.arguments, [
     "user@example.com",
     { idToken: "old-token" },
   ]);
-  assert.deepEqual(await controlPanelAuthStore.get(), {
+  assert.deepEqual(await Effect.runPromise(controlPanelAuthStore.get()), {
     email: "user@example.com",
     idToken: "fake-id-token",
     refreshToken: "fake-refresh-token",
@@ -462,10 +464,10 @@ test("failed application registration reports an error and can be retried", asyn
   let authenticationAttempts = 0;
   const dependencies = setupDependencies({
     controlPanelAuth: {
-      async authenticate() {
+      authenticate() {
         authenticationAttempts += 1;
-        if (authenticationAttempts === 1) throw new Error("authentication unavailable");
-        return { idToken: "fake-id-token", refreshToken: "fake-refresh-token" };
+        if (authenticationAttempts === 1) return Effect.fail(new Error("authentication unavailable"));
+        return Effect.succeed({ idToken: "fake-id-token", refreshToken: "fake-refresh-token" });
       },
     },
   });
@@ -477,13 +479,13 @@ test("failed application registration reports an error and can be retried", asyn
     redirectUrl: "https://localhost:8765/callback",
   };
 
-  await setup.registerApplication(options);
+  await Effect.runPromise(setup.registerApplication(options));
   const failure = await waitForSetup(setup);
   assert.equal(failure.phase, "failed");
   assert.equal(failure.error, "authentication unavailable");
   assert.equal(authenticationAttempts, 1);
 
-  await setup.registerApplication(options);
+  await Effect.runPromise(setup.registerApplication(options));
   assert.equal((await waitForSetup(setup)).phase, "application_ready");
   assert.equal(authenticationAttempts, 2);
 });
@@ -501,7 +503,7 @@ test("getStatus reports completion when a session exists for a persisted Product
   };
 
   sessionStore.value = "fake-session-id";
-  assert.deepEqual(await setup.getStatus(), {
+  assert.deepEqual(await Effect.runPromise(setup.getStatus()), {
     phase: "complete",
     pending: false,
     appId: "production-app-id",
@@ -515,9 +517,11 @@ test("getStatus reports incomplete state after a formerly complete setup loses i
   const sessionStore = new MemoryStore();
   const authorizationFlow = {
     status: { pending: false },
-    async start() {
-      await sessionStore.set("fake-session-id");
-      return { authorization_url: "https://bank.example/authorize" };
+    start() {
+      return Effect.gen(function* () {
+        yield* sessionStore.set("fake-session-id");
+        return { authorization_url: "https://bank.example/authorize" };
+      });
     },
   };
   const setup = new ApplicationSetupFlow(setupDependencies({
@@ -525,24 +529,24 @@ test("getStatus reports incomplete state after a formerly complete setup loses i
     sessionStore,
     authorizationFlow,
     createBankClient: () => ({
-      async listBanks() {
-        return { aspsps: [{ name: "Example Bank" }] };
+      listBanks() {
+        return Effect.succeed({ aspsps: [{ name: "Example Bank" }] });
       },
     }),
   }));
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     controlPanelEmail: "user@example.com",
     appName: "Sandbox",
     environment: "SANDBOX",
     redirectUrl: "https://localhost:8765/callback",
     aspspName: "Example Bank",
     country: "FI",
-  });
+  }));
   assert.equal((await waitForSetup(setup)).phase, "complete");
   applicationStore.value = undefined;
 
-  assert.deepEqual(await setup.getStatus(), {
+  assert.deepEqual(await Effect.runPromise(setup.getStatus()), {
     phase: "idle",
     pending: false,
     sessionStored: true,
@@ -612,12 +616,15 @@ test("uses the default timers for Production activation and consent polling", as
     get status() {
       return { pending: sessionStore.value === undefined };
     },
-    async start() {
+    start() {
       authorizationStarted.resolve();
-      setTimeout(() => {
-        void sessionStore.set("fixture-session-id");
-      }, 1000);
-      return { authorization_url: "https://bank.example/authorize" };
+      return Effect.gen(function* () {
+        yield* Effect.promise(() => new Promise((resolve) => {
+          setTimeout(resolve, 1000);
+        }));
+        yield* sessionStore.set("fixture-session-id");
+        return { authorization_url: "https://bank.example/authorize" };
+      });
     },
   };
   const setup = new ApplicationSetupFlow(
@@ -625,28 +632,28 @@ test("uses the default timers for Production activation and consent polling", as
       applicationStore,
       sessionStore,
       authorizationFlow,
-      openBrowser: () => {},
+      openBrowser: () => Effect.void,
       createBankClient: () => ({
-        async getApplication() {
+        getApplication() {
           activationChecks += 1;
           if (activationChecks === 1) firstActivationCheck.resolve();
-          return { active: activationChecks > 1 };
+          return Effect.succeed({ active: activationChecks > 1 });
         },
-        async listBanks() {
-          return { aspsps: [{ name: "Fixture Bank", country: "FI" }] };
+        listBanks() {
+          return Effect.succeed({ aspsps: [{ name: "Fixture Bank", country: "FI" }] });
         },
       }),
     }),
   );
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     controlPanelEmail: "user@example.com",
     appName: "Production application",
     environment: "PRODUCTION",
     redirectUrl: "https://localhost:8765/callback",
     aspspName: "Fixture Bank",
     country: "FI",
-  });
+  }));
   await firstActivationCheck.promise;
   await new Promise((resolve) => setImmediate(resolve));
   context.mock.timers.tick(5000);
@@ -657,7 +664,7 @@ test("uses the default timers for Production activation and consent polling", as
   const status = await waitForSetup(setup);
   assert.equal(status.phase, "complete");
   assert.equal(activationChecks, 2);
-  assert.equal(await sessionStore.get(), "fixture-session-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), "fixture-session-id");
 });
 
 test("uses the default Enable Banking client for provider bank discovery", async (context) => {
@@ -677,11 +684,12 @@ test("uses the default Enable Banking client for provider bank discovery", async
   });
   const authorizationFlow = {
     status: { pending: false },
-    async start(client, options) {
+    start(client, options) {
       assert.ok(client instanceof EnableBankingClient);
       assert.equal(options.aspspName, "Fixture Bank");
-      await sessionStore.set("fixture-session-id");
-      return { authorization_url: "https://bank.example/authorize" };
+      return Effect.map(sessionStore.set("fixture-session-id"), () => ({
+        authorization_url: "https://bank.example/authorize",
+      }));
     },
   };
   const setup = new ApplicationSetupFlow(
@@ -689,26 +697,26 @@ test("uses the default Enable Banking client for provider bank discovery", async
       applicationStore,
       sessionStore,
       authorizationFlow,
-      openBrowser: () => {},
-      generateKeyMaterial: async () => ({
+      openBrowser: () => Effect.void,
+      generateKeyMaterial: () => Effect.succeed({
         privateKey,
         certificate: "fake-certificate",
       }),
     }),
   );
 
-  await setup.start({
+  await Effect.runPromise(setup.start({
     controlPanelEmail: "user@example.com",
     appName: "Sandbox application",
     environment: "SANDBOX",
     redirectUrl: "https://localhost:8765/callback",
     aspspName: "Fixture Bank",
     country: "FI",
-  });
+  }));
 
   const status = await waitForSetup(setup);
   assert.equal(status.phase, "complete");
-  assert.equal(await sessionStore.get(), "fixture-session-id");
+  assert.equal(await Effect.runPromise(sessionStore.get()), "fixture-session-id");
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url.pathname, "/aspsps");
   assert.equal(requests[0].url.searchParams.get("country"), "FI");

@@ -1,10 +1,38 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
   EnableBankingApiError,
   isTerminalSessionError,
 } from "../dist/enable-banking.js";
-import { recoverConfiguredSession } from "../dist/session-recovery.js";
+import { recoverConfiguredSession as recoverConfiguredSessionEffect } from "../dist/session-recovery.js";
+
+function recoveryEffect(options) {
+  return recoverConfiguredSessionEffect({
+    ...options,
+    read: () =>
+      Effect.tryPromise({
+        try: options.read,
+        catch: (error) => error,
+      }),
+    clearStoredSession: () =>
+      Effect.tryPromise({
+        try: options.clearStoredSession,
+        catch: (error) => error,
+      }),
+  });
+}
+
+function recoverConfiguredSession(options) {
+  return Effect.runPromise(recoveryEffect(options));
+}
+
+async function effectFailure(effect) {
+  const result = await Effect.runPromise(Effect.either(effect));
+  assert.equal(result._tag, "Left");
+  return result.left;
+}
 
 test("retries a valid environment session after clearing terminal Keychain state", async () => {
   const reads = [];
@@ -44,8 +72,8 @@ test("does not discard an environment session on credential errors", async () =>
     error: "UNAUTHORIZED_ACCESS",
   });
 
-  await assert.rejects(
-    recoverConfiguredSession({
+  assert.equal(
+    await effectFailure(recoveryEffect({
       storedSession: "keychain-session",
       environmentSessionId: "environment-session",
       read: async () => {
@@ -57,8 +85,8 @@ test("does not discard an environment session on credential errors", async () =>
       clearEnvironmentSession: () => {
         environmentClears += 1;
       },
-    }),
-    (error) => error === credentialError,
+    })),
+    credentialError,
   );
 
   assert.equal(storedClears, 0);
@@ -130,8 +158,8 @@ test("propagates a nonterminal failure from the environment-session retry", asyn
   const networkError = new Error("network unavailable");
   let reads = 0;
   let environmentClears = 0;
-  await assert.rejects(
-    recoverConfiguredSession({
+  assert.equal(
+    await effectFailure(recoveryEffect({
       storedSession: "expired-stored-session",
       environmentSessionId: "environment-session",
       read: async () => {
@@ -143,8 +171,8 @@ test("propagates a nonterminal failure from the environment-session retry", asyn
       },
       clearStoredSession: async () => {},
       clearEnvironmentSession: () => { environmentClears += 1; },
-    }),
-    (error) => error === networkError,
+    })),
+    networkError,
   );
   assert.equal(reads, 2);
   assert.equal(environmentClears, 0);
@@ -153,8 +181,8 @@ test("propagates a nonterminal failure from the environment-session retry", asyn
 test("propagates a storage-clear failure rather than reading a fallback session", async () => {
   const clearError = new Error("Keychain unavailable");
   let reads = 0;
-  await assert.rejects(
-    recoverConfiguredSession({
+  assert.equal(
+    await effectFailure(recoveryEffect({
       storedSession: "expired-stored-session",
       environmentSessionId: "environment-session",
       read: async () => {
@@ -163,8 +191,8 @@ test("propagates a storage-clear failure rather than reading a fallback session"
       },
       clearStoredSession: async () => { throw clearError; },
       clearEnvironmentSession: () => {},
-    }),
-    (error) => error === clearError,
+    })),
+    clearError,
   );
   assert.equal(reads, 1);
 });

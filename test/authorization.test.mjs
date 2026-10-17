@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { request as requestHttps } from "node:https";
 import { createServer as createNetServer } from "node:net";
 import test from "node:test";
+import { Effect } from "effect";
 import {
   BankAuthorizationFlow,
   loadCallbackTlsOptions,
@@ -12,36 +13,42 @@ import { generateKeyMaterial } from "../dist/setup.js";
 class MemorySessionStore {
   sessionId;
 
-  async get() {
-    return this.sessionId;
+  get() {
+    return Effect.succeed(this.sessionId);
   }
 
-  async set(sessionId) {
-    this.sessionId = sessionId;
+  set(sessionId) {
+    return Effect.sync(() => {
+      this.sessionId = sessionId;
+    });
   }
 
-  async clear() {
-    this.sessionId = undefined;
+  clear() {
+    return Effect.sync(() => {
+      this.sessionId = undefined;
+    });
   }
 }
 
 async function waitForSession(store) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const sessionId = await store.get();
+    const sessionId = await Effect.runPromise(store.get());
     if (sessionId) return sessionId;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  return store.get();
+  return Effect.runPromise(store.get());
 }
 
 let tlsOptions;
 
-async function getTlsOptions() {
-  if (!tlsOptions) {
-    const { privateKey, certificate } = await generateKeyMaterial();
-    tlsOptions = { key: privateKey, cert: certificate };
-  }
-  return tlsOptions;
+function getTlsOptions() {
+  return Effect.gen(function* () {
+    if (!tlsOptions) {
+      const { privateKey, certificate } = yield* generateKeyMaterial();
+      tlsOptions = { key: privateKey, cert: certificate };
+    }
+    return tlsOptions;
+  });
 }
 
 async function getAvailablePort() {
@@ -90,39 +97,46 @@ test("opens browser authorization and stores the callback session", async () => 
   let callbackState;
   const flow = new BankAuthorizationFlow(
     store,
-    (url) => {
+    (url) => Effect.sync(() => {
       openedUrl = url;
-    },
-    async (_redirect, state) => {
+    }),
+    (_redirect, state) => Effect.sync(() => {
       callbackState = state;
       return {
-        wait: completion.promise,
-        close: async () => {},
+        wait: Effect.tryPromise({
+          try: () => completion.promise,
+          catch: (error) => error,
+        }),
+        close: Effect.void,
       };
-    },
+    }),
   );
   const client = {
-    async startAuthorization(request) {
-      authorizationRequest = request;
-      return {
-        url: "https://bank.example/authorize",
-        authorization_id: "authorization-id",
-        psu_id_hash: "psu-hash",
-      };
+    startAuthorization(request) {
+      return Effect.sync(() => {
+        authorizationRequest = request;
+        return {
+          url: "https://bank.example/authorize",
+          authorization_id: "authorization-id",
+          psu_id_hash: "psu-hash",
+        };
+      });
     },
-    async createSession(code) {
-      assert.equal(code, "callback-code");
-      return { session_id: "stored-session-id" };
+    createSession(code) {
+      return Effect.sync(() => {
+        assert.equal(code, "callback-code");
+        return { session_id: "stored-session-id" };
+      });
     },
   };
 
-  const result = await flow.start(client, {
+  const result = await Effect.runPromise(flow.start(client, {
     aspspName: "Example Bank",
     country: "ie",
     redirectUrl: "https://localhost:8765/callback",
     validUntil: "2099-12-01T00:00:00.000Z",
     accessProfile: "balances_and_transactions",
-  });
+  }));
 
   assert.deepEqual(result, {
     status: "awaiting_user",
@@ -147,32 +161,37 @@ test("requests balances without transactions by default", async () => {
   let authorizationRequest;
   const flow = new BankAuthorizationFlow(
     store,
-    () => {},
-    async () => ({
-      wait: completion.promise,
-      close: async () => {},
+    () => Effect.void,
+    () => Effect.succeed({
+      wait: Effect.tryPromise({
+        try: () => completion.promise,
+        catch: (error) => error,
+      }),
+      close: Effect.void,
     }),
   );
   const client = {
-    async startAuthorization(request) {
-      authorizationRequest = request;
-      return {
-        url: "https://bank.example/authorize",
-        authorization_id: "authorization-id",
-        psu_id_hash: "psu-hash",
-      };
+    startAuthorization(request) {
+      return Effect.sync(() => {
+        authorizationRequest = request;
+        return {
+          url: "https://bank.example/authorize",
+          authorization_id: "authorization-id",
+          psu_id_hash: "psu-hash",
+        };
+      });
     },
-    async createSession() {
-      return { session_id: "stored-session-id" };
+    createSession() {
+      return Effect.succeed({ session_id: "stored-session-id" });
     },
   };
 
-  await flow.start(client, {
+  await Effect.runPromise(flow.start(client, {
     aspspName: "Example Bank",
     country: "IE",
     redirectUrl: "https://localhost:8765/callback",
     validUntil: "2099-12-01T00:00:00.000Z",
-  });
+  }));
 
   assert.equal(authorizationRequest.access.balances, true);
   assert.equal(authorizationRequest.access.transactions, false);
@@ -181,9 +200,9 @@ test("requests balances without transactions by default", async () => {
 });
 
 test("rejects HTTP loopback callback URLs", async () => {
-  const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => {});
+  const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => Effect.void);
   await assert.rejects(
-    flow.start(
+    Effect.runPromise(flow.start(
       {},
       {
         aspspName: "Example Bank",
@@ -191,15 +210,15 @@ test("rejects HTTP loopback callback URLs", async () => {
         redirectUrl: "http://localhost:8765/callback",
         validUntil: "2099-12-01T00:00:00.000Z",
       },
-    ),
-    /redirect_url must be an https:\/\/ localhost or 127\.0\.0\.1 URL/,
+    )),
+    /redirect_url must be an https:\/\/ localhost or 127\.0\.0.1 URL/,
   );
 });
 
 test("rejects non-loopback callback URLs", async () => {
-  const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => {});
+  const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => Effect.void);
   await assert.rejects(
-    flow.start(
+    Effect.runPromise(flow.start(
       {},
       {
         aspspName: "Example Bank",
@@ -207,8 +226,8 @@ test("rejects non-loopback callback URLs", async () => {
         redirectUrl: "https://constructor:8765/callback",
         validUntil: "2099-12-01T00:00:00.000Z",
       },
-    ),
-    /redirect_url must be an https:\/\/ localhost or 127\.0\.0\.1 URL/,
+    )),
+    /redirect_url must be an https:\/\/ localhost or 127\.0\.0.1 URL/,
   );
 });
 
@@ -220,9 +239,9 @@ test("rejects callback URL credentials, query, fragment, and invalid ports", asy
     "https://localhost/callback",
     "https://localhost:0/callback",
   ]) {
-    const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => {});
+    const flow = new BankAuthorizationFlow(new MemorySessionStore(), () => Effect.void);
     await assert.rejects(
-      flow.start(
+      Effect.runPromise(flow.start(
         {},
         {
           aspspName: "Example Bank",
@@ -230,7 +249,7 @@ test("rejects callback URL credentials, query, fragment, and invalid ports", asy
           redirectUrl,
           validUntil: "2099-12-01T00:00:00.000Z",
         },
-      ),
+      )),
       /redirect_url must/,
       redirectUrl,
     );
@@ -267,31 +286,29 @@ test("defaults consent expiry to thirty days", () => {
 test("clears pending authorization after provider, URL, and browser startup errors", async () => {
   for (const scenario of [
     {
-      startAuthorization: async () => {
-        throw new Error("provider authorization failed");
-      },
+      startAuthorization: () => Effect.fail(new Error("provider authorization failed")),
       error: /provider authorization failed/,
     },
     {
-      startAuthorization: async () => ({ url: "javascript:alert(1)" }),
+      startAuthorization: () => Effect.succeed({ url: "javascript:alert(1)" }),
       error: /invalid authorization URL/,
     },
     {
-      startAuthorization: async () => ({ url: 42 }),
+      startAuthorization: () => Effect.succeed({ url: 42 }),
       error: /invalid authorization URL/,
     },
     {
-      startAuthorization: async () => ({ url: "not a URL" }),
+      startAuthorization: () => Effect.succeed({ url: "not a URL" }),
       error: /invalid authorization URL/,
     },
     {
-      startAuthorization: async () => ({
+      startAuthorization: () => Effect.succeed({
         url: `https://user:secret${String.fromCharCode(64)}bank.example/authorize`,
       }),
       error: /invalid authorization URL/,
     },
     {
-      startAuthorization: async () => ({
+      startAuthorization: () => Effect.succeed({
         url: "https://bank.example/authorize",
       }),
       browserError: new Error("browser launch failed"),
@@ -303,20 +320,20 @@ test("clears pending authorization after provider, URL, and browser startup erro
     let browserCalls = 0;
     const flow = new BankAuthorizationFlow(
       new MemorySessionStore(),
-      () => {
+      () => Effect.sync(() => {
         browserCalls += 1;
         if (scenario.browserError) throw scenario.browserError;
-      },
-      async () => ({
-        wait: completion.promise,
-        close: async () => {
+      }),
+      () => Effect.succeed({
+        wait: Effect.tryPromise({ try: () => completion.promise, catch: (error) => error }),
+        close: Effect.sync(() => {
           closeCalls += 1;
-        },
+        }),
       }),
     );
 
     await assert.rejects(
-      flow.start(
+      Effect.runPromise(flow.start(
         { startAuthorization: scenario.startAuthorization },
         {
           aspspName: "Example Bank",
@@ -324,9 +341,10 @@ test("clears pending authorization after provider, URL, and browser startup erro
           redirectUrl: "https://localhost:8765/callback",
           validUntil: "2099-12-01T00:00:00.000Z",
         },
-      ),
+      )),
       scenario.error,
     );
+
     assert.deepEqual(flow.status, { pending: false });
     assert.equal(closeCalls, 1);
     assert.equal(browserCalls, scenario.browserError ? 1 : 0);
@@ -340,19 +358,24 @@ test("rejects concurrent bank consent and permits retry after a denied callback"
   let authorizationCalls = 0;
   const flow = new BankAuthorizationFlow(
     store,
-    () => {},
-    async () => ({
-      wait: completions[listenerCalls++].promise,
-      close: async () => {},
-    }),
+    () => Effect.void,
+    () => Effect.sync(() => ({
+      wait: Effect.tryPromise({
+        try: () => completions[listenerCalls++].promise,
+        catch: (error) => error,
+      }),
+      close: Effect.void,
+    })),
   );
   const client = {
-    async startAuthorization() {
-      authorizationCalls += 1;
-      return { url: "https://bank.example/authorize" };
+    startAuthorization() {
+      return Effect.sync(() => {
+        authorizationCalls += 1;
+        return { url: "https://bank.example/authorize" };
+      });
     },
-    async createSession() {
-      return { session_id: "retry-session" };
+    createSession() {
+      return Effect.succeed({ session_id: "retry-session" });
     },
   };
   const options = {
@@ -362,8 +385,11 @@ test("rejects concurrent bank consent and permits retry after a denied callback"
     validUntil: "2099-12-01T00:00:00.000Z",
   };
 
-  await flow.start(client, options);
-  await assert.rejects(flow.start(client, options), /already in progress/);
+  await Effect.runPromise(flow.start(client, options));
+  await assert.rejects(
+    Effect.runPromise(flow.start(client, options)),
+    /already in progress/,
+  );
   assert.equal(listenerCalls, 1);
   assert.equal(authorizationCalls, 1);
 
@@ -376,7 +402,7 @@ test("rejects concurrent bank consent and permits retry after a denied callback"
     lastError: "bank consent was denied",
   });
 
-  await flow.start(client, options);
+  await Effect.runPromise(flow.start(client, options));
   assert.deepEqual(flow.status, { pending: true });
   completions[1].resolve("approved-code");
   assert.equal(await waitForSession(store), "retry-session");
@@ -391,19 +417,28 @@ test("reserves bank authorization while callback listener creation is pending", 
   const completion = Promise.withResolvers();
   const flow = new BankAuthorizationFlow(
     new MemorySessionStore(),
-    () => {},
-    async () => {
-      listenerCalls += 1;
-      listenerReady.resolve();
-      return listenerGate.promise;
-    },
+    () => Effect.void,
+    () => Effect.tryPromise({
+      try: () => {
+        listenerCalls += 1;
+        listenerReady.resolve();
+        return listenerGate.promise.then(() => ({
+          wait: Effect.tryPromise({
+            try: () => completion.promise,
+            catch: (error) => error,
+          }),
+          close: Effect.void,
+        }));
+      },
+      catch: (error) => error,
+    }),
   );
   const client = {
-    async startAuthorization() {
-      return { url: "https://bank.example/authorize" };
+    startAuthorization() {
+      return Effect.succeed({ url: "https://bank.example/authorize" });
     },
-    async createSession() {
-      return { session_id: "session-id" };
+    createSession() {
+      return Effect.succeed({ session_id: "session-id" });
     },
   };
   const options = {
@@ -412,16 +447,16 @@ test("reserves bank authorization while callback listener creation is pending", 
     redirectUrl: "https://localhost:8765/callback",
   };
 
-  const first = flow.start(client, options);
+  const first = Effect.runPromise(flow.start(client, options));
   await listenerReady.promise;
   assert.equal(flow.status.pending, true);
-  await assert.rejects(flow.start(client, options), /already in progress/);
+  await assert.rejects(
+    Effect.runPromise(flow.start(client, options)),
+    /already in progress/,
+  );
   assert.equal(listenerCalls, 1);
 
-  listenerGate.resolve({
-    wait: completion.promise,
-    close: async () => {},
-  });
+  listenerGate.resolve();
   await first;
   completion.resolve("consent-code");
 });
@@ -431,19 +466,15 @@ test("reports callback exchange and session-store failures after closing the lis
     {
       name: "callback exchange",
       error: "bank code exchange failed",
-      createSession: async () => {
-        throw new Error("bank code exchange failed");
-      },
+      createSession: () => Effect.fail(new Error("bank code exchange failed")),
     },
     {
       name: "session persistence",
       error: "session Keychain write failed",
-      createSession: async () => ({ session_id: "not-persisted" }),
+      createSession: () => Effect.succeed({ session_id: "not-persisted" }),
       makeStore() {
         const store = new MemorySessionStore();
-        store.set = async () => {
-          throw new Error("session Keychain write failed");
-        };
+        store.set = () => Effect.fail(new Error("session Keychain write failed"));
         return store;
       },
     },
@@ -453,20 +484,18 @@ test("reports callback exchange and session-store failures after closing the lis
     let closeCalls = 0;
     const flow = new BankAuthorizationFlow(
       store,
-      () => {},
-      async () => ({
-        wait: completion.promise,
-        close: async () => {
+      () => Effect.void,
+      () => Effect.succeed({
+        wait: Effect.tryPromise({ try: () => completion.promise, catch: (error) => error }),
+        close: Effect.sync(() => {
           closeCalls += 1;
-        },
+        }),
       }),
     );
 
-    await flow.start(
+    await Effect.runPromise(flow.start(
       {
-        async startAuthorization() {
-          return { url: "https://bank.example/authorize" };
-        },
+        startAuthorization: () => Effect.succeed({ url: "https://bank.example/authorize" }),
         createSession: scenario.createSession,
       },
       {
@@ -475,14 +504,14 @@ test("reports callback exchange and session-store failures after closing the lis
         redirectUrl: "https://localhost:8765/callback",
         validUntil: "2099-12-01T00:00:00.000Z",
       },
-    );
+    ));
     completion.resolve("approved-code");
     for (let attempt = 0; attempt < 20 && flow.status.pending; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
     assert.deepEqual(flow.status, { pending: false, lastError: scenario.error }, scenario.name);
-    assert.equal(await store.get(), undefined);
+    assert.equal(await Effect.runPromise(store.get()), undefined);
     assert.equal(closeCalls, 1);
   }
 });
@@ -492,23 +521,17 @@ test("listener cleanup failure does not leave bank authorization pending", async
   const store = new MemorySessionStore();
   const flow = new BankAuthorizationFlow(
     store,
-    () => {},
-    async () => ({
-      wait: completion.promise,
-      close: async () => {
-        throw new Error("callback listener cleanup failed");
-      },
+    () => Effect.void,
+    () => Effect.succeed({
+      wait: Effect.tryPromise({ try: () => completion.promise, catch: (error) => error }),
+      close: Effect.fail(new Error("callback listener cleanup failed")),
     }),
   );
 
-  await flow.start(
+  await Effect.runPromise(flow.start(
     {
-      async startAuthorization() {
-        return { url: "https://bank.example/authorize" };
-      },
-      async createSession() {
-        return { session_id: "stored-before-cleanup-error" };
-      },
+      startAuthorization: () => Effect.succeed({ url: "https://bank.example/authorize" }),
+      createSession: () => Effect.succeed({ session_id: "stored-before-cleanup-error" }),
     },
     {
       aspspName: "Example Bank",
@@ -516,7 +539,7 @@ test("listener cleanup failure does not leave bank authorization pending", async
       redirectUrl: "https://localhost:8765/callback",
       validUntil: "2099-12-01T00:00:00.000Z",
     },
-  );
+  ));
   completion.resolve("approved-code");
   for (let attempt = 0; attempt < 20 && flow.status.pending; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -526,44 +549,41 @@ test("listener cleanup failure does not leave bank authorization pending", async
     pending: false,
     lastError: "callback listener cleanup failed",
   });
-  assert.equal(await store.get(), "stored-before-cleanup-error");
+  assert.equal(await Effect.runPromise(store.get()), "stored-before-cleanup-error");
 });
 
 test("authorization reservations exclude credential cleanup and release after cleanup", async () => {
   const flow = new BankAuthorizationFlow(new MemorySessionStore());
   await assert.rejects(
-    flow.startReserved({}, {}),
+    Effect.runPromise(flow.startReserved({}, {})),
     /reservation is not active/,
   );
   flow.reserve();
   assert.equal(flow.status.pending, true);
   assert.throws(() => flow.reserve(), /already in progress/);
   await assert.rejects(
-    flow.withCredentialCleanup(async () => {}),
+    Effect.runPromise(flow.withCredentialCleanup(() => Effect.void)),
     /bank authorization or cleanup is pending/,
   );
   flow.release();
   assert.equal(flow.status.pending, false);
 
   let finishCleanup;
-  const cleanup = flow.withCredentialCleanup(
-    () =>
-      new Promise((resolve) => {
-        finishCleanup = resolve;
-      }),
-  );
+  const cleanup = Effect.runPromise(flow.withCredentialCleanup(
+    () => Effect.promise(() => new Promise((resolve) => {
+      finishCleanup = resolve;
+    })),
+  ));
   assert.throws(() => flow.reserve(), /credential cleanup is pending/);
   await assert.rejects(
-    flow.withCredentialCleanup(async () => {}),
+    Effect.runPromise(flow.withCredentialCleanup(() => Effect.void)),
     /bank authorization or cleanup is pending/,
   );
   finishCleanup();
   await cleanup;
 
   await assert.rejects(
-    flow.withCredentialCleanup(async () => {
-      throw new Error("cleanup failed");
-    }),
+    Effect.runPromise(flow.withCredentialCleanup(() => Effect.fail(new Error("cleanup failed")))),
     /cleanup failed/,
   );
   flow.reserve();
@@ -578,27 +598,31 @@ test("real HTTPS callback rejects invalid requests and stores an accepted sessio
   let sessionCode;
   const flow = new BankAuthorizationFlow(
     store,
-    () => {},
+    () => Effect.void,
     undefined,
     getTlsOptions,
   );
   const client = {
-    async startAuthorization(request) {
-      authorizationRequest = request;
-      return { url: "https://bank.example/authorize" };
+    startAuthorization(request) {
+      return Effect.sync(() => {
+        authorizationRequest = request;
+        return { url: "https://bank.example/authorize" };
+      });
     },
-    async createSession(code) {
-      sessionCode = code;
-      return { session_id: "https-callback-session" };
+    createSession(code) {
+      return Effect.sync(() => {
+        sessionCode = code;
+        return { session_id: "https-callback-session" };
+      });
     },
   };
 
-  await flow.start(client, {
+  await Effect.runPromise(flow.start(client, {
     aspspName: "Example Bank",
     country: "FI",
     redirectUrl,
     validUntil: "2099-12-01T00:00:00.000Z",
-  });
+  }));
   const callback = new URL(redirectUrl);
   callback.searchParams.set("state", authorizationRequest.state);
 
@@ -613,15 +637,14 @@ test("real HTTPS callback rejects invalid requests and stores an accepted sessio
 
   const wrongState = new URL(callback);
   wrongState.searchParams.set("state", "not-the-request-state");
-  wrongState.searchParams.set("code", "ignored-code");
   assert.equal(await requestHttpsStatus(wrongState), 400);
 
   assert.equal(await requestHttpsStatus(callback), 400);
-  assert.equal(await store.get(), undefined);
+  assert.equal(await Effect.runPromise(store.get()), undefined);
   assert.equal(sessionCode, undefined);
   assert.equal(flow.status.pending, true);
   await assert.rejects(
-    flow.withCredentialCleanup(async () => {}),
+    Effect.runPromise(flow.withCredentialCleanup(() => Effect.void)),
     /bank authorization or cleanup is pending/,
   );
 
@@ -632,6 +655,64 @@ test("real HTTPS callback rejects invalid requests and stores an accepted sessio
   assert.deepEqual(await waitForAuthorizationToFinish(flow), { pending: false });
 });
 
+test("buffers a bank callback received before the completion waiter starts", async () => {
+  const port = await getAvailablePort();
+  const redirectUrl = `https://127.0.0.1:${port}/callback`;
+  const store = new MemorySessionStore();
+  let authorizationRequest;
+  let sessionCode;
+  const flow = new BankAuthorizationFlow(
+    store,
+    () =>
+      Effect.tryPromise({
+        try: async () => {
+          const callback = new URL(redirectUrl);
+          callback.searchParams.set("state", authorizationRequest.state);
+          callback.searchParams.set("code", "early-callback-code");
+          assert.equal(await requestHttpsStatus(callback), 200);
+        },
+        catch: (error) => error,
+      }),
+    undefined,
+    getTlsOptions,
+  );
+  const client = {
+    startAuthorization(request) {
+      return Effect.sync(() => {
+        authorizationRequest = request;
+        return { url: "https://bank.example/authorize" };
+      });
+    },
+    createSession(code) {
+      return Effect.sync(() => {
+        sessionCode = code;
+        return { session_id: "early-callback-session" };
+      });
+    },
+  };
+  const options = {
+    aspspName: "Example Bank",
+    country: "FI",
+    redirectUrl,
+    validUntil: "2099-12-01T00:00:00.000Z",
+  };
+
+  try {
+    const authorization = await Effect.runPromise(flow.start(client, options));
+    assert.equal(authorization.status, "awaiting_user");
+    assert.equal(
+      await waitForSession(store),
+      "early-callback-session",
+    );
+    assert.equal(sessionCode, "early-callback-code");
+    assert.deepEqual(await waitForAuthorizationToFinish(flow), { pending: false });
+  } finally {
+    await Effect.runPromise(
+      flow.cancelPending("https://bank.example/authorize"),
+    );
+  }
+});
+
 test("real HTTPS callback handles denied bank consent without storing a session", async () => {
   const port = await getAvailablePort();
   const redirectUrl = `https://127.0.0.1:${port}/callback`;
@@ -639,19 +720,21 @@ test("real HTTPS callback handles denied bank consent without storing a session"
   let authorizationRequest;
   const flow = new BankAuthorizationFlow(
     store,
-    () => {},
+    () => Effect.void,
     undefined,
     getTlsOptions,
   );
 
-  await flow.start(
+  await Effect.runPromise(flow.start(
     {
-      async startAuthorization(request) {
-        authorizationRequest = request;
-        return { url: "https://bank.example/authorize" };
+      startAuthorization(request) {
+        return Effect.sync(() => {
+          authorizationRequest = request;
+          return { url: "https://bank.example/authorize" };
+        });
       },
-      async createSession() {
-        throw new Error("A denied callback must not exchange a code");
+      createSession() {
+        return Effect.fail(new Error("A denied callback must not exchange a code"));
       },
     },
     {
@@ -660,7 +743,7 @@ test("real HTTPS callback handles denied bank consent without storing a session"
       redirectUrl,
       validUntil: "2099-12-01T00:00:00.000Z",
     },
-  );
+  ));
   const denied = new URL(redirectUrl);
   denied.searchParams.set("state", authorizationRequest.state);
   denied.searchParams.set("error", "access_denied");
@@ -670,7 +753,7 @@ test("real HTTPS callback handles denied bank consent without storing a session"
     pending: false,
     lastError: "Bank authorization was denied",
   });
-  assert.equal(await store.get(), undefined);
+  assert.equal(await Effect.runPromise(store.get()), undefined);
   flow.resetError();
   assert.deepEqual(flow.status, { pending: false });
 });
@@ -679,19 +762,19 @@ test("TLS setup failure prevents provider authorization startup", async () => {
   let authorizationCalls = 0;
   const flow = new BankAuthorizationFlow(
     new MemorySessionStore(),
-    () => {},
+    () => Effect.void,
     undefined,
-    async () => {
-      throw new Error("localhost TLS material is unavailable");
-    },
+    () => Effect.fail(new Error("localhost TLS material is unavailable")),
   );
 
   await assert.rejects(
-    flow.start(
+    Effect.runPromise(flow.start(
       {
-        async startAuthorization() {
-          authorizationCalls += 1;
-          return { url: "https://bank.example/authorize" };
+        startAuthorization() {
+          return Effect.sync(() => {
+            authorizationCalls += 1;
+            return { url: "https://bank.example/authorize" };
+          });
         },
       },
       {
@@ -700,7 +783,7 @@ test("TLS setup failure prevents provider authorization startup", async () => {
         redirectUrl: "https://127.0.0.1:8765/callback",
         validUntil: "2099-12-01T00:00:00.000Z",
       },
-    ),
+    )),
     /localhost TLS material is unavailable/,
   );
   assert.equal(authorizationCalls, 0);
@@ -738,18 +821,20 @@ test("a busy callback port fails before bank authorization starts", async () => 
   let authorizationCalls = 0;
   const flow = new BankAuthorizationFlow(
     new MemorySessionStore(),
-    () => {},
+    () => Effect.void,
     undefined,
     getTlsOptions,
   );
 
   try {
     await assert.rejects(
-      flow.start(
+      Effect.runPromise(flow.start(
         {
-          async startAuthorization() {
-            authorizationCalls += 1;
-            return { url: "https://bank.example/authorize" };
+          startAuthorization() {
+            return Effect.sync(() => {
+              authorizationCalls += 1;
+              return { url: "https://bank.example/authorize" };
+            });
           },
         },
         {
@@ -758,7 +843,7 @@ test("a busy callback port fails before bank authorization starts", async () => 
           redirectUrl: `https://127.0.0.1:${port}/callback`,
           validUntil: "2099-12-01T00:00:00.000Z",
         },
-      ),
+      )),
       /EADDRINUSE/,
     );
     assert.equal(authorizationCalls, 0);
@@ -776,18 +861,18 @@ test("bank authorization timeout records failure and releases its HTTPS listener
   const store = new MemorySessionStore();
   const flow = new BankAuthorizationFlow(
     store,
-    () => {},
+    () => Effect.void,
     undefined,
     getTlsOptions,
   );
 
-  await flow.start(
+  await Effect.runPromise(flow.start(
     {
-      async startAuthorization() {
-        return { url: "https://bank.example/authorize" };
+      startAuthorization() {
+        return Effect.succeed({ url: "https://bank.example/authorize" });
       },
-      async createSession() {
-        throw new Error("A timed-out callback must not exchange a code");
+      createSession() {
+        return Effect.fail(new Error("A timed-out callback must not exchange a code"));
       },
     },
     {
@@ -796,7 +881,7 @@ test("bank authorization timeout records failure and releases its HTTPS listener
       redirectUrl: `https://127.0.0.1:${port}/callback`,
       validUntil: "2099-12-01T00:00:00.000Z",
     },
-  );
+  ));
 
   context.mock.timers.tick(5 * 60 * 1000);
   for (let attempt = 0; attempt < 100 && flow.status.pending; attempt += 1) {
@@ -807,5 +892,5 @@ test("bank authorization timeout records failure and releases its HTTPS listener
     pending: false,
     lastError: "Bank authorization timed out",
   });
-  assert.equal(await store.get(), undefined);
+  assert.equal(await Effect.runPromise(store.get()), undefined);
 });

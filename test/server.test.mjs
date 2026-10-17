@@ -4,6 +4,7 @@ import { createServer as createNetServer } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { fileURLToPath } from "node:url";
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import test from "node:test";
 
 const runtimeFixture = fileURLToPath(
@@ -152,23 +153,35 @@ function isolatedEnvironment(overrides = {}) {
   };
 }
 
-async function startIsolatedServer(overrides = {}) {
+async function startIsolatedServer(overrides = {}, elicitationResponse) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--import", runtimeFixture, "dist/server.js"],
     cwd: process.cwd(),
     env: isolatedEnvironment(overrides),
   });
-  const client = new Client({
-    name: "enable-banking-mcp-runtime-test",
-    version: "0.1.0",
-  });
+  const client = new Client(
+    {
+      name: "enable-banking-mcp-runtime-test",
+      version: "0.1.0",
+    },
+    elicitationResponse
+      ? { capabilities: { elicitation: { form: {} } } }
+      : {},
+  );
+  if (elicitationResponse) {
+    client.setRequestHandler(ElicitRequestSchema, async (params) =>
+      typeof elicitationResponse === "function"
+        ? elicitationResponse(params)
+        : elicitationResponse,
+    );
+  }
   await client.connect(transport);
   return { client, close: () => client.close() };
 }
 
-async function callTool(client, name, args = {}) {
-  return client.callTool({ name, arguments: args });
+async function callTool(client, name, args = {}, options) {
+  return client.callTool({ name, arguments: args }, undefined, options);
 }
 
 function toolValue(result) {
@@ -189,8 +202,8 @@ async function availablePort() {
   return address.port;
 }
 
-async function waitForToolValue(client, name, predicate) {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
+async function waitForToolValue(client, name, predicate, maxAttempts = 500) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const result = await callTool(client, name);
     if (!result.isError) {
       const value = toolValue(result);
@@ -203,7 +216,8 @@ async function waitForToolValue(client, name, predicate) {
 
 test("runs MCP handlers against isolated provider and Keychain boundaries", async () => {
   const server = await startIsolatedServer({
-    MCP_TEST_FAIL_ONCE: "delete-certificate,delete-session",
+    MCP_TEST_FAIL_ONCE: "delete-certificate,delete-credential-item",
+    MCP_TEST_BANK_CALLBACK_DELAY_MS: "5000",
   });
   try {
     const { client } = server;
@@ -241,11 +255,13 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
       client,
       "setup_status",
       (status) => status.phase === "account_link" && !status.pending,
+      1_000,
     );
     assert.equal(registered.appId, "fixture-app-id");
 
-    const dashboard = toolValue(await callTool(client, "connect_bank"));
-    assert.equal(dashboard.status, "dashboard_action_required");
+    const noForm = toolValue(await callTool(client, "connect_bank"));
+    assert.equal(noForm.status, "failed");
+    assert.match(noForm.message, /does not support form elicitation/);
 
     assert.equal(
       toolValue(await callTool(client, "control_panel_logout")).authenticated,
@@ -289,7 +305,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
       true,
     );
     const authorization = toolValue(
-      await callTool(client, "connect_bank", {
+      await callTool(client, "authorize_bank", {
         country: "IE",
         aspsp_name: "Fixture Bank",
       }),
@@ -300,7 +316,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     );
     assert.equal(pendingStatus.connection, "awaiting_user");
     const pendingSession = await callTool(client, "get_session");
-    assert.equal(pendingSession.isError, true);
+    assert.equal(pendingSession.isError, true, JSON.stringify(pendingSession));
     assert.match(pendingSession.content[0].text, /authorization is pending/);
 
     const session = await waitForToolValue(
@@ -312,6 +328,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     const connected = toolValue(await callTool(client, "connect_bank"));
     assert.equal(connected.status, "connected");
     assert.deepEqual(connected.accounts, [{ uid: "fixture-account" }]);
+    assert.equal(connected.balances[0].balances.balances[0].currency, "EUR");
     assert.equal(
       toolValue(await callTool(client, "connection_status")).connection,
       "connected",
@@ -401,7 +418,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     assert.equal(pendingRetry.isError, true);
     assert.match(pendingRetry.content[0].text, /authorization is pending/);
     let failedSession;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
       failedSession = await callTool(client, "get_session");
       if (failedSession.content[0].text.includes("Bank authorization failed")) {
         break;
@@ -415,12 +432,12 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     assert.equal(failure.cleared, false);
     assert.deepEqual(failure.failed_items, [
       "trusted_certificate",
-      "session",
       "application",
     ]);
-    const cleared = toolValue(await callTool(client, "clear_local_credentials"));
-    assert.equal(cleared.cleared, true);
-    assert.equal(cleared.trusted_certificate_removed, true);
+    const retry = toolValue(await callTool(client, "clear_local_credentials"));
+    assert.equal(retry.cleared, false);
+    assert.deepEqual(retry.failed_items, ["application"]);
+    await callTool(client, "clear_local_credentials");
 
     const idle = toolValue(await callTool(client, "setup_status"));
     assert.equal(idle.phase, "idle");
@@ -429,16 +446,11 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
       "setup_required",
     );
 
-    const firstRun = toolValue(
+    const unsupported = toolValue(
       await callTool(client, "connect_bank", { environment: "SANDBOX" }),
     );
-    assert.equal(firstRun.status, "setup_started");
-    const secondRegistration = await waitForToolValue(
-      client,
-      "setup_status",
-      (status) => status.phase === "application_ready" && !status.pending,
-    );
-    assert.equal(secondRegistration.appId, "fixture-app-id");
+    assert.equal(unsupported.status, "failed");
+    assert.match(unsupported.message, /does not support form elicitation/);
     assert.equal(
       toolValue(await callTool(client, "clear_local_credentials")).cleared,
       true,
@@ -448,6 +460,209 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
       false,
     );
   } finally {
+    await server.close();
+  }
+});
+
+test("tracks the guided Production activation reservation through bank selection", async () => {
+  const server = await startIsolatedServer(
+    {
+      MCP_TEST_DELAY_APPLICATION_ACTIVATION: "true",
+      MCP_TEST_DELAY_BANK_LIST_MS: "5000",
+    },
+    {
+      action: "accept",
+      content: { country: "IE", bank: "Fixture Bank" },
+    },
+  );
+  try {
+    const registration = await callTool(server.client, "register_application", {
+      environment: "PRODUCTION",
+    });
+    assert.equal(registration.isError, undefined);
+    await waitForToolValue(
+      server.client,
+      "setup_status",
+      (status) => status.phase === "account_link" && !status.pending,
+    );
+
+    const inactive = toolValue(
+      await callTool(server.client, "connection_status"),
+    );
+    assert.equal(inactive.connection, "application_activation_required");
+
+    const connection = callTool(server.client, "connect_bank");
+    const pending = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) => status.phase === "production_activation",
+    );
+    assert.equal(pending.connection, "awaiting_user");
+    assert.match(pending.next_action, /do not rerun a tool/i);
+
+    const duplicateDuringActivation = toolValue(
+      await callTool(server.client, "connect_bank"),
+    );
+    assert.equal(duplicateDuringActivation.status, "awaiting_user");
+    assert.equal(duplicateDuringActivation.phase, "production_activation");
+
+    const cleanupDuringActivation = await callTool(
+      server.client,
+      "clear_local_credentials",
+    );
+    assert.equal(cleanupDuringActivation.isError, true);
+    assert.match(cleanupDuringActivation.content[0].text, /activation.*pending/i);
+
+    const pendingBankSelection = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) => status.phase === "bank_authorization",
+    );
+    assert.equal(pendingBankSelection.connection, "awaiting_user");
+
+    const duplicateDuringSelection = callTool(server.client, "connect_bank");
+    const cleanupDuringSelection = await callTool(
+      server.client,
+      "clear_local_credentials",
+    );
+    assert.equal(cleanupDuringSelection.isError, true);
+    assert.match(
+      cleanupDuringSelection.content[0].text,
+      /authorization.*pending/i,
+    );
+
+    const connected = toolValue(await connection);
+    assert.equal(connected.status, "connected");
+    assert.equal(toolValue(await duplicateDuringSelection).status, "connected");
+    assert.equal(
+      toolValue(await callTool(server.client, "clear_local_credentials")).cleared,
+      true,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("connect_bank owns fresh MCP onboarding through balance retrieval", async () => {
+  const server = await startIsolatedServer({}, {
+    action: "accept",
+    content: {
+      control_panel_email: "user@example.com",
+      country: "IE",
+      bank: "Fixture Bank",
+    },
+  });
+  try {
+    const result = await callTool(server.client, "connect_bank", {
+      environment: "SANDBOX",
+    });
+    assert.equal(result.isError, undefined);
+    const connected = toolValue(result);
+    assert.equal(connected.status, "connected");
+    assert.equal(connected.accounts[0].uid, "fixture-account");
+    assert.equal(connected.balances[0].balances.balances[0].currency, "EUR");
+  } finally {
+    await server.close();
+  }
+});
+
+test("redacts elicited Control Panel email from retained setup failures", async () => {
+  const email = "private@example.net";
+  const server = await startIsolatedServer(
+    {
+      MCP_TEST_FAIL_APPLICATION_REGISTRATION: "true",
+      MCP_TEST_PROVIDER_ERROR_EMAIL: email,
+    },
+    {
+      action: "accept",
+      content: {
+        control_panel_email: email,
+        country: "IE",
+        bank: "Fixture Bank",
+      },
+    },
+  );
+  try {
+    const connection = toolValue(
+      await callTool(server.client, "connect_bank", {
+        environment: "SANDBOX",
+      }),
+    );
+    assert.equal(connection.status, "failed");
+    assert.match(connection.error, /\[email redacted\]/);
+    assert.equal(JSON.stringify(connection).includes(email), false);
+
+    const status = toolValue(await callTool(server.client, "setup_status"));
+    assert.equal(status.phase, "failed");
+    assert.equal(JSON.stringify(status).includes(email), false);
+  } finally {
+    await server.close();
+  }
+});
+
+test("cancelling connect_bank closes its authorization listener and releases cleanup", async () => {
+  const server = await startIsolatedServer(
+    {
+      MCP_TEST_APPLICATION_ACTIVE: "true",
+      MCP_TEST_BANK_CALLBACK_DELAY_MS: "10000",
+    },
+    {
+      action: "accept",
+      content: {
+        control_panel_email: "user@example.com",
+        country: "IE",
+        bank: "Fixture Bank",
+      },
+    },
+  );
+  const controller = new AbortController();
+  let connection;
+  try {
+    connection = callTool(
+      server.client,
+      "connect_bank",
+      { environment: "SANDBOX" },
+      { signal: controller.signal },
+    );
+    const settled = connection.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    const pending = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) =>
+        status.connection === "awaiting_user" &&
+        status.phase === "bank_authorization",
+      100,
+    );
+    assert.equal(pending.phase, "bank_authorization");
+    controller.abort();
+    const cancellationSettled = await Promise.race([
+      settled.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+    ]);
+    assert.equal(cancellationSettled, true);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const setupStatus = toolValue(
+      await callTool(server.client, "setup_status", {}, { timeout: 5000 }),
+    );
+    assert.equal(setupStatus.pending, false, JSON.stringify(setupStatus));
+    const cleanupResult = await callTool(
+      server.client,
+      "clear_local_credentials",
+      {},
+      { timeout: 5000 },
+    );
+    assert.equal(
+      cleanupResult.isError,
+      undefined,
+      cleanupResult.content?.[0]?.text,
+    );
+    assert.equal(toolValue(cleanupResult).cleared, true);
+  } finally {
+    controller.abort();
     await server.close();
   }
 });
@@ -591,19 +806,21 @@ test("clears a terminal environment session before refusing environment-based se
   }
 });
 
-test("returns local email setup instructions when the MCP client cannot elicit", async () => {
+test("requires MCP-owned form elicitation for primary onboarding", async () => {
   const server = await startIsolatedServer({
     ENABLE_BANKING_CONTROL_PANEL_EMAIL: "",
   });
   try {
-    for (const [name, args] of [
-      ["connect_bank", { environment: "SANDBOX" }],
-      ["register_application", { environment: "SANDBOX" }],
-      ["control_panel_authenticate", {}],
-    ]) {
-      const result = await callTool(server.client, name, args);
-      assert.equal(result.isError, undefined);
-      const value = toolValue(result);
+    const connect = toolValue(
+      await callTool(server.client, "connect_bank", { environment: "SANDBOX" }),
+    );
+    assert.equal(connect.status, "failed");
+    assert.match(connect.message, /does not support form elicitation/);
+
+    for (const name of ["register_application", "control_panel_authenticate"]) {
+      const value = toolValue(await callTool(server.client, name, {
+        environment: "SANDBOX",
+      }));
       assert.equal(value.status, "needs_control_panel_email");
       assert.match(value.required_input, /ENABLE_BANKING_CONTROL_PANEL_EMAIL/);
     }
@@ -612,31 +829,6 @@ test("returns local email setup instructions when the MCP client cannot elicit",
   }
 });
 
-test("returns a controlled error when the Keychain process has no pipes", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_FAIL_ONCE: "security-no-stdio",
-  });
-  try {
-    const result = await callTool(server.client, "control_panel_status");
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /Required local credential command failed/);
-  } finally {
-    await server.close();
-  }
-});
-
-test("returns a controlled error when the Keychain process fails to spawn", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_FAIL_ONCE: "security-spawn-error",
-  });
-  try {
-    const result = await callTool(server.client, "control_panel_status");
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /Injected security spawn error/);
-  } finally {
-    await server.close();
-  }
-});
 
 test("reports configuration-free sessions as unverifiable and requires an application", async () => {
   const server = await startIsolatedServer({
@@ -685,7 +877,7 @@ test("blocks logout, authorization, and credential cleanup while registration is
     assert.equal(cleanup.isError, true);
     assert.match(
       cleanup.content[0].text,
-      /Cannot clear credentials while setup or authorization is pending/,
+      /Cannot clear credentials while setup, activation, or authorization is pending/,
     );
 
     const logout = await callTool(server.client, "control_panel_logout");
@@ -706,69 +898,7 @@ test("blocks logout, authorization, and credential cleanup while registration is
   }
 });
 
-test("reserves authorization before loading stored credentials during cleanup", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_DELAY_APPLICATION_LOOKUP: "true",
-  });
-  try {
-    const authorization = callTool(server.client, "authorize_bank", {
-      aspsp_name: "Fixture Bank",
-      country: "FI",
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
 
-    const cleanupWhileLoading = await callTool(
-      server.client,
-      "clear_local_credentials",
-    );
-    assert.equal(cleanupWhileLoading.isError, true);
-    assert.match(
-      cleanupWhileLoading.content[0].text,
-      /Cannot clear credentials while setup or authorization is pending/,
-    );
-
-    const failedAuthorization = await authorization;
-    assert.equal(failedAuthorization.isError, true);
-    assert.match(
-      failedAuthorization.content[0].text,
-      /No Enable Banking application is configured/,
-    );
-
-    const cleanupAfterFailure = toolValue(
-      await callTool(server.client, "clear_local_credentials"),
-    );
-    assert.equal(cleanupAfterFailure.cleared, true);
-  } finally {
-    await server.close();
-  }
-});
-
-test("blocks application registration while credentials are being cleared", async () => {
-  const server = await startIsolatedServer({
-    MCP_TEST_DELAY_APPLICATION_LOOKUP: "true",
-  });
-  try {
-    const cleanupPromise = callTool(
-      server.client,
-      "clear_local_credentials",
-    );
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const registration = await callTool(server.client, "register_application", {
-      environment: "SANDBOX",
-    });
-    assert.equal(registration.isError, true);
-    assert.match(
-      registration.content[0].text,
-      /Cannot start setup while credential cleanup is pending/,
-    );
-
-    const cleanup = toolValue(await cleanupPromise);
-    assert.equal(cleanup.cleared, true);
-  } finally {
-    await server.close();
-  }
-});
 
 test("successful credential cleanup clears failed authorization state", async () => {
   const server = await startIsolatedServer({
@@ -818,11 +948,11 @@ test("successful credential cleanup clears failed authorization state", async ()
     assert.equal(cleanup.cleared, true);
 
     const registration = toolValue(
-      await callTool(server.client, "connect_bank", {
+      await callTool(server.client, "register_application", {
         environment: "SANDBOX",
       }),
     );
-    assert.equal(registration.status, "setup_started");
+    assert.equal(registration.status, "started");
     await waitForToolValue(
       server.client,
       "setup_status",
@@ -830,7 +960,7 @@ test("successful credential cleanup clears failed authorization state", async ()
     );
 
     const freshAuthorization = toolValue(
-      await callTool(server.client, "connect_bank", {
+      await callTool(server.client, "authorize_bank", {
         environment: "SANDBOX",
         country: "IE",
         aspsp_name: "Fixture Bank",

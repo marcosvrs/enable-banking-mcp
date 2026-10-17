@@ -1,10 +1,28 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import test from "node:test";
-import { resolveBankSelection } from "../dist/bank-selection.js";
+import { resolveBankSelection as resolveBankSelectionEffect } from "../dist/bank-selection.js";
+
+function resolveBankSelection(options) {
+  return Effect.runPromise(
+    resolveBankSelectionEffect({
+      ...options,
+      client: {
+        ...options.client,
+        listBanks: (country) =>
+          Effect.tryPromise({
+            try: () => options.client.listBanks(country),
+            catch: (error) => error,
+          }),
+      },
+    }),
+  );
+}
 
 async function runSelection({
   capabilities = {},
