@@ -47,13 +47,13 @@ const sessionStoreWorker = fileURLToPath(
   new URL("./fixtures/session-store-worker.mjs", import.meta.url),
 );
 
-function spawnVaultWriter(keychainPath, slot, value, delayWrite, operation = "set") {
+function spawnVaultWriter(keychainPath, slot, value, delayWrite, operation = "set", home = dirname(keychainPath)) {
   const child = spawn(
     process.execPath,
     [sessionStoreWorker, keychainPath, slot, value, String(delayWrite), operation],
     {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, HOME: dirname(keychainPath) },
+      env: { ...process.env, HOME: home },
     },
   );
   let stdout = "";
@@ -464,3 +464,63 @@ for (const operation of ["cancel-set", "cancel-clear"]) {
     }
   });
 }
+test("serializes one Keychain account across processes with different HOME values", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "enable-banking-home-lock-"));
+  const keychainPath = join(directory, "records.json");
+  const firstHome = join(directory, "first-home");
+  const secondHome = join(directory, "second-home");
+  writeFileSync(
+    keychainPath,
+    JSON.stringify({
+      "enable-banking-mcp.credentials.native":
+        `${bundlePrefix}${JSON.stringify({ version: 1, session: "session-placeholder" })}`,
+    }),
+    { mode: 0o600 },
+  );
+  let waiter;
+  let holder;
+
+  try {
+    waiter = spawnVaultWriter(
+      keychainPath,
+      "session",
+      "updated-session-placeholder",
+      false,
+      "set",
+      secondHome,
+    );
+    await waiter.ready;
+    holder = spawnVaultWriter(
+      keychainPath,
+      "application",
+      "application-placeholder",
+      1_200,
+      "set",
+      firstHome,
+    );
+    await holder.ready;
+    holder.child.stdin.end("go\n");
+    await holder.blocked;
+    waiter.child.stdin.end("go\n");
+
+    const completedBeforeUnlock = await Promise.race([
+      waiter.completed.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 300)),
+    ]);
+    await holder.completed;
+    await waiter.completed;
+
+    const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+    const bundle = JSON.parse(
+      records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+    );
+    assert.equal(completedBeforeUnlock, false);
+    assert.equal(bundle.session, "updated-session-placeholder");
+    assert.equal(bundle.application, "application-placeholder");
+  } finally {
+    for (const worker of [waiter, holder].filter(Boolean)) {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

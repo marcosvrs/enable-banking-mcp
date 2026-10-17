@@ -519,37 +519,7 @@ export function createControlPanelCallbackListener():
 
     });
 
-    const listening = yield* Effect.tryPromise({
-      try: () =>
-        new Promise<number>((resolveListening, rejectListening) => {
-          server.once("error", rejectListening);
-          server.listen(0, "localhost", () => {
-            const address = server.address();
-            /* c8 ignore next 4 -- listen(0, "localhost") guarantees a TCP address before this callback. */
-            if (!address || typeof address === "string") {
-              rejectListening(
-                new Error("Control Panel callback listener did not expose a port"),
-              );
-              return;
-            }
-            resolveListening(address.port);
-          });
-        }),
-      catch: (error) => error,
-    }).pipe(
-      Effect.catchAll((error) =>
-        Effect.tryPromise({
-          try: () =>
-            new Promise<void>((resolveClose) => {
-              server.close(() => {
-                resolveClose();
-              });
-            }),
-          catch: () => error,
-        }).pipe(Effect.flatMap(() => Effect.fail(error))),
-      ),
-    );
-
+    let stopWatchingAcquisition: (() => void) | undefined;
     const timeout = setTimeout(() => {
       if (!settled) {
         settled = true;
@@ -557,12 +527,105 @@ export function createControlPanelCallbackListener():
       }
     }, CALLBACK_TIMEOUT_MS);
     timeout.unref();
+    const listening = yield* Effect.tryPromise({
+      try: (signal) =>
+        new Promise<number>((resolveListening, rejectListening) => {
+          let acquisitionSettled = false;
+          let cancelled = false;
+          const cleanup = () => {
+            signal.removeEventListener("abort", onAbort);
+            server.off("error", onError);
+            server.off("listening", onListening);
+          };
+          stopWatchingAcquisition = cleanup;
+          const closeAfterListen = () => {
+            if (!server.listening) return;
+            server.close(() => {
+              cleanup();
+            });
+          };
+          const onListening = () => {
+            if (cancelled) {
+              closeAfterListen();
+              return;
+            }
+            const address = server.address();
+            /* c8 ignore next 11 -- listen(0, "localhost") guarantees a TCP address before this callback. */
+            if (!address || typeof address === "string") {
+              acquisitionSettled = true;
+              const error = new Error(
+                "Control Panel callback listener did not expose a port",
+              );
+              server.close(() => {
+                cleanup();
+                rejectListening(error);
+              });
+              return;
+            }
+            acquisitionSettled = true;
+            server.off("error", onError);
+            resolveListening(address.port);
+          };
+          const onError = (error: Error) => {
+            if (!acquisitionSettled) {
+              acquisitionSettled = true;
+              cleanup();
+              rejectListening(error);
+            } else if (cancelled) {
+              cleanup();
+            }
+          };
+          const onAbort = () => {
+            cancelled = true;
+            if (!acquisitionSettled) {
+              acquisitionSettled = true;
+              rejectListening(
+                signal.reason instanceof Error
+                  ? signal.reason
+                  : new Error("Control Panel listener creation cancelled"),
+              );
+            }
+            clearTimeout(timeout);
+            closeAfterListen();
+          };
+          server.once("error", onError);
+          server.once("listening", onListening);
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) {
+            onAbort();
+            cleanup();
+            return;
+          }
+          try {
+            server.listen(0, "localhost");
+          } catch (error) {
+            onError(error instanceof Error ? error : new Error("Listener startup failed"));
+          }
+        }),
+      catch: (error) => error,
+    }).pipe(
+      Effect.catchAll((error) => {
+        clearTimeout(timeout);
+        return Effect.tryPromise({
+          try: () =>
+            new Promise<void>((resolveClose) => {
+              server.close(() => {
+                resolveClose();
+              });
+            }),
+          catch: () => error,
+        }).pipe(Effect.flatMap(() => Effect.fail(error)));
+      }),
+    );
+
+
 
     let closed = false;
     const close = Effect.gen(function* () {
       if (closed) return;
       closed = true;
       clearTimeout(timeout);
+      stopWatchingAcquisition?.();
       if (!server.listening) return;
       yield* Effect.tryPromise({
         try: () =>

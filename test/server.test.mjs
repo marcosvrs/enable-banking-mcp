@@ -217,7 +217,7 @@ async function waitForToolValue(client, name, predicate, maxAttempts = 500) {
 test("runs MCP handlers against isolated provider and Keychain boundaries", async () => {
   const server = await startIsolatedServer({
     MCP_TEST_FAIL_ONCE: "delete-certificate,delete-credential-item",
-    MCP_TEST_DELAY_BANK_CALLBACK: "true",
+    MCP_TEST_BANK_CALLBACK_DELAY_MS: "5000",
   });
   try {
     const { client } = server;
@@ -255,6 +255,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
       client,
       "setup_status",
       (status) => status.phase === "account_link" && !status.pending,
+      1_000,
     );
     assert.equal(registered.appId, "fixture-app-id");
 
@@ -417,7 +418,7 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     assert.equal(pendingRetry.isError, true);
     assert.match(pendingRetry.content[0].text, /authorization is pending/);
     let failedSession;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
       failedSession = await callTool(client, "get_session");
       if (failedSession.content[0].text.includes("Bank authorization failed")) {
         break;

@@ -1,8 +1,7 @@
 import { Effect } from "effect";
 import { Entry } from "@napi-rs/keyring";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { lstatSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,15 +53,50 @@ const CREDENTIAL_CANDIDATES: readonly {
   { service: "enable-banking-mcp.retired" },
 ];
 
+function requireCredentialUserId(): number {
+  const getuid = process.getuid;
+  if (!getuid) {
+    throw new Error("Enable Banking credential locking requires a POSIX user ID");
+  }
+  return getuid();
+}
+
+const CREDENTIAL_LOCK_USER_ID = requireCredentialUserId();
+const CREDENTIAL_LOCK_DIRECTORY = join(
+  "/tmp",
+  `enable-banking-mcp-${CREDENTIAL_LOCK_USER_ID}`,
+);
 const CREDENTIAL_LOCK_PATH = join(
-  homedir(),
-  ".config",
-  "enable-banking-mcp",
+  CREDENTIAL_LOCK_DIRECTORY,
   "credential-vault",
 );
 const LOCK_KEEPER_PATH = fileURLToPath(
   new URL("./credential-lock-keeper.js", import.meta.url),
 );
+
+function ensureCredentialLockDirectory(): void {
+  try {
+    mkdirSync(CREDENTIAL_LOCK_DIRECTORY, { mode: 0o700 });
+  } catch (error) {
+    if (
+      typeof error !== "object" ||
+      error === null ||
+      !("code" in error) ||
+      error.code !== "EEXIST"
+    ) {
+      throw error;
+    }
+  }
+  const metadata = lstatSync(CREDENTIAL_LOCK_DIRECTORY);
+  if (
+    !metadata.isDirectory() ||
+    metadata.uid !== CREDENTIAL_LOCK_USER_ID ||
+    (metadata.mode & 0o700) !== 0o700 ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    throw new Error("Enable Banking credential lock directory is not private");
+  }
+}
 
 type LockKeeper = ChildProcess;
 
@@ -149,10 +183,7 @@ async function withCredentialLock<T>(
   signal: AbortSignal,
 ): Promise<T> {
   signal.throwIfAborted();
-  mkdirSync(join(homedir(), ".config", "enable-banking-mcp"), {
-    recursive: true,
-    mode: 0o700,
-  });
+  ensureCredentialLockDirectory();
   const child = spawn(process.execPath, [LOCK_KEEPER_PATH, CREDENTIAL_LOCK_PATH], {
     stdio: ["pipe", "pipe", "pipe"],
   });

@@ -92,9 +92,30 @@ export function connectBank(
         };
         if (hasRequestedAccess(result, options.accessProfile)) return result;
         application = yield* dependencies.applicationStore.get();
+      } else if (status.phase === "failed") {
+        return {
+          status: "failed",
+          phase: status.phase,
+          ...(status.message ? { message: status.message } : {}),
+          ...(status.error ? { error: status.error } : {}),
+        };
+      } else if (
+        status.phase === "idle" ||
+        status.phase === "account_link" ||
+        status.phase === "application_ready"
+      ) {
+        application = yield* dependencies.applicationStore.get();
+        const completedSession = yield* dependencies.sessionStore.get();
+        if (application && completedSession !== undefined) {
+          const result = {
+            status: "connected",
+            ...(yield* dependencies.readAuthorizedBalances()),
+          };
+          if (hasRequestedAccess(result, options.accessProfile)) return result;
+        }
       } else {
         return {
-          status: status.phase === "failed" ? "failed" : "awaiting_user",
+          status: "awaiting_user",
           phase: status.phase,
           ...(status.message ? { message: status.message } : {}),
           ...(status.error ? { error: status.error } : {}),
@@ -169,28 +190,36 @@ export function connectBank(
           ),
         );
       if (status.phase === "complete") {
-        return {
-          status: "connected",
-          ...(yield* dependencies.readAuthorizedBalances().pipe(
-            Effect.catchAll((error) =>
-              Effect.fail(
-                new Error(
-                  (error instanceof Error ? error.message : String(error))
-                    .split(input.email)
-                    .join("[email redacted]"),
-                ),
+        const accounts = yield* dependencies.readAuthorizedBalances().pipe(
+          Effect.catchAll((error) =>
+            Effect.fail(
+              new Error(
+                (error instanceof Error ? error.message : String(error))
+                  .split(input.email)
+                  .join("[email redacted]"),
               ),
             ),
-          )),
+          ),
+        );
+        const result = { status: "connected", ...accounts };
+        if (hasRequestedAccess(result, options.accessProfile)) return result;
+        application = yield* dependencies.applicationStore.get();
+        if (!application) {
+          return {
+            status: "failed",
+            phase: "bank_authorization",
+            error: "The requested access profile was not granted and no application is available to reauthorize.",
+          };
+        }
+      } else {
+        return {
+          status: status.phase === "failed" ? "failed" : "awaiting_user",
+          phase: status.phase,
+          ...(status.message ? { message: status.message } : {}),
+          ...(status.error ? { error: status.error } : {}),
+          ...(status.dashboardUrl ? { dashboard_url: status.dashboardUrl } : {}),
         };
       }
-      return {
-        status: status.phase === "failed" ? "failed" : "awaiting_user",
-        phase: status.phase,
-        ...(status.message ? { message: status.message } : {}),
-        ...(status.error ? { error: status.error } : {}),
-        ...(status.dashboardUrl ? { dashboard_url: status.dashboardUrl } : {}),
-      };
     }
 
     const credentials = yield* dependencies.resolveCredentials();
@@ -271,11 +300,21 @@ export function connectBank(
         error: authorizationError,
       };
     }
-    return {
+    const accounts = yield* dependencies.readAuthorizedBalances();
+    const result = {
       status: "connected",
       authorization_url: authorization.authorization_url,
-      ...(yield* dependencies.readAuthorizedBalances()),
+      ...accounts,
     };
+    if (!hasRequestedAccess(result, options.accessProfile)) {
+      return {
+        status: "failed",
+        phase: "bank_authorization",
+        error:
+          "The bank did not grant the transaction access requested by balances_and_transactions.",
+      };
+    }
+    return result;
 
   });
 }

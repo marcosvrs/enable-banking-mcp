@@ -39,6 +39,7 @@ const OPENSSL_COMMAND = "openssl";
 const SECURITY_COMMAND = "/usr/bin/security";
 const CERTIFICATE_DAYS = "825";
 const ACTIVATION_POLL_MS = 5_000;
+const ACTIVATION_MAX_POLLS = 180;
 const SESSION_TIMEOUT_MS = 6 * 60 * 1000;
 const SESSION_POLL_MS = 1_000;
 
@@ -489,7 +490,21 @@ export class ApplicationSetupFlow {
               "Activate the Production application by linking an account in the Enable Banking dashboard; this flow continues automatically when activation is detected.",
           });
           yield* (this.dependencies.openBrowser ?? launchBrowser)(APPLICATIONS_URL);
-          yield* waitForActivation(client, this.dependencies.sleep);
+          const activated = yield* waitForActivation(
+            client,
+            this.dependencies.sleep,
+          );
+          if (!activated) {
+            this.update({
+              phase: "account_link",
+              pending: false,
+              appId: storedApplication.appId,
+              dashboardUrl: APPLICATIONS_URL,
+              message:
+                "Production activation was not detected within 15 minutes. Complete account linking, then run connect_bank to continue.",
+            });
+            return;
+          }
         }
         const aspspName = yield* resolveAspspName(client, options);
         this.update({
@@ -762,12 +777,13 @@ function extractAspspNames(response: unknown): string[] {
 function waitForActivation(
   client: EnableBankingClient,
   configuredSleep?: (milliseconds: number) => Effect.Effect<void, unknown>,
-): Effect.Effect<void, unknown> {
+): Effect.Effect<boolean, unknown> {
   return Effect.gen(function* () {
-    for (;;) {
-      if ((yield* client.getApplication()).active) return;
+    for (let attempt = 0; attempt < ACTIVATION_MAX_POLLS; attempt += 1) {
+      if ((yield* client.getApplication()).active) return true;
       yield* (configuredSleep ?? Effect.sleep)(ACTIVATION_POLL_MS);
     }
+    return (yield* client.getApplication()).active;
   });
 }
 

@@ -40,11 +40,14 @@ async function runConnection({
   banksByCountry = { FI: [{ name: "Example Bank", country: "FI" }] },
   setupResult = { phase: "complete", pending: false },
   setupPending = false,
+  setupPendingPhase = "bank_authorization",
   setupApplicationAfterWait,
+  setupApplicationAfterRun,
   authorizationPending = false,
   completeAuthorizationWhenObserved = false,
   failBalancesWithoutSession = false,
   storeSessionOnAuthorization = false,
+  grantTransactionsAfterAuthorization = true,
   accessProfile = "balances",
   activateApplicationOnBrowserOpen = false,
 } = {}) {
@@ -66,11 +69,19 @@ async function runConnection({
     sessionStore: state.sessionStore,
     setupFlow: {
       get status() {
-        return { phase: setupPending ? "bank_authorization" : "idle", pending: setupPending };
+        return {
+          phase: setupPending ? setupPendingPhase : "idle",
+          pending: setupPending,
+        };
       },
       runToCompletion(options) {
-        state.setupOptions.push(options);
-        return Effect.succeed(setupResult);
+        return Effect.sync(() => {
+          state.setupOptions.push(options);
+          if (setupApplicationAfterRun) {
+            state.applicationStore.value = setupApplicationAfterRun;
+          }
+          return setupResult;
+        });
       },
       waitForCompletion() {
         state.setupWaits += 1;
@@ -122,7 +133,12 @@ async function runConnection({
         aspsp: { name: "Example Bank", country: "FI" },
         accounts: [{ uid: "account-1" }],
         balances: [{ account_id: "account-1", balances: [{ amount: "42.00" }] }],
-        access: { balances: true, transactions: false },
+        access: {
+          balances: true,
+          transactions:
+            grantTransactionsAfterAuthorization &&
+            state.authorizationCalls.length > 0,
+        },
       });
     },
     resolveCredentials() {
@@ -421,3 +437,73 @@ test("a cancelled authorization waiter without a stored session starts a new aut
   assert.equal(state.authorizationCalls.length, 1);
   assert.equal(state.balanceReads, 1);
 });
+test("a direct setup without requested access continues through reauthorization", async () => {
+  const { result, state } = await runConnection({
+    accessProfile: "balances_and_transactions",
+    setupApplicationAfterRun: application(),
+    storeSessionOnAuthorization: true,
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: {
+        control_panel_email: "person@example.com",
+        country: "FI",
+        bank: "Example Bank",
+      },
+    },
+  });
+
+  assert.equal(result.status, "connected");
+  assert.equal(state.setupOptions.length, 1);
+  assert.equal(state.elicitationRequests.length, 1);
+  assert.equal(state.authorizationCalls.length, 1);
+  assert.equal(state.authorizationCalls[0].accessProfile, "balances_and_transactions");
+  assert.equal(state.balanceReads, 2);
+});
+
+test("does not report connected when reauthorization still lacks requested access", async () => {
+  const { result, state } = await runConnection({
+    accessProfile: "balances_and_transactions",
+    setupApplicationAfterRun: application(),
+    storeSessionOnAuthorization: true,
+    grantTransactionsAfterAuthorization: false,
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: {
+        control_panel_email: "person@example.com",
+        country: "FI",
+        bank: "Example Bank",
+      },
+    },
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /did not grant the transaction access/i);
+  assert.equal(state.authorizationCalls.length, 1);
+});
+
+for (const phase of ["application_ready", "idle"]) {
+  test(`continues guided setup after shared ${phase} completion`, async () => {
+    const { result, state } = await runConnection({
+      setupPending: true,
+      setupPendingPhase: "registering_application",
+      setupResult: { phase, pending: false },
+      setupApplicationAfterWait: application(),
+      capabilities: { elicitation: { form: {} } },
+      response: {
+        action: "accept",
+        content: { country: "FI", bank: "Example Bank" },
+      },
+    });
+
+    assert.equal(result.status, "connected");
+    assert.equal(state.setupWaits, 1);
+    assert.equal(state.setupOptions.length, 0);
+    assert.equal(state.authorizationCalls.length, 1);
+    assert.equal(
+      state.elicitationRequests[0].requestedSchema.properties.control_panel_email,
+      undefined,
+    );
+  });
+}

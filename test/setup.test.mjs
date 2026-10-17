@@ -4,7 +4,7 @@ import childProcess from "node:child_process";
 import { generateKeyPairSync, X509Certificate } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
-import { connect } from "node:net";
+import { Server, connect } from "node:net";
 import test from "node:test";
 import { PassThrough } from "node:stream";
 import {
@@ -1842,4 +1842,138 @@ test("rejects invalid Control Panel email and callback ports before network acce
   await assert.rejects(Effect.runPromise(client.requestEmailLogin("   ", 4321, validCallback)), /control_panel_email must be a valid email address/);
   await assert.rejects(Effect.runPromise(client.requestEmailLogin("person@example.com", 65536, validCallback)), /Control Panel callback port is invalid/);
   assert.equal(requestCount, 0);
+});
+test("returns Production setup to account_link after bounded activation polling", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  const sessionStore = new MemorySessionStore();
+  let activationChecks = 0;
+  let activationSleeps = 0;
+  const setup = new ApplicationSetupFlow({
+    applicationStore,
+    sessionStore,
+    controlPanelClient: {
+      registerApplication: () => Effect.succeed({ app_id: "production-app" }),
+    },
+    controlPanelAuth: {
+      authenticate: () =>
+        Effect.succeed({
+          email: "user@example.com",
+          idToken: "id-token",
+          refreshToken: "refresh-token",
+        }),
+    },
+    authorizationFlow: {
+      start: () => Effect.fail(new Error("Authorization must wait for activation")),
+    },
+    generateKeyMaterial: () =>
+      Effect.succeed({ privateKey: "private-key", certificate: "certificate" }),
+    trustCertificate: () => Effect.void,
+    createBankClient: () => ({
+      getApplication: () => {
+        activationChecks += 1;
+        return Effect.succeed({ active: false });
+      },
+    }),
+    openBrowser: () => Effect.void,
+    sleep: () => {
+      activationSleeps += 1;
+      return Effect.void;
+    },
+  });
+
+  await Effect.runPromise(
+    setup.start({
+      controlPanelEmail: "user@example.com",
+      appName: "Enable Banking MCP",
+      environment: "PRODUCTION",
+      redirectUrl: "https://localhost:8765/callback",
+      aspspName: "Example Bank",
+      country: "FI",
+    }),
+  );
+
+  for (let attempt = 0; attempt < 1_000 && setup.status.pending; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(
+    {
+      phase: setup.status.phase,
+      pending: setup.status.pending,
+      appId: setup.status.appId,
+    },
+    { phase: "account_link", pending: false, appId: "production-app" },
+  );
+  assert.equal(activationSleeps, 180);
+  assert.equal(activationChecks, 181);
+  assert.match(setup.status.message, /within 15 minutes/);
+});
+test("closes a callback server that starts listening after cancellation", async (context) => {
+  const originalListen = Server.prototype.listen;
+  let server;
+  let resolveClosed;
+  const closed = new Promise((resolve) => {
+    resolveClosed = resolve;
+  });
+  context.mock.method(Server.prototype, "listen", function (...args) {
+    server = this;
+    server.once("close", resolveClosed);
+    setTimeout(() => originalListen.apply(server, args), 25);
+    return server;
+  });
+  const controller = new AbortController();
+  const listener = Effect.runPromise(
+    createControlPanelCallbackListener(),
+    { signal: controller.signal },
+  );
+
+  controller.abort(new Error("Request cancelled"));
+  await assert.rejects(listener);
+  await Promise.race([
+    closed,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Callback server did not close")), 2_000),
+    ),
+  ]);
+
+  assert.equal(server.listening, false);
+});
+
+test("cleans up callback listener startup when cancellation or listen fails", async (context) => {
+  const cancelled = new AbortController();
+  cancelled.abort(new Error("Request cancelled"));
+  await assert.rejects(
+    Effect.runPromise(createControlPanelCallbackListener(), {
+      signal: cancelled.signal,
+    }),
+  );
+
+  context.mock.method(Server.prototype, "listen", () => {
+    throw new Error("listener startup failure");
+  });
+  await assert.rejects(
+    Effect.runPromise(createControlPanelCallbackListener()),
+    /listener startup failure/,
+  );
+});
+
+test("removes callback listener handlers after a cancelled startup errors", async (context) => {
+  let server;
+  context.mock.method(Server.prototype, "listen", function () {
+    server = this;
+    setTimeout(() => {
+      server.emit("error", new Error("late startup error"));
+    }, 25);
+    return server;
+  });
+  const controller = new AbortController();
+  const listener = Effect.runPromise(
+    createControlPanelCallbackListener(),
+    { signal: controller.signal },
+  );
+  controller.abort(new Error("Request cancelled"));
+  await assert.rejects(listener);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(server.listenerCount("error"), 0);
 });
