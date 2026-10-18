@@ -65,23 +65,15 @@ export function inspectConnectionStatus(
         ) {
           return unavailable(input, controlPanelSession, "unknown");
         }
-        return {
-          connection: "connected",
-          application: "configured",
-          bank_session: "valid",
-          control_panel_session: controlPanelSession,
-          ...(input.configuredEnvironment
-            ? { application_environment: input.configuredEnvironment }
-            : {}),
-          next_action: "No action required; the provider accepts the stored bank session.",
-        };
+        bankSession = "valid";
+        break;
       } else if (!isTerminalSessionError(sessionResult.left)) {
         return unavailable(input, controlPanelSession, "unknown");
       } else {
         invalidSessionFound = true;
       }
     }
-    if (invalidSessionFound) bankSession = "invalid";
+    if (invalidSessionFound && bankSession !== "valid") bankSession = "invalid";
   }
 
   if (input.pendingPhase) {
@@ -100,6 +92,19 @@ export function inspectConnectionStatus(
         : {}),
       phase: input.pendingPhase,
       next_action: "The active connect_bank request monitors this provider step and continues automatically. Complete any required interaction in the opened browser; do not rerun a tool.",
+    };
+  }
+
+  if (bankSession === "valid") {
+    return {
+      connection: "connected",
+      application: "configured",
+      bank_session: "valid",
+      control_panel_session: controlPanelSession,
+      ...(input.configuredEnvironment
+        ? { application_environment: input.configuredEnvironment }
+        : {}),
+      next_action: "No action required; the provider accepts the stored bank session.",
     };
   }
 

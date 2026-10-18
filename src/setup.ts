@@ -601,7 +601,11 @@ export class ApplicationSetupFlow {
         environment: options.environment,
         redirectUrls: [options.redirectUrl],
       };
-      yield* this.dependencies.applicationStore.set(application);
+      // Provider registration is already committed; keep its matching private key
+      // locally even if the requesting client disconnects.
+      yield* Effect.uninterruptible(
+        this.dependencies.applicationStore.set(application),
+      );
       return application;
     });
   }

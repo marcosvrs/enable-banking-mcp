@@ -463,6 +463,46 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
     await server.close();
   }
 });
+test("finishes local session cleanup after provider deletion despite request cancellation", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const server = await startIsolatedServer({
+    MCP_TEST_DELAY_SESSION_CLEAR_MS: "500",
+    MCP_TEST_KEYCHAIN: JSON.stringify({
+      "enable-banking-mcp.native": "fixture-session-id",
+      "enable-banking-mcp.application": JSON.stringify({
+        appId: "fixture-app-id",
+        privateKey: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+        certificate: "fixture-certificate",
+        environment: "SANDBOX",
+        redirectUrls: ["https://localhost:8765/callback"],
+      }),
+    }),
+  });
+  const controller = new AbortController();
+  try {
+    const deletion = callTool(
+      server.client,
+      "delete_session",
+      {},
+      { signal: controller.signal },
+    );
+    const settled = deletion.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    controller.abort(new Error("Request cancelled"));
+    await settled;
+    await new Promise((resolve) => setTimeout(resolve, 550));
+
+    const session = await callTool(server.client, "get_session");
+    assert.equal(session.isError, true);
+    assert.match(session.content[0].text, /No Enable Banking session is stored/);
+  } finally {
+    controller.abort();
+    await server.close();
+  }
+});
 
 test("tracks the guided Production activation reservation through bank selection", async () => {
   const server = await startIsolatedServer(

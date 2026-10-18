@@ -121,6 +121,25 @@ test("returns connected only after provider accepts the session and omits accoun
     /private-session-id|private-account-id|private-token/,
   );
 });
+test("pending authorization takes precedence over an older valid bank session", async () => {
+  const status = await inspectConnectionStatus({
+    configuration: "configured",
+    sessionIds: ["lower-scope-session"],
+    pendingPhase: "bank_authorization",
+    configuredEnvironment: "PRODUCTION",
+    client: {
+      getSession: async () => ({ session_id: "lower-scope-session" }),
+      getApplication: async () => {
+        throw new Error("Application lookup should not be needed");
+      },
+    },
+  });
+
+  assert.equal(status.connection, "awaiting_user");
+  assert.equal(status.phase, "bank_authorization");
+  assert.equal(status.bank_session, "valid");
+  assert.equal(status.application_environment, "PRODUCTION");
+});
 
 test("reports terminal provider sessions as invalid without clearing them", async () => {
   const status = await inspectConnectionStatus({

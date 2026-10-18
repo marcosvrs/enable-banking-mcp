@@ -1271,6 +1271,42 @@ test("reports provider-created application when local persistence fails", async 
   assert.equal(status.appId, undefined);
   assert.equal(registrationCalls, 1);
 });
+test("persists provider-created application credentials when setup is cancelled during Keychain write", async () => {
+  const applicationStore = new MemoryApplicationStore();
+  let resolveWrite;
+  let signalWriteStarted;
+  const writeStarted = new Promise((resolve) => {
+    signalWriteStarted = resolve;
+  });
+  applicationStore.set = (application) =>
+    Effect.async((resume) => {
+      resolveWrite = () => {
+        applicationStore.value = application;
+        resume(Effect.void);
+      };
+      signalWriteStarted();
+    });
+  const { setup } = setupDependencies({ applicationStore });
+  const controller = new AbortController();
+  const registration = Effect.runPromise(
+    setup.runToCompletion({
+      ...registrationOptions(),
+      aspspName: "Example Bank",
+      country: "FI",
+    }),
+    { signal: controller.signal },
+  );
+
+  await writeStarted;
+  controller.abort(new Error("Request cancelled"));
+  resolveWrite();
+  await assert.rejects(registration);
+
+  assert.equal(
+    (await Effect.runPromise(applicationStore.get())).appId,
+    "recorded-app-id",
+  );
+});
 
 test("reports an empty bank catalog without starting authorization", async () => {
   let authorizationCalls = 0;

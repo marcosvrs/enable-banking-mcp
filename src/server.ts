@@ -861,9 +861,13 @@ server.registerTool(
   extra => safely(Effect.gen(function* () {
     const { client, sessionId } = yield* sessionClient();
     const result = yield* client.deleteSession(sessionId);
-    if ((yield* sessionStore.get()) === sessionId) {
-      yield* sessionStore.clear();
-    }
+    yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        if ((yield* sessionStore.get()) === sessionId) {
+          yield* sessionStore.clear();
+        }
+      }),
+    );
     return result;
   }), extra.signal),
 );

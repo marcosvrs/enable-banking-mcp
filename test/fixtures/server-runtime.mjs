@@ -1,3 +1,8 @@
+import { Effect } from "effect";
+import {
+  MacKeychainCredentialVault,
+  setNativeKeyringEntryFactory,
+} from "../../dist/session-store.js";
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
@@ -5,7 +10,6 @@ import { PassThrough } from "node:stream";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 
-import { setNativeKeyringEntryFactory } from "../../dist/session-store.js";
 
 const nativeRecords = new Map(
   Object.entries(JSON.parse(process.env.MCP_TEST_KEYCHAIN || "{}")).map(
@@ -30,6 +34,18 @@ setNativeKeyringEntryFactory((service, account) => ({
     return nativeRecords.delete(key);
   },
 }));
+const sessionClearDelayMs = Number(
+  process.env.MCP_TEST_DELAY_SESSION_CLEAR_MS || 0,
+);
+if (sessionClearDelayMs > 0) {
+  const clearCredential = MacKeychainCredentialVault.prototype.clear;
+  MacKeychainCredentialVault.prototype.clear = function (slot) {
+    const clear = clearCredential.call(this, slot);
+    return slot === "session"
+      ? Effect.zipRight(Effect.sleep(sessionClearDelayMs), clear)
+      : clear;
+  };
+}
 const realSpawn = childProcess.spawn.bind(childProcess);
 const oneShotFailures = new Set(
   (process.env.MCP_TEST_FAIL_ONCE || "").split(",").filter(Boolean),

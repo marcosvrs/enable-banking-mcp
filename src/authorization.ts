@@ -174,6 +174,7 @@ export class BankAuthorizationFlow {
     options: BankAuthorizationOptions,
   ): Effect.Effect<AuthorizationStartResult, unknown> {
     let acquiredListener: CallbackListener | undefined;
+    let interruptCompletion: (() => Effect.Effect<void>) | undefined;
     return Effect.gen(this, function* () {
       if (!this.starting || this.pending) {
         return yield* Effect.fail(
@@ -232,16 +233,26 @@ export class BankAuthorizationFlow {
         yield* listener.close.pipe(Effect.catchAllCause(() => Effect.void));
         return yield* Effect.fail(Cause.squash(authorizationResult.cause));
       }
-      const fiber = yield* Effect.forkDaemon(this.finish(client, listener));
-      // The daemon may finish before this fiber resumes after the fork.
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      if (this.pending?.listener === listener) {
-        this.pending = {
-          listener,
-          authorizationUrl: authorizationResult.value,
-          interrupt: () => Fiber.interrupt(fiber).pipe(Effect.asVoid),
-        };
-      }
+      // Keep the fork and its cancellation handle in one uninterruptible region:
+      // otherwise interruption after forkDaemon can orphan the detached fiber.
+      yield* Effect.uninterruptible(
+        Effect.gen(this, function* () {
+          const fiber = yield* Effect.forkDaemon(
+            Effect.interruptible(this.finish(client, listener)),
+          );
+          const interrupt = () =>
+            Fiber.interrupt(fiber).pipe(Effect.asVoid);
+          interruptCompletion = interrupt;
+          // The daemon may finish before this fiber resumes after the fork.
+          if (this.pending?.listener === listener) {
+            this.pending = {
+              listener,
+              authorizationUrl: authorizationResult.value,
+              interrupt,
+            };
+          }
+        }),
+      );
       return {
         status: "awaiting_user" as const,
         authorization_url: authorizationResult.value,
@@ -251,7 +262,13 @@ export class BankAuthorizationFlow {
         this.starting = false;
         if (!acquiredListener) return Effect.void;
         if (this.pending?.listener === acquiredListener) this.pending = undefined;
-        return acquiredListener.close.pipe(Effect.catchAll(() => Effect.void));
+        const interrupt = interruptCompletion?.().pipe(
+          Effect.catchAllCause(() => Effect.void),
+        ) ?? Effect.void;
+        return Effect.zipRight(
+          interrupt,
+          acquiredListener.close.pipe(Effect.catchAll(() => Effect.void)),
+        );
       }),
     );
   }

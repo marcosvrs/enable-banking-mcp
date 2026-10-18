@@ -589,6 +589,78 @@ test("authorization reservations exclude credential cleanup and release after cl
   flow.reserve();
   flow.release();
 });
+test("interrupts the authorization completion fiber when pending consent is cancelled", async () => {
+  const flow = new BankAuthorizationFlow(
+    new MemorySessionStore(),
+    () => Effect.void,
+    () =>
+      Effect.succeed({
+        wait: Effect.never,
+        close: Effect.void,
+      }),
+  );
+  const authorization = await Effect.runPromise(
+    flow.start(
+      {
+        startAuthorization: () =>
+          Effect.succeed({ url: "https://bank.example/authorize" }),
+        createSession: () => Effect.succeed({ session_id: "unused-session" }),
+      },
+      {
+        aspspName: "Example Bank",
+        country: "FI",
+        redirectUrl: "https://localhost:8765/callback",
+      },
+    ),
+  );
+
+  await Effect.runPromise(
+    flow.cancelPending(authorization.authorization_url),
+  );
+
+  assert.equal(flow.status.pending, false);
+});
+test("closes an acquired callback listener when authorization startup is cancelled", async () => {
+  const controller = new AbortController();
+  const browserOpened = Promise.withResolvers();
+  let closeCalls = 0;
+  const flow = new BankAuthorizationFlow(
+    new MemorySessionStore(),
+    () =>
+      Effect.sync(() => browserOpened.resolve()).pipe(
+        Effect.andThen(Effect.never),
+      ),
+    () =>
+      Effect.succeed({
+        wait: Effect.never,
+        close: Effect.sync(() => {
+          closeCalls += 1;
+        }),
+      }),
+  );
+  const startup = Effect.runPromise(
+    flow.start(
+      {
+        startAuthorization: () =>
+          Effect.succeed({ url: "https://bank.example/authorize" }),
+        createSession: () => Effect.succeed({ session_id: "unused-session" }),
+      },
+      {
+        aspspName: "Example Bank",
+        country: "FI",
+        redirectUrl: "https://localhost:8765/callback",
+      },
+    ),
+    { signal: controller.signal },
+  );
+
+  await browserOpened.promise;
+  controller.abort(new Error("Request cancelled"));
+  await assert.rejects(startup);
+
+  assert.equal(closeCalls, 1);
+  assert.equal(flow.status.pending, false);
+});
 
 test("real HTTPS callback rejects invalid requests and stores an accepted session", async () => {
   const port = await getAvailablePort();
