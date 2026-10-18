@@ -1005,6 +1005,7 @@ test("blocks logout, authorization, and credential cleanup while registration is
 test("successful credential cleanup clears failed authorization state", async () => {
   const server = await startIsolatedServer({
     MCP_TEST_FAIL_FIRST_SESSION_CREATE: "true",
+    MCP_TEST_BANK_CALLBACK_DELAY_MS: "1000",
   });
   try {
     await callTool(server.client, "register_application", {
@@ -1025,6 +1026,7 @@ test("successful credential cleanup clears failed authorization state", async ()
     assert.equal(authorization.status, "awaiting_user");
 
     let failedAuthorization;
+    let lastAuthorization;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const result = toolValue(
         await callTool(server.client, "connect_bank", {
@@ -1033,6 +1035,7 @@ test("successful credential cleanup clears failed authorization state", async ()
           aspsp_name: "Fixture Bank",
         }),
       );
+      lastAuthorization = result;
       if (result.status === "failed") {
         failedAuthorization = result;
         break;
@@ -1042,6 +1045,7 @@ test("successful credential cleanup clears failed authorization state", async ()
     assert.match(
       failedAuthorization?.error ?? "",
       /fixture session exchange failed/,
+      `last authorization result: ${JSON.stringify(lastAuthorization)}`,
     );
 
     const cleanup = toolValue(

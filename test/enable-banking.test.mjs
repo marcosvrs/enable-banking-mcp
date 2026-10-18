@@ -462,6 +462,31 @@ test("checks public API health without credentials", async () => {
   assert.equal(request.url, "https://api.enablebanking.com/health");
   assert.equal(request.options.headers.Authorization, undefined);
 });
+test("forwards health request cancellation to the fetch signal", async () => {
+  const controller = new AbortController();
+  const fetchStarted = Promise.withResolvers();
+  let requestSignal;
+  const health = Effect.runPromise(
+    getHealth((_url, options) => {
+      requestSignal = options.signal;
+      fetchStarted.resolve();
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener(
+          "abort",
+          () => reject(options.signal.reason),
+          { once: true },
+        );
+      });
+    }),
+    { signal: controller.signal },
+  );
+
+  await fetchStarted.promise;
+  controller.abort(new Error("Request cancelled"));
+  await assert.rejects(health);
+
+  assert.equal(requestSignal.aborted, true);
+});
 
 test("rejects invalid authorization expiry before requesting authorization", async () => {
   const { privateKey } = testKey();

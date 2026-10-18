@@ -281,7 +281,7 @@ export class BankAuthorizationFlow {
       const completion = Effect.gen(this, function* () {
         const code = yield* listener.wait;
         const session = yield* client.createSession(code);
-        yield* this.sessionStore.set(session.session_id);
+        yield* Effect.uninterruptible(this.sessionStore.set(session.session_id));
       });
       yield* completion.pipe(
         Effect.catchAllCause((cause) =>

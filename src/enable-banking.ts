@@ -151,11 +151,14 @@ export function getHealth(
 ): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
     const response = yield* Effect.tryPromise({
-      try: () =>
+      try: (signal) =>
         fetchFn(`${API_BASE_URL}/health`, {
           method: "GET",
           headers: { Accept: "application/json" },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.any([
+            signal,
+            AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          ]),
         }),
       catch: (error) => error,
     });

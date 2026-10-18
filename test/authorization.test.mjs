@@ -661,6 +661,57 @@ test("closes an acquired callback listener when authorization startup is cancell
   assert.equal(closeCalls, 1);
   assert.equal(flow.status.pending, false);
 });
+test("persists a created session before allowing authorization cancellation", async () => {
+  const store = new MemorySessionStore();
+  const storeStarted = Promise.withResolvers();
+  const finishStoreWrite = Promise.withResolvers();
+  store.set = (sessionId) =>
+    Effect.tryPromise({
+      try: (signal) =>
+        new Promise((resolve, reject) => {
+          const abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+          storeStarted.resolve();
+          finishStoreWrite.promise.then(() => {
+            signal.removeEventListener("abort", abort);
+            if (signal.aborted) return;
+            store.sessionId = sessionId;
+            resolve();
+          });
+        }),
+      catch: (error) => error,
+    });
+  const flow = new BankAuthorizationFlow(
+    store,
+    () => Effect.void,
+    () => Effect.succeed({
+      wait: Effect.succeed("approved-code"),
+      close: Effect.void,
+    }),
+  );
+  await Effect.runPromise(flow.start(
+    {
+      startAuthorization: () =>
+        Effect.succeed({ url: "https://bank.example/authorize" }),
+      createSession: () => Effect.succeed({ session_id: "created-session" }),
+    },
+    {
+      aspspName: "Example Bank",
+      country: "FI",
+      redirectUrl: "https://localhost:8765/callback",
+    },
+  ));
+  await storeStarted.promise;
+  const cancellation = Effect.runPromise(flow.cancelPending());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  finishStoreWrite.resolve();
+  await cancellation;
+  for (let attempt = 0; attempt < 20 && !store.sessionId; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+
+  assert.equal(store.sessionId, "created-session");
+});
 
 test("real HTTPS callback rejects invalid requests and stores an accepted session", async () => {
   const port = await getAvailablePort();
