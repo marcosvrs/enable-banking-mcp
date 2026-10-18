@@ -669,11 +669,12 @@ test("connect_bank owns fresh MCP onboarding through balance retrieval", async (
 });
 
 test("redacts elicited Control Panel email from retained setup failures", async () => {
-  const email = "private@example.net";
+  const email = "Alice@Example.NET";
+  const canonicalEmail = email.toLowerCase();
   const server = await startIsolatedServer(
     {
       MCP_TEST_FAIL_APPLICATION_REGISTRATION: "true",
-      MCP_TEST_PROVIDER_ERROR_EMAIL: email,
+      MCP_TEST_PROVIDER_ERROR_EMAIL: canonicalEmail,
     },
     {
       action: "accept",
@@ -693,10 +694,12 @@ test("redacts elicited Control Panel email from retained setup failures", async 
     assert.equal(connection.status, "failed");
     assert.match(connection.error, /\[email redacted\]/);
     assert.equal(JSON.stringify(connection).includes(email), false);
+    assert.equal(JSON.stringify(connection).includes(canonicalEmail), false);
 
     const status = toolValue(await callTool(server.client, "setup_status"));
     assert.equal(status.phase, "failed");
     assert.equal(JSON.stringify(status).includes(email), false);
+    assert.equal(JSON.stringify(status).includes(canonicalEmail), false);
   } finally {
     await server.close();
   }

@@ -14,6 +14,7 @@ import {
   DEFAULT_PRODUCTION_PRIVACY_URL,
   DEFAULT_PRODUCTION_TERMS_URL,
 } from "./setup.js";
+import { redactControlPanelEmail } from "./control-panel-email.js";
 import type { ApplicationSetupFlow } from "./setup.js";
 
 interface EnableBankingCredentials { appId: string; privateKey: string }
@@ -179,21 +180,20 @@ export function connectBank(
             ...value,
             ...(value.message
               ? {
-                  message: value.message
-                    .split(input.email)
-                    .join("[email redacted]"),
+                  message: redactControlPanelEmail(value.message, input.email),
                 }
               : {}),
             ...(value.error
-              ? { error: value.error.split(input.email).join("[email redacted]") }
+              ? { error: redactControlPanelEmail(value.error, input.email) }
               : {}),
           })),
           Effect.catchAll((error) =>
             Effect.fail(
               new Error(
-                (error instanceof Error ? error.message : String(error))
-                  .split(input.email)
-                  .join("[email redacted]"),
+                redactControlPanelEmail(
+                  error instanceof Error ? error.message : String(error),
+                  input.email,
+                ),
               ),
             ),
           ),
@@ -203,9 +203,10 @@ export function connectBank(
           Effect.catchAll((error) =>
             Effect.fail(
               new Error(
-                (error instanceof Error ? error.message : String(error))
-                  .split(input.email)
-                  .join("[email redacted]"),
+                redactControlPanelEmail(
+                  error instanceof Error ? error.message : String(error),
+                  input.email,
+                ),
               ),
             ),
           ),

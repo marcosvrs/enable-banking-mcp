@@ -13,6 +13,7 @@ import {
   type CallbackTlsOptions,
 } from "./authorization.js";
 import { parseLoopbackRedirect } from "./redirect.js";
+import { redactControlPanelEmail } from "./control-panel-email.js";
 import {
   ControlPanelAuthFlow,
   ControlPanelClient,
@@ -403,18 +404,10 @@ export class ApplicationSetupFlow {
   ): Effect.Effect<void> {
     return Effect.gen(this, function* () {
       let application: StoredApplication | undefined;
-      yield* this.createApplication(options)
+      yield* this.createApplication(options, (created) => {
+        application = created;
+      })
         .pipe(
-          Effect.tap((created) =>
-            Effect.sync(() => {
-              application = created;
-            }),
-          ),
-          Effect.flatMap((created) =>
-            (this.dependencies.trustCertificate ?? trustCertificate)(
-              created.certificate,
-            ).pipe(Effect.as(created)),
-          ),
           Effect.tap((created) =>
             Effect.sync(() => {
               if (options.environment === "PRODUCTION") {
@@ -450,9 +443,10 @@ export class ApplicationSetupFlow {
                 phase: "failed",
                 pending: false,
                 ...(application?.appId ? { appId: application.appId } : {}),
-                error: message
-                  .split(options.controlPanelEmail)
-                  .join("[email redacted]"),
+                error: redactControlPanelEmail(
+                  message,
+                  options.controlPanelEmail,
+                ),
               });
             }),
           ),
@@ -464,10 +458,11 @@ export class ApplicationSetupFlow {
     return Effect.gen(this, function* () {
       let application: StoredApplication | undefined;
       const workflow = Effect.gen(this, function* () {
-        const storedApplication = yield* this.createApplication(options);
-        application = storedApplication;
-        yield* (this.dependencies.trustCertificate ?? trustCertificate)(
-          storedApplication.certificate,
+        const storedApplication = yield* this.createApplication(
+          options,
+          (created) => {
+            application = created;
+          },
         );
         const createBankClient =
           this.dependencies.createBankClient ??
@@ -560,9 +555,10 @@ export class ApplicationSetupFlow {
               phase: "failed",
               pending: false,
               ...(application?.appId ? { appId: application.appId } : {}),
-              error: message
-                .split(options.controlPanelEmail)
-                .join("[email redacted]"),
+              error: redactControlPanelEmail(
+                message,
+                options.controlPanelEmail,
+              ),
             };
           }),
         ),
@@ -572,6 +568,7 @@ export class ApplicationSetupFlow {
 
   private createApplication(
     options: NormalizedApplicationRegistrationOptions,
+    onRegistered: (application: StoredApplication) => void,
   ): Effect.Effect<StoredApplication, unknown> {
     return Effect.gen(this, function* () {
       const keyMaterial = yield* (this.dependencies.generateKeyMaterial ??
@@ -601,11 +598,16 @@ export class ApplicationSetupFlow {
         environment: options.environment,
         redirectUrls: [options.redirectUrl],
       };
-      // Provider registration is already committed; keep its matching private key
-      // locally even if the requesting client disconnects.
-      yield* Effect.uninterruptible(
-        this.dependencies.applicationStore.set(application),
-      );
+      // Provider registration is already committed; preserve its private key and
+      // callback trust even if the requesting client disconnects.
+      const persistAndTrust = Effect.gen(this, function* () {
+        yield* this.dependencies.applicationStore.set(application);
+        onRegistered(application);
+        yield* (this.dependencies.trustCertificate ?? trustCertificate)(
+          application.certificate,
+        );
+      });
+      yield* Effect.uninterruptible(persistAndTrust);
       return application;
     });
   }

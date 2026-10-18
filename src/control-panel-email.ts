@@ -86,3 +86,11 @@ export function resolveControlPanelEmailInput(
     } as const;
   });
 }
+
+export function redactControlPanelEmail(
+  message: string,
+  email: string,
+): string {
+  const escapedEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return message.replace(new RegExp(escapedEmail, "gi"), "[email redacted]");
+}

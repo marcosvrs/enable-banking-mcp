@@ -1127,6 +1127,46 @@ test("keeps registered application persisted when certificate trust fails", asyn
   assert.equal((await Effect.runPromise(restarted.getStatus())).phase, "application_ready");
 });
 
+test("finishes certificate trust after setup is cancelled following registration", async () => {
+  const trustStarted = Promise.withResolvers();
+  let finishTrust;
+  let trustCancelled = false;
+  let trustCompleted = false;
+  const { setup, applicationStore } = setupDependencies({
+    trustCertificate: () =>
+      Effect.async((resume) => {
+        trustStarted.resolve();
+        finishTrust = () => {
+          if (trustCancelled) return;
+          trustCompleted = true;
+          resume(Effect.void);
+        };
+        return Effect.sync(() => {
+          trustCancelled = true;
+        });
+      }),
+  });
+  const controller = new AbortController();
+  const run = Effect.runPromise(
+    setup.runToCompletion({
+      ...registrationOptions({ environment: "SANDBOX" }),
+      aspspName: "Example Bank",
+      country: "FI",
+    }),
+    { signal: controller.signal },
+  ).catch(() => undefined);
+
+  await trustStarted.promise;
+  controller.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+  finishTrust();
+  await run.catch(() => undefined);
+
+  assert.equal(trustCancelled, false);
+  assert.equal(trustCompleted, true);
+  assert.equal((await Effect.runPromise(applicationStore.get())).appId, "recorded-app-id");
+});
+
 test("fails setup when the requested bank is absent and retains the registered application", async () => {
   let authorizationCalls = 0;
   const { setup, applicationStore } = setupDependencies({
