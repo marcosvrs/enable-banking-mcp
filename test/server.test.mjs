@@ -564,7 +564,13 @@ test("blocks credential cleanup while an active application's bank selection is 
     const connection = callTool(server.client, "connect_bank", {
       environment: "SANDBOX",
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pendingSelection = await waitForToolValue(
+      server.client,
+      "connection_status",
+      (status) => status.phase === "bank_authorization",
+      100,
+    );
+    assert.equal(pendingSelection.connection, "awaiting_user");
 
     const cleanup = await callTool(server.client, "clear_local_credentials");
     assert.equal(cleanup.isError, true);
