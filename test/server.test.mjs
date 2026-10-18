@@ -543,6 +543,41 @@ test("tracks the guided Production activation reservation through bank selection
   }
 });
 
+test("blocks credential cleanup while an active application's bank selection is pending", async () => {
+  const server = await startIsolatedServer(
+    { MCP_TEST_DELAY_BANK_LIST_MS: "5000" },
+    {
+      action: "accept",
+      content: { country: "IE", bank: "Fixture Bank" },
+    },
+  );
+  try {
+    await callTool(server.client, "register_application", {
+      environment: "SANDBOX",
+    });
+    await waitForToolValue(
+      server.client,
+      "setup_status",
+      (status) => status.phase === "application_ready" && !status.pending,
+    );
+
+    const connection = callTool(server.client, "connect_bank", {
+      environment: "SANDBOX",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const cleanup = await callTool(server.client, "clear_local_credentials");
+    assert.equal(cleanup.isError, true);
+    assert.match(
+      cleanup.content[0].text,
+      /authorization.*pending/i,
+    );
+    assert.equal(toolValue(await connection).status, "connected");
+  } finally {
+    await server.close();
+  }
+});
+
 test("connect_bank owns fresh MCP onboarding through balance retrieval", async () => {
   const server = await startIsolatedServer({}, {
     action: "accept",

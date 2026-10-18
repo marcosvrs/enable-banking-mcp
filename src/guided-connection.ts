@@ -32,7 +32,7 @@ export interface GuidedConnectionDependencies {
   setupFlow: Pick<ApplicationSetupFlow, "status" | "runToCompletion" | "waitForCompletion">;
   authorizationFlow: Pick<
     BankAuthorizationFlow,
-    "status" | "start" | "startReserved" | "release" | "cancelPending"
+    "status" | "start" | "startReserved" | "reserve" | "release" | "cancelPending"
   >;
   assertNoEnvironmentCredentials(): void;
   getEnvironmentSessionId(): string | undefined;
@@ -276,7 +276,16 @@ export function connectBank(
               dependencies.authorizationFlow.release();
             }),
         )
-      : yield* selectBankAndAuthorize(false);
+      : yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            dependencies.authorizationFlow.reserve();
+          }),
+          () => selectBankAndAuthorize(true),
+          () =>
+            Effect.sync(() => {
+              dependencies.authorizationFlow.release();
+            }),
+        );
     if (selectionResult.status === "failed") return selectionResult;
     const authorization = selectionResult;
     // start() forks callback completion; this status changes while the Effect suspends.

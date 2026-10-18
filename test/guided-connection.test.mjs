@@ -62,6 +62,7 @@ async function runConnection({
     browserUrls: [],
     elicitationRequests: [],
     authorizationPending,
+    authorizationPendingDuringBankSelection: false,
     productionActivationPending: false,
   };
   const dependencies = {
@@ -98,6 +99,12 @@ async function runConnection({
           state.authorizationPending = false;
         }
         return { pending };
+      },
+      reserve() {
+        if (state.authorizationPending) {
+          throw new Error("Bank authorization is already in progress");
+        }
+        state.authorizationPending = true;
       },
       start(_client, options) {
         state.authorizationCalls.push(options);
@@ -150,6 +157,8 @@ async function runConnection({
           return Effect.succeed(applicationInfo);
         },
         listBanks(country) {
+          state.authorizationPendingDuringBankSelection =
+            state.authorizationPending;
           return Effect.succeed({ aspsps: banksByCountry[country] ?? [] });
         },
       };
@@ -331,6 +340,7 @@ test("an existing application asks country and bank together and completes autho
     state.elicitationRequests[0].requestedSchema.required,
     ["country", "bank"],
   );
+  assert.equal(state.authorizationPendingDuringBankSelection, true);
   assert.deepEqual(state.authorizationCalls[0], {
     aspspName: "Example Bank",
     country: "FI",
