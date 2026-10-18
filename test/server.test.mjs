@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { createServer as createNetServer } from "node:net";
@@ -465,21 +468,27 @@ test("runs MCP handlers against isolated provider and Keychain boundaries", asyn
 });
 test("finishes local session cleanup after provider deletion despite request cancellation", async () => {
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  const server = await startIsolatedServer({
-    MCP_TEST_DELAY_SESSION_CLEAR_MS: "500",
-    MCP_TEST_KEYCHAIN: JSON.stringify({
-      "enable-banking-mcp.native": "fixture-session-id",
-      "enable-banking-mcp.application": JSON.stringify({
-        appId: "fixture-app-id",
-        privateKey: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
-        certificate: "fixture-certificate",
-        environment: "SANDBOX",
-        redirectUrls: ["https://localhost:8765/callback"],
-      }),
-    }),
-  });
+  const tempDirectory = mkdtempSync(
+    join(tmpdir(), "enable-banking-session-cleanup-"),
+  );
+  const clearStartedFile = join(tempDirectory, "clear-started");
   const controller = new AbortController();
+  let server;
   try {
+    server = await startIsolatedServer({
+      MCP_TEST_DELAY_SESSION_CLEAR_MS: "500",
+      MCP_TEST_SESSION_CLEAR_STARTED_FILE: clearStartedFile,
+      MCP_TEST_KEYCHAIN: JSON.stringify({
+        "enable-banking-mcp.native": "fixture-session-id",
+        "enable-banking-mcp.application": JSON.stringify({
+          appId: "fixture-app-id",
+          privateKey: privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+          certificate: "fixture-certificate",
+          environment: "SANDBOX",
+          redirectUrls: ["https://localhost:8765/callback"],
+        }),
+      }),
+    });
     const deletion = callTool(
       server.client,
       "delete_session",
@@ -490,7 +499,18 @@ test("finishes local session cleanup after provider deletion despite request can
       (value) => ({ value }),
       (error) => ({ error }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    for (
+      let attempt = 0;
+      attempt < 500 && !existsSync(clearStartedFile);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(
+      existsSync(clearStartedFile),
+      true,
+      "local session clear did not start",
+    );
     controller.abort(new Error("Request cancelled"));
     await settled;
     await new Promise((resolve) => setTimeout(resolve, 550));
@@ -500,7 +520,8 @@ test("finishes local session cleanup after provider deletion despite request can
     assert.match(session.content[0].text, /No Enable Banking session is stored/);
   } finally {
     controller.abort();
-    await server.close();
+    if (server) await server.close();
+    rmSync(tempDirectory, { recursive: true, force: true });
   }
 });
 

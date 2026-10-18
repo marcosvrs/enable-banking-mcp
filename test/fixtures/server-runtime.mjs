@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { Effect } from "effect";
 import {
   MacKeychainCredentialVault,
@@ -38,11 +39,17 @@ const sessionClearDelayMs = Number(
   process.env.MCP_TEST_DELAY_SESSION_CLEAR_MS || 0,
 );
 if (sessionClearDelayMs > 0) {
+  const clearStartedFile = process.env.MCP_TEST_SESSION_CLEAR_STARTED_FILE;
   const clearCredential = MacKeychainCredentialVault.prototype.clear;
   MacKeychainCredentialVault.prototype.clear = function (slot) {
     const clear = clearCredential.call(this, slot);
     return slot === "session"
-      ? Effect.zipRight(Effect.sleep(sessionClearDelayMs), clear)
+      ? Effect.zipRight(
+          Effect.sync(() => {
+            if (clearStartedFile) writeFileSync(clearStartedFile, "started");
+          }),
+          Effect.zipRight(Effect.sleep(sessionClearDelayMs), clear),
+        )
       : clear;
   };
 }
