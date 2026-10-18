@@ -84,15 +84,36 @@ export function connectBank(
       return connected;
     }
 
+    let reservedBeforeInput = false;
+    let authorizationReservedBeforePendingCheck = false;
+    const reserveAuthorization = () =>
+      Effect.gen(function* () {
+        if (reservedBeforeInput) return;
+        dependencies.authorizationFlow.reserve();
+        reservedBeforeInput = true;
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            dependencies.authorizationFlow.release();
+          }),
+        );
+      });
+
     if (dependencies.setupFlow.status.pending) {
       const status = yield* dependencies.setupFlow.waitForCompletion();
       if (status.phase === "complete") {
+        application = yield* dependencies.applicationStore.get();
+        if (
+          application &&
+          options.accessProfile === "balances_and_transactions"
+        ) {
+          yield* reserveAuthorization();
+          authorizationReservedBeforePendingCheck = true;
+        }
         const result = {
           status: "connected",
           ...(yield* dependencies.readAuthorizedBalances()),
         };
         if (hasRequestedAccess(result, options.accessProfile)) return result;
-        application = yield* dependencies.applicationStore.get();
       } else if (status.phase === "failed") {
         return {
           status: "failed",
@@ -106,8 +127,13 @@ export function connectBank(
         status.phase === "application_ready"
       ) {
         application = yield* dependencies.applicationStore.get();
+
         const completedSession = yield* dependencies.sessionStore.get();
         if (application && completedSession !== undefined) {
+          if (options.accessProfile === "balances_and_transactions") {
+            yield* reserveAuthorization();
+            authorizationReservedBeforePendingCheck = true;
+          }
           const result = {
             status: "connected",
             ...(yield* dependencies.readAuthorizedBalances()),
@@ -123,7 +149,10 @@ export function connectBank(
         };
       }
     }
-    if (dependencies.authorizationFlow.status.pending) {
+    if (
+      !authorizationReservedBeforePendingCheck &&
+      dependencies.authorizationFlow.status.pending
+    ) {
       // Status changes while the Effect is suspended, so poll the live value.
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       while (dependencies.authorizationFlow.status.pending) {
@@ -142,15 +171,8 @@ export function connectBank(
         if (hasRequestedAccess(result, options.accessProfile)) return result;
       }
     }
-    const reservedBeforeInput = application !== undefined;
-    if (reservedBeforeInput) {
-      dependencies.authorizationFlow.reserve();
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          dependencies.authorizationFlow.release();
-        }),
-      );
-    }
+    if (application !== undefined) yield* reserveAuthorization();
+
     if (!application) dependencies.assertNoEnvironmentCredentials();
 
 
@@ -199,6 +221,9 @@ export function connectBank(
           ),
         );
       if (status.phase === "complete") {
+        if (options.accessProfile === "balances_and_transactions") {
+          yield* reserveAuthorization();
+        }
         const accounts = yield* dependencies.readAuthorizedBalances().pipe(
           Effect.catchAll((error) =>
             Effect.fail(

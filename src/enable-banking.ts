@@ -150,7 +150,7 @@ export function getHealth(
   fetchFn: typeof fetch = globalThis.fetch,
 ): Effect.Effect<unknown, unknown> {
   return Effect.gen(function* () {
-    const response = yield* Effect.tryPromise({
+    const { response, raw } = yield* Effect.tryPromise({
       try: (signal) =>
         fetchFn(`${API_BASE_URL}/health`, {
           method: "GET",
@@ -159,11 +159,10 @@ export function getHealth(
             signal,
             AbortSignal.timeout(REQUEST_TIMEOUT_MS),
           ]),
-        }),
-      catch: (error) => error,
-    });
-    const raw = yield* Effect.tryPromise({
-      try: () => response.text(),
+        }).then(async (response) => ({
+          response,
+          raw: await response.text(),
+        })),
       catch: (error) => error,
     });
     const body = parseJson(raw);
@@ -454,16 +453,15 @@ export class EnableBankingClient {
           headers["Content-Type"] = "application/json";
           init.body = JSON.stringify(options.body);
         }
-        const response = yield* Effect.tryPromise({
+        const { response, raw } = yield* Effect.tryPromise({
           try: (signal) =>
             this.fetchFn(`${API_BASE_URL}${path}`, {
               ...init,
               signal: AbortSignal.any([signal, timeoutSignal]),
-            }),
-          catch: (error) => error,
-        });
-        const raw = yield* Effect.tryPromise({
-          try: () => response.text(),
+            }).then(async (response) => ({
+              response,
+              raw: await response.text(),
+            })),
           catch: (error) => error,
         });
         const body = parseJson(raw);

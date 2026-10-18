@@ -59,6 +59,7 @@ async function runConnection({
     setupWaits: 0,
     authorizationCalls: [],
     balanceReads: 0,
+    authorizationPendingDuringBalanceReads: [],
     browserUrls: [],
     elicitationRequests: [],
     authorizationPending,
@@ -133,6 +134,9 @@ async function runConnection({
     clearEnvironmentSession() {},
     readAuthorizedBalances() {
       state.balanceReads += 1;
+      state.authorizationPendingDuringBalanceReads.push(
+        state.authorizationPending,
+      );
       if (failBalancesWithoutSession && state.sessionStore.value === undefined) {
         return Effect.fail(new Error("No Enable Banking session is stored"));
       }
@@ -255,6 +259,27 @@ test("first-run connect asks for email, country, and bank once, then returns bal
     { account_id: "account-1", balances: [{ amount: "42.00" }] },
   ]);
   assert.doesNotMatch(JSON.stringify(toolResponse), /person@example\.com/);
+});
+
+test("reserves a newly created application before checking transaction access", async () => {
+  const { result, state } = await runConnection({
+    accessProfile: "balances_and_transactions",
+    response: {
+      action: "accept",
+      content: {
+        control_panel_email: "person@example.com",
+        country: "FI",
+        bank: "Example Bank",
+      },
+    },
+    capabilities: { elicitation: { form: {} } },
+    setupApplicationAfterRun: application(),
+    storeSessionOnAuthorization: true,
+  });
+
+  assert.deepEqual(state.authorizationPendingDuringBalanceReads, [true, false]);
+  assert.equal(result.status, "connected");
+  assert.equal(state.authorizationCalls.length, 1);
 });
 
 test("declined and unsupported forms do not start setup", async () => {
@@ -381,6 +406,26 @@ test("a pending setup without transaction access continues into reauthorization"
   }]);
   assert.equal(result.status, "connected");
   assert.equal(state.balanceReads, 2);
+});
+
+test("reserves a completed setup before checking transaction access", async () => {
+  const { result, state } = await runConnection({
+    setupPending: true,
+    setupPendingPhase: "registering_application",
+    setupResult: { phase: "application_ready", pending: false },
+    setupApplicationAfterWait: application(),
+    sessionId: "stored-session",
+    accessProfile: "balances_and_transactions",
+    capabilities: { elicitation: { form: {} } },
+    response: {
+      action: "accept",
+      content: { country: "FI", bank: "Example Bank" },
+    },
+  });
+
+  assert.equal(state.authorizationPendingDuringBalanceReads.includes(true), true);
+  assert.equal(result.status, "connected");
+  assert.equal(state.authorizationCalls.length, 1);
 });
 
 test("a pending authorization without transaction access continues into reauthorization", async () => {

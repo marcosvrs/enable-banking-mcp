@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 
 import assert from "node:assert/strict";
 import { generateKeyPairSync, verify } from "node:crypto";
@@ -512,6 +512,59 @@ test("rejects invalid authorization expiry before requesting authorization", asy
     /access\.valid_until must be a future RFC3339 date-time/,
   );
 });
+test("interrupting health and client requests aborts response-body reads", async () => {
+  const { privateKey } = testKey();
+
+  for (const kind of ["health", "client"]) {
+    let requestSignal;
+    let bodyAborted = false;
+    let bodyReadStarted;
+    let finishPull;
+    const started = new Promise((resolve) => {
+      bodyReadStarted = resolve;
+    });
+    const fetchFn = async (_url, options) => {
+      requestSignal = options.signal;
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            options.signal.addEventListener(
+              "abort",
+              () => {
+                bodyAborted = true;
+                controller.error(options.signal.reason);
+                finishPull?.();
+              },
+              { once: true },
+            );
+          },
+          pull() {
+            bodyReadStarted();
+            return new Promise((resolve) => {
+              finishPull = resolve;
+            });
+          },
+        }),
+        { status: 200 },
+      );
+    };
+    const effect =
+      kind === "health"
+        ? getHealth(fetchFn)
+        : new EnableBankingClient(
+            { appId: "app-id", privateKey },
+            fetchFn,
+          ).getApplication();
+    const fiber = Effect.runFork(effect);
+
+    await started;
+    await Effect.runPromise(Fiber.interrupt(fiber));
+
+    assert.equal(requestSignal.aborted, true, `${kind} request signal`);
+    assert.equal(bodyAborted, true, `${kind} response body`);
+  }
+});
+
 test("rejects a repeated provider continuation key instead of looping", async () => {
   const { privateKey } = testKey();
   const requests = [];
