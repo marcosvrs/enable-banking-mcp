@@ -311,8 +311,8 @@ function authorizedBalances(): Effect.Effect<Record<string, unknown>, unknown> {
 
 let productionActivationPending = false;
 
-function beginProductionActivationWait(): void {
-  authorizationFlow.reserve();
+function beginProductionActivationWait(alreadyReserved = false): void {
+  if (!alreadyReserved) authorizationFlow.reserve();
   productionActivationPending = true;
 }
 

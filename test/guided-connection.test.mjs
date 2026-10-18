@@ -201,7 +201,7 @@ async function runConnection({
   if (response) {
     client.setRequestHandler(ElicitRequestSchema, async ({ params }) => {
       state.elicitationRequests.push(params);
-      return response;
+      return typeof response === "function" ? response(params, state) : response;
     });
   }
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -517,3 +517,33 @@ for (const phase of ["application_ready", "idle"]) {
     );
   });
 }
+
+test("reserves an existing application before eliciting bank selection", async () => {
+  let pendingDuringElicitation;
+  const { result, state } = await runConnection({
+    storedApplication: application(),
+    capabilities: { elicitation: { form: {} } },
+    response: (_params, currentState) => {
+      pendingDuringElicitation = currentState.authorizationPending;
+      return {
+        action: "accept",
+        content: { country: "FI", bank: "Example Bank" },
+      };
+    },
+  });
+
+  assert.equal(pendingDuringElicitation, true);
+  assert.equal(result.status, "connected");
+  assert.equal(state.authorizationCalls.length, 1);
+});
+
+test("releases the reservation when an existing-application form is declined", async () => {
+  const { result, state } = await runConnection({
+    storedApplication: application(),
+    capabilities: { elicitation: { form: {} } },
+    response: { action: "decline" },
+  });
+
+  assert.equal(result.status, "cancelled");
+  assert.equal(state.authorizationPending, false);
+});

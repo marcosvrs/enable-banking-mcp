@@ -41,8 +41,8 @@ export interface GuidedConnectionDependencies {
   resolveCredentials(): Effect.Effect<EnableBankingCredentials, unknown>;
   createBankClient(credentials: EnableBankingCredentials): EnableBankingClient;
   openBrowser(url: string): Effect.Effect<void, unknown>;
-  beginProductionActivationWait: () => void;
-  endProductionActivationWait: () => void;
+  beginProductionActivationWait(alreadyReserved?: boolean): void;
+  endProductionActivationWait(): void;
   isProductionActivationPending(): boolean;
   mcpServer: McpServer["server"];
 }
@@ -51,7 +51,7 @@ export function connectBank(
   options: ConnectBankOptions,
   dependencies: GuidedConnectionDependencies,
 ): Effect.Effect<unknown, unknown> {
-  return Effect.gen(function* () {
+  return Effect.scoped(Effect.gen(function* () {
     if (dependencies.isProductionActivationPending()) {
       return {
         status: "awaiting_user",
@@ -140,6 +140,15 @@ export function connectBank(
         };
         if (hasRequestedAccess(result, options.accessProfile)) return result;
       }
+    }
+    const reservedBeforeInput = application !== undefined;
+    if (reservedBeforeInput) {
+      dependencies.authorizationFlow.reserve();
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          dependencies.authorizationFlow.release();
+        }),
+      );
     }
     if (!application) dependencies.assertNoEnvironmentCredentials();
 
@@ -259,7 +268,9 @@ export function connectBank(
       });
     const selectionResult = activationNeeded
       ? yield* Effect.acquireUseRelease(
-          Effect.sync(dependencies.beginProductionActivationWait),
+          Effect.sync(() => {
+            dependencies.beginProductionActivationWait(reservedBeforeInput);
+          }),
           () =>
             Effect.gen(function* () {
               yield* dependencies.openBrowser(APPLICATIONS_URL);
@@ -278,7 +289,9 @@ export function connectBank(
         )
       : yield* Effect.acquireUseRelease(
           Effect.sync(() => {
-            dependencies.authorizationFlow.reserve();
+            if (!reservedBeforeInput) {
+              dependencies.authorizationFlow.reserve();
+            }
           }),
           () => selectBankAndAuthorize(true),
           () =>
@@ -325,7 +338,7 @@ export function connectBank(
     }
     return result;
 
-  });
+  }));
 }
 function hasRequestedAccess(
   connected: Record<string, unknown>,

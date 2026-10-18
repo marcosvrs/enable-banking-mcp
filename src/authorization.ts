@@ -459,14 +459,27 @@ function createCallbackListener(
       catch: (error) => error,
     });
     yield* Effect.async<undefined, unknown>((resume) => {
-      server.once("error", (error) => {
+      let cancelled = false;
+      let closeStarted = false;
+      const closeIfListening = () => {
+        if (!server.listening || closeStarted) return;
+        closeStarted = true;
+        server.close();
+      };
+      const onError = (error: Error) => {
         resume(Effect.fail(error));
-      });
+      };
+      server.once("error", onError);
       server.listen(redirect.port, redirect.hostname, () => {
+        if (cancelled) {
+          closeIfListening();
+          return;
+        }
         resume(Effect.succeed(undefined));
       });
       return Effect.sync(() => {
-        if (!server.listening) server.close();
+        cancelled = true;
+        closeIfListening();
       });
     });
 

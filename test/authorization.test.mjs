@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { request as requestHttps } from "node:https";
+import { request as requestHttps, Server as HttpsServer } from "node:https";
 import { createServer as createNetServer } from "node:net";
 import test from "node:test";
 import { Effect } from "effect";
@@ -976,6 +976,51 @@ test("a busy callback port fails before bank authorization starts", async () => 
       blocker.close((error) => (error ? reject(error) : resolve()));
     });
   }
+});
+
+test("closes the callback server when cancellation races with listener startup", async (context) => {
+  const port = await getAvailablePort();
+  const controller = new AbortController();
+  const listenerReady = Promise.withResolvers();
+  const serverClosed = Promise.withResolvers();
+  const originalListen = HttpsServer.prototype.listen;
+  let callbackServer;
+
+  context.mock.method(HttpsServer.prototype, "listen", function (...args) {
+    callbackServer = this;
+    this.once("close", serverClosed.resolve);
+    const callback = args.at(-1);
+    args[args.length - 1] = (...callbackArgs) => {
+      listenerReady.resolve();
+      setImmediate(() => callback(...callbackArgs));
+    };
+    return originalListen.apply(this, args);
+  });
+
+  const flow = new BankAuthorizationFlow(
+    new MemorySessionStore(),
+    () => Effect.void,
+    undefined,
+    getTlsOptions,
+  );
+  const pending = Effect.runPromise(
+    flow.start(
+      {},
+      {
+        aspspName: "Example Bank",
+        country: "FI",
+        redirectUrl: `https://127.0.0.1:${port}/callback`,
+        validUntil: "2099-12-01T00:00:00.000Z",
+      },
+    ),
+    { signal: controller.signal },
+  );
+
+  await listenerReady.promise;
+  controller.abort();
+  await assert.rejects(pending);
+  await serverClosed.promise;
+  assert.equal(callbackServer.listening, false);
 });
 
 test("bank authorization timeout records failure and releases its HTTPS listener", async (context) => {
