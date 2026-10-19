@@ -1,9 +1,32 @@
+import { Effect } from "effect";
+
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EnableBankingApiError } from "../dist/enable-banking.js";
-import { inspectConnectionStatus } from "../dist/connection-status.js";
+import { inspectConnectionStatus as inspectConnectionStatusEffect } from "../dist/connection-status.js";
 
-test("reports inactive Production app separately from expired Control Panel login", async () => {
+function inspectConnectionStatus(input) {
+  const client = input.client
+    ? {
+        ...input.client,
+        getApplication: () =>
+          Effect.tryPromise({
+            try: () => input.client.getApplication(),
+            catch: (error) => error,
+          }),
+        getSession: (sessionId) =>
+          Effect.tryPromise({
+            try: () => input.client.getSession(sessionId),
+            catch: (error) => error,
+          }),
+      }
+    : undefined;
+  return Effect.runPromise(
+    inspectConnectionStatusEffect({ ...input, client }),
+  );
+}
+
+test("reports inactive Production app and tells standalone callers how to continue", async () => {
   const status = await inspectConnectionStatus({
     configuration: "configured",
     sessionIds: [],
@@ -26,6 +49,11 @@ test("reports inactive Production app separately from expired Control Panel logi
   assert.equal(status.bank_session, "missing");
   assert.equal(status.control_panel_session, "expired");
   assert.equal(status.application_environment, "PRODUCTION");
+  assert.match(
+    status.next_action,
+    /Complete Production activation by linking an account in the Enable Banking dashboard, then call connect_bank to continue\./,
+  );
+  assert.doesNotMatch(status.next_action, /active connect_bank request|continues automatically/i);
 });
 
 test("reports active applications with no bank consent as authorization required", async () => {
@@ -92,6 +120,25 @@ test("returns connected only after provider accepts the session and omits accoun
     JSON.stringify(status),
     /private-session-id|private-account-id|private-token/,
   );
+});
+test("pending authorization takes precedence over an older valid bank session", async () => {
+  const status = await inspectConnectionStatus({
+    configuration: "configured",
+    sessionIds: ["lower-scope-session"],
+    pendingPhase: "bank_authorization",
+    configuredEnvironment: "PRODUCTION",
+    client: {
+      getSession: async () => ({ session_id: "lower-scope-session" }),
+      getApplication: async () => {
+        throw new Error("Application lookup should not be needed");
+      },
+    },
+  });
+
+  assert.equal(status.connection, "awaiting_user");
+  assert.equal(status.phase, "bank_authorization");
+  assert.equal(status.bank_session, "valid");
+  assert.equal(status.application_environment, "PRODUCTION");
 });
 
 test("reports terminal provider sessions as invalid without clearing them", async () => {

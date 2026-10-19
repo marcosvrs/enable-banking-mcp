@@ -1,245 +1,526 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { MacKeychainSecretStore } from "../dist/session-store.js";
+import { Effect } from "effect";
+import {
+  MacKeychainCredentialVault,
+  MacKeychainSecretStore,
+  MacKeychainSessionStore,
+} from "../dist/session-store.js";
 
-function isolatedStore(initialRecords = new Map(), behavior = {}) {
-  const legacy = new Map(initialRecords);
-  const native = new Map();
+const account = "test-account";
+const bundlePrefix = "enable-banking-mcp:credential-bundle:v1:";
+
+function createVault(initial = new Map()) {
+  const records = new Map(initial);
   const calls = [];
-  let deleteNativeFailures = 0;
-  const runner = async (args) => {
-    calls.push([...args]);
-    const operation = args[0];
-    const service = args[args.indexOf("-s") + 1];
-    const override = behavior[`${operation}:${service}`] ?? behavior[`${operation}:*`];
-    if (override) return override({ args, legacy, calls });
-    if (operation === "find-generic-password") {
-      const value = legacy.get(service);
-      return value === undefined
-        ? { code: 44, stdout: "", stderr: "The specified item could not be found." }
-        : { code: 0, stdout: `${value}\n`, stderr: "" };
-    }
-    if (operation === "delete-generic-password") {
-      legacy.delete(service);
-      return { code: 0, stdout: "", stderr: "" };
-    }
-    throw new Error(`Unexpected legacy Keychain operation: ${operation}`);
-  };
-  const factory = (service, account) => {
-    assert.equal(service, "test-service.native");
-    assert.equal(account, "test-account");
+  const factory = (service, username) => {
+    assert.equal(username, account);
     return {
-      getPassword: () => native.get(service) ?? null,
-      setPassword: (value) => native.set(service, value),
-      deletePassword: () => {
-        if (deleteNativeFailures > 0) {
-          deleteNativeFailures -= 1;
-          throw new Error("native delete failed");
-        }
-        return native.delete(service);
+      getPassword() {
+        calls.push(["get", service]);
+        return records.get(service) ?? null;
+      },
+      setPassword(value) {
+        calls.push(["set", service]);
+        records.set(service, value);
+      },
+      deletePassword() {
+        calls.push(["delete", service]);
+        return records.delete(service);
       },
     };
   };
   return {
-    legacy,
-    native,
     calls,
-    store: new MacKeychainSecretStore(
-      "test-service",
-      "test-account",
-      "test secret",
-      runner,
-      factory,
-    ),
-    failNativeDelete() {
-      deleteNativeFailures += 1;
-    },
+    records,
+    factory,
+    vault: new MacKeychainCredentialVault(factory, account),
   };
 }
 
-test("reads raw legacy records, upgrades on write, and rejects empty writes", async () => {
-  const state = isolatedStore(new Map([["test-service", " legacy-value "]]));
-  assert.equal(await state.store.get(), "legacy-value");
-  await assert.rejects(state.store.set(" \n "), /Cannot store an empty Enable Banking test secret/);
-  await state.store.set("  normalized value  ");
-  assert.equal(await state.store.get(), "normalized value");
-  assert.equal(state.legacy.has("test-service"), false);
-  assert.deepEqual([...state.native.values()], ["normalized value"]);
-  assert.equal(state.calls.some((args) => args.includes("normalized value")), false);
-});
+const sessionStoreWorker = fileURLToPath(
+  new URL("./fixtures/session-store-worker.mjs", import.meta.url),
+);
 
-test("reads v1 chunk-index records and replaces them with a native entry", async () => {
-  const encoded = `enable-banking-mcp:v1:${Buffer.from("legacy chunk value").toString("base64")}`;
-  const pieces = [encoded.slice(0, 12), encoded.slice(12)];
-  const state = isolatedStore(new Map([
-    ["test-service", "enable-banking-mcp:chunks:v1:2"],
-    ["test-service.part.0", pieces[0]],
-    ["test-service.part.1", pieces[1]],
-  ]));
-  assert.equal(await state.store.get(), "legacy chunk value");
-  await state.store.set("replacement");
-  assert.equal(await state.store.get(), "replacement");
-  assert.equal(state.legacy.size, 0);
-});
-
-test("native values take precedence over legacy data", async () => {
-  const state = isolatedStore(new Map([["test-service", "old-legacy"]]));
-  await state.store.set("native value");
-  state.legacy.set("test-service", "stale legacy");
-  assert.equal(await state.store.get(), "native value");
-});
-
-test("cleanup failure after native commit leaves the new value readable and retries", async () => {
-  let failDelete = true;
-  const state = isolatedStore(new Map([["test-service", "old-value"]]), {
-    "delete-generic-password:test-service": ({ legacy }) => {
-      if (failDelete) {
-        failDelete = false;
-        return { code: 1, stdout: "", stderr: "injected delete failure" };
-      }
-      legacy.delete("test-service");
-      return { code: 0, stdout: "", stderr: "" };
+function spawnVaultWriter(keychainPath, slot, value, delayWrite, operation = "set", home = dirname(keychainPath)) {
+  const child = spawn(
+    process.execPath,
+    [sessionStoreWorker, keychainPath, slot, value, String(delayWrite), operation],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, HOME: home },
     },
+  );
+  let stdout = "";
+  let stderr = "";
+  let resolveReady;
+  let rejectReady;
+  let resolveBlocked;
+  let resolveCancelled;
+  let resolveCompletion;
+  let rejectCompletion;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
   });
-  await assert.rejects(state.store.set("new-value"), /Unable to clear legacy Enable Banking test secret/);
-  assert.equal(await state.store.get(), "new-value");
-  await state.store.set("new-value");
-  assert.equal(state.legacy.has("test-service"), false);
-  assert.equal(await state.store.get(), "new-value");
+  const blocked = new Promise((resolve) => {
+    resolveBlocked = resolve;
+  });
+  const cancelled = new Promise((resolve) => {
+    resolveCancelled = resolve;
+  });
+  const completed = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+    if (stdout.includes("READY\n")) resolveReady();
+    if (stdout.includes("BLOCKED\n")) resolveBlocked();
+    if (stdout.includes("CANCELLED\n")) resolveCancelled();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.once("error", (error) => {
+    rejectReady(error);
+    rejectCompletion(error);
+  });
+  child.once("close", (code) => {
+    if (!stdout.includes("READY\n")) {
+      rejectReady(new Error(`Keychain worker exited before ready: ${stderr}`));
+    }
+    if (code === 0) resolveCompletion();
+    else rejectCompletion(new Error(`Keychain worker failed: ${stderr}`));
+  });
+
+  return { child, ready, blocked, cancelled, completed };
+}
+
+
+test("creates one Keychain item for all credential slots after confirming absence", async () => {
+  const state = createVault();
+  const session = new MacKeychainSessionStore(state.vault);
+  const application = new MacKeychainSecretStore("application", state.vault);
+  const controlPanel = new MacKeychainSecretStore("controlPanel", state.vault);
+
+  await Promise.all([
+    Effect.runPromise(session.set("session-placeholder")),
+    Effect.runPromise(application.set("application-placeholder")),
+    Effect.runPromise(controlPanel.set("control-panel-placeholder")),
+  ]);
+
+  assert.equal(state.records.size, 1);
+  const [[service, stored]] = state.records;
+  assert.equal(service, "enable-banking-mcp.credentials.native");
+  assert.ok(stored.startsWith(bundlePrefix));
+  assert.deepEqual(JSON.parse(stored.slice(bundlePrefix.length)), {
+    version: 1,
+    session: "session-placeholder",
+    application: "application-placeholder",
+    controlPanel: "control-panel-placeholder",
+  });
+
+  const firstWrite = state.calls.findIndex(([operation]) => operation === "set");
+  assert.ok(firstWrite >= 4);
+  assert.ok(
+    state.calls.slice(0, firstWrite).every(([operation]) => operation === "get"),
+  );
 });
 
-test("clear removes native and legacy data and can be retried after one store fails", async () => {
-  const state = isolatedStore(new Map([["test-service", "legacy"]]));
-  await state.store.set("native");
-  state.legacy.set("test-service", "legacy again");
-  state.failNativeDelete();
-  await assert.rejects(state.store.clear(), /Unable to clear the Enable Banking test secret/);
-  assert.equal(state.legacy.has("test-service"), false);
-  assert.equal(await state.store.get(), "native");
-  await state.store.clear();
-  assert.equal(await state.store.get(), undefined);
+test("independently initialized vaults merge each other's credential writes", async () => {
+  const state = createVault();
+  const firstVault = new MacKeychainCredentialVault(state.factory, account);
+  const secondVault = new MacKeychainCredentialVault(state.factory, account);
+  const firstSession = new MacKeychainSessionStore(firstVault);
+  const secondApplication = new MacKeychainSecretStore("application", secondVault);
+
+  await Effect.runPromise(firstSession.get());
+  await Effect.runPromise(secondApplication.get());
+  await Effect.runPromise(firstSession.set("session-placeholder"));
+  await Effect.runPromise(secondApplication.set("application-placeholder"));
+
+  const persisted = new MacKeychainCredentialVault(state.factory, account);
+  assert.equal(
+    await Effect.runPromise(new MacKeychainSessionStore(persisted).get()),
+    "session-placeholder",
+  );
+  assert.equal(
+    await Effect.runPromise(
+      new MacKeychainSecretStore("application", persisted).get(),
+    ),
+    "application-placeholder",
+  );
 });
 
-test("clear removes malformed legacy manifests and bounded chunk slots", async () => {
-  const state = isolatedStore(new Map([
-    ["test-service", "enable-banking-mcp:chunks:v1:not-a-count"],
-    ["test-service.part.0", "unreadable chunk"],
-    ["test-service.part.255", "last bounded chunk"],
-  ]));
-  await assert.rejects(state.store.get(), /Stored Enable Banking test secret is invalid/);
-  await state.store.clear();
-  assert.equal(state.legacy.size, 0);
+test("a stale vault clear cannot resurrect another process's cleared slot", async () => {
+  const state = createVault();
+  const firstVault = new MacKeychainCredentialVault(state.factory, account);
+  const secondVault = new MacKeychainCredentialVault(state.factory, account);
+  const firstSession = new MacKeychainSessionStore(firstVault);
+  const firstApplication = new MacKeychainSecretStore("application", firstVault);
+  const secondSession = new MacKeychainSessionStore(secondVault);
+  const secondApplication = new MacKeychainSecretStore("application", secondVault);
+
+  await Effect.runPromise(firstSession.set("session-placeholder"));
+  await Effect.runPromise(firstApplication.set("application-placeholder"));
+  await Effect.runPromise(secondSession.get());
+  await Effect.runPromise(secondApplication.get());
+  await Effect.runPromise(firstSession.clear());
+  await Effect.runPromise(secondApplication.clear());
+
+  assert.equal(state.records.size, 0);
+  const latestVault = new MacKeychainCredentialVault(state.factory, account);
+  assert.equal(
+    await Effect.runPromise(new MacKeychainSessionStore(latestVault).get()),
+    undefined,
+  );
 });
+test("keeps the credential lock alive while a Keychain call blocks the event loop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "enable-banking-blocking-keychain-"));
+  const keychainPath = join(directory, "records.json");
+  writeFileSync(keychainPath, "{}", { mode: 0o600 });
+  const sessionWorker = spawnVaultWriter(
+    keychainPath,
+    "session",
+    "session-placeholder",
+    12_000,
+  );
+  void sessionWorker.completed.catch(() => {});
+  let applicationWorker;
 
-test("clear removes a malformed raw record without trying to decode it", async () => {
-  const state = isolatedStore(new Map([["test-service", "enable-banking-mcp:v1:not-base64!"]]));
-  await assert.rejects(state.store.get(), /Stored Enable Banking test secret is invalid/);
-  await state.store.clear();
-  assert.equal(state.legacy.size, 0);
-});
-test("reconciles staged generations before replacing legacy credentials", async () => {
-  const encoded = `enable-banking-mcp:v1:${Buffer.from("legacy value").toString("base64")}`;
-  const state = isolatedStore(new Map([
-    ["test-service", "enable-banking-mcp:chunks:v2:active-id,1;retired-id,1"],
-    ["test-service.part.active-id.0", encoded],
-    ["test-service.part.retired-id.0", encoded],
-    ["test-service.pending", "orphan-id,1"],
-    ["test-service.part.orphan-id.0", encoded],
-    ["test-service.retired", "journal-id,1"],
-    ["test-service.part.journal-id.0", encoded],
-  ]));
+  try {
+    await sessionWorker.ready;
+    sessionWorker.child.stdin.end("go\n");
+    await sessionWorker.blocked;
 
-  assert.equal(await state.store.get(), "legacy value");
-  await state.store.set("replacement value");
-
-  assert.equal(await state.store.get(), "replacement value");
-  assert.deepEqual([...state.legacy], []);
-});
-
-test("clears recoverable chunk generations from a malformed v2 manifest", async () => {
-  const state = isolatedStore(new Map([
-    ["test-service", "enable-banking-mcp:chunks:v2:broken-count,nope;recoverable-id,1"],
-    ["test-service.part.broken-count.0", "unreadable data"],
-    ["test-service.part.recoverable-id.255", "stale data"],
-  ]));
-
-  await state.store.set("replacement value");
-
-  assert.equal(await state.store.get(), "replacement value");
-  assert.deepEqual([...state.legacy], []);
-});
-
-test("keeps native writes readable when legacy journals are malformed", async () => {
-  const malformedRecords = [
-    new Map([["test-service.pending", "broken journal"]]),
-    new Map([["test-service.retired", "broken journal"]]),
-    new Map([
-      ["test-service", "enable-banking-mcp:chunks:v2:broken"],
-      ["test-service.retired", "retired-id,1"],
-    ]),
-  ];
-
-  for (const records of malformedRecords) {
-    const state = isolatedStore(records);
-    await assert.rejects(
-      state.store.set("committed native value"),
-      /Stored Enable Banking test secret is invalid/,
+    applicationWorker = spawnVaultWriter(
+      keychainPath,
+      "application",
+      "application-placeholder",
+      false,
     );
-    assert.equal(await state.store.get(), "committed native value");
+    void applicationWorker.ready.catch(() => {});
+    void applicationWorker.completed.catch(() => {});
+    const acquiredEarly = await Promise.race([
+      applicationWorker.ready.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 10_500)),
+    ]);
+    assert.equal(acquiredEarly, false);
+
+    await sessionWorker.completed;
+    await applicationWorker.ready;
+    applicationWorker.child.stdin.end("go\n");
+    await applicationWorker.completed;
+
+    const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+    const bundle = JSON.parse(
+      records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+    );
+    assert.equal(bundle.session, "session-placeholder");
+    assert.equal(bundle.application, "application-placeholder");
+  } finally {
+    for (const worker of [sessionWorker, applicationWorker].filter(Boolean)) {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+    }
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("rejects incomplete and noncanonical legacy chunk data", async () => {
-  const malformedRecords = [
-    new Map([["test-service", "enable-banking-mcp:v1:AB=="]]),
-    new Map([["test-service", "enable-banking-mcp:chunks:v1:1"]]),
-    new Map([
-      ["test-service", "enable-banking-mcp:chunks:v1:1"],
-      ["test-service.part.0", "not-an-encoded-secret"],
-    ]),
-  ];
 
-  for (const records of malformedRecords) {
-    const state = isolatedStore(records);
-    await assert.rejects(
-      state.store.get(),
-      /Stored Enable Banking test secret is invalid/,
+test("concurrent processes preserve distinct credential slots", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "enable-banking-vault-test-"));
+  const keychainPath = join(directory, "records.json");
+  writeFileSync(keychainPath, "{}", { mode: 0o600 });
+  const sessionWorker = spawnVaultWriter(
+    keychainPath,
+    "session",
+    "session-placeholder",
+    true,
+  );
+  const applicationWorker = spawnVaultWriter(
+    keychainPath,
+    "application",
+    "application-placeholder",
+    false,
+  );
+
+  try {
+    await Promise.all([sessionWorker.ready, applicationWorker.ready]);
+    sessionWorker.child.stdin.end("go\n");
+    applicationWorker.child.stdin.end("go\n");
+    await Promise.all([sessionWorker.completed, applicationWorker.completed]);
+
+    const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+    const bundle = JSON.parse(
+      records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
     );
+    assert.equal(bundle.session, "session-placeholder");
+    assert.equal(bundle.application, "application-placeholder");
+  } finally {
+    for (const worker of [sessionWorker, applicationWorker]) {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+    }
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("reports legacy read failures and does not claim cleanup succeeded", async () => {
-  const state = isolatedStore(new Map(), {
-    "find-generic-password:test-service": async () => ({
-      code: 1,
-      stdout: "",
-      stderr: "keychain is unavailable",
+test("reads legacy credentials without mutating Keychain and consolidates on write", async () => {
+  const state = createVault(
+    new Map([
+      ["enable-banking-mcp.control-panel.native", "control-panel-placeholder"],
+      ["enable-banking-mcp.application.native", "application-placeholder"],
+      ["enable-banking-mcp.native", "session-placeholder"],
+    ]),
+  );
+  const session = new MacKeychainSessionStore(state.vault);
+  const application = new MacKeychainSecretStore("application", state.vault);
+  const controlPanel = new MacKeychainSecretStore("controlPanel", state.vault);
+
+  assert.equal(await Effect.runPromise(session.get()), "session-placeholder");
+  assert.equal(
+    await Effect.runPromise(application.get()),
+    "application-placeholder",
+  );
+  assert.equal(
+    await Effect.runPromise(controlPanel.get()),
+    "control-panel-placeholder",
+  );
+  assert.deepEqual([...state.records], [
+    ["enable-banking-mcp.control-panel.native", "control-panel-placeholder"],
+    ["enable-banking-mcp.application.native", "application-placeholder"],
+    ["enable-banking-mcp.native", "session-placeholder"],
+  ]);
+  assert.equal(
+    state.calls.some(([operation]) => operation === "set" || operation === "delete"),
+    false,
+  );
+
+  await Effect.runPromise(session.set("updated-session-placeholder"));
+  assert.equal(state.records.size, 1);
+  const [[service, stored]] = state.records;
+  assert.equal(service, "enable-banking-mcp.control-panel.native");
+  assert.deepEqual(JSON.parse(stored.slice(bundlePrefix.length)), {
+    version: 1,
+    controlPanel: "control-panel-placeholder",
+    application: "application-placeholder",
+    session: "updated-session-placeholder",
+  });
+});
+test("migrates a recognized legacy item on write", async () => {
+  const state = createVault(
+    new Map([["enable-banking-mcp.application", "legacy-app-placeholder"]]),
+  );
+  const application = new MacKeychainSecretStore("application", state.vault);
+
+  assert.equal(
+    await Effect.runPromise(application.get()),
+    "legacy-app-placeholder",
+  );
+  assert.deepEqual([...state.records], [
+    ["enable-banking-mcp.application", "legacy-app-placeholder"],
+  ]);
+  assert.equal(
+    state.calls.some(([operation]) => operation === "set" || operation === "delete"),
+    false,
+  );
+
+  await Effect.runPromise(application.set("updated-app-placeholder"));
+  assert.equal(state.records.size, 1);
+  const [[service, stored]] = state.records;
+  assert.equal(service, "enable-banking-mcp.application");
+  assert.deepEqual(JSON.parse(stored.slice(bundlePrefix.length)), {
+    version: 1,
+    application: "updated-app-placeholder",
+  });
+});
+
+test("fails closed on a legacy chunk manifest without creating another item", async () => {
+  const manifest = "enable-banking-mcp:chunks:v1:2";
+  const state = createVault(new Map([["enable-banking-mcp", manifest]]));
+
+  await assert.rejects(
+    Effect.runPromise(new MacKeychainSessionStore(state.vault).set("new-session-placeholder")),
+    /Legacy chunked Enable Banking Keychain records must be cleared/,
+  );
+  assert.equal(state.records.size, 1);
+  assert.equal(state.records.get("enable-banking-mcp"), manifest);
+  assert.equal(state.calls.some(([operation]) => operation === "set"), false);
+});
+
+test("clears one slot without deleting the shared item until it is empty", async () => {
+  const state = createVault();
+  const session = new MacKeychainSessionStore(state.vault);
+  const application = new MacKeychainSecretStore("application", state.vault);
+  await Promise.all([
+    Effect.runPromise(session.set("session-placeholder")),
+    Effect.runPromise(application.set("app-placeholder")),
+  ]);
+  await Effect.runPromise(session.clear());
+  assert.equal(state.records.size, 1);
+  assert.equal(await Effect.runPromise(session.get()), undefined);
+  assert.equal(await Effect.runPromise(application.get()), "app-placeholder");
+
+  await Effect.runPromise(application.clear());
+  assert.equal(state.records.size, 0);
+});
+
+test("does not create an item for reads or clears of an empty vault", async () => {
+  const state = createVault();
+  const session = new MacKeychainSessionStore(state.vault);
+  assert.equal(await Effect.runPromise(session.get()), undefined);
+  await Effect.runPromise(session.clear());
+  assert.equal(state.records.size, 0);
+  assert.equal(state.calls.some(([operation]) => operation === "set"), false);
+});
+
+test("rejects a malformed existing vault without replacing it", async () => {
+  const invalid = `${bundlePrefix}{"version":1,"session":42}`;
+  const state = createVault(
+    new Map([["enable-banking-mcp.credentials.native", invalid]]),
+  );
+  await assert.rejects(
+    Effect.runPromise(new MacKeychainSessionStore(state.vault).get()),
+    /Stored Enable Banking credential vault is invalid/,
+  );
+  assert.equal(state.records.size, 1);
+  assert.equal(
+    state.records.get("enable-banking-mcp.credentials.native"),
+    invalid,
+  );
+  assert.equal(state.calls.some(([operation]) => operation === "set"), false);
+});
+
+test("rejects empty secret values without creating the vault item", async () => {
+  const state = createVault();
+  await assert.rejects(
+    Effect.runPromise(new MacKeychainSessionStore(state.vault).set("  \n ")),
+    /Cannot store an empty Enable Banking session/,
+  );
+  assert.equal(state.records.size, 0);
+});
+
+for (const operation of ["cancel-set", "cancel-clear"]) {
+  test(`cancelling queued ${operation === "cancel-set" ? "set" : "clear"} releases its lock keeper`, async () => {
+    const directory = mkdtempSync(join(tmpdir(), "enable-banking-cancelled-lock-"));
+    const keychainPath = join(directory, "records.json");
+    writeFileSync(
+      keychainPath,
+      JSON.stringify({
+        "enable-banking-mcp.credentials.native":
+          `${bundlePrefix}${JSON.stringify({ version: 1, session: "session-placeholder" })}`,
+      }),
+      { mode: 0o600 },
+    );
+    const holder = spawnVaultWriter(
+      keychainPath,
+      "application",
+      "application-placeholder",
+      1_200,
+    );
+    let queued;
+
+    try {
+      await holder.ready;
+      holder.child.stdin.end("go\n");
+      await holder.blocked;
+      queued = spawnVaultWriter(
+        keychainPath,
+        "session",
+        "updated-session-placeholder",
+        false,
+        operation,
+      );
+      await queued.ready;
+      queued.child.stdin.end("cancel\n");
+      await queued.cancelled;
+      const exitedBeforeUnlock = await Promise.race([
+        queued.completed.then(() => true),
+        new Promise((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      await holder.completed;
+      await queued.completed;
+
+      assert.equal(exitedBeforeUnlock, true);
+      const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+      const bundle = JSON.parse(
+        records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+      );
+      assert.equal(bundle.session, "session-placeholder");
+      assert.equal(bundle.application, "application-placeholder");
+    } finally {
+      for (const worker of [holder, queued].filter(Boolean)) {
+        if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+test("serializes one Keychain account across processes with different HOME values", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "enable-banking-home-lock-"));
+  const keychainPath = join(directory, "records.json");
+  const firstHome = join(directory, "first-home");
+  const secondHome = join(directory, "second-home");
+  writeFileSync(
+    keychainPath,
+    JSON.stringify({
+      "enable-banking-mcp.credentials.native":
+        `${bundlePrefix}${JSON.stringify({ version: 1, session: "session-placeholder" })}`,
     }),
-  });
-
-  await assert.rejects(
-    state.store.get(),
-    /Unable to read the Enable Banking test secret from Keychain/,
+    { mode: 0o600 },
   );
-  await assert.rejects(
-    state.store.clear(),
-    /Unable to clear the Enable Banking test secret from Keychain/,
-  );
-});
+  let waiter;
+  let holder;
 
-test("does not report success when a legacy chunk generation cannot be identified", async () => {
-  const legacyManifest = "enable-banking-mcp:chunks:v2:unparseable";
-  const state = isolatedStore(new Map([
-    ["test-service", legacyManifest],
-    ["test-service.part.unknown-id.0", "orphaned legacy value"],
-  ]));
+  try {
+    waiter = spawnVaultWriter(
+      keychainPath,
+      "session",
+      "updated-session-placeholder",
+      false,
+      "set",
+      secondHome,
+    );
+    await waiter.ready;
+    holder = spawnVaultWriter(
+      keychainPath,
+      "application",
+      "application-placeholder",
+      1_200,
+      "set",
+      firstHome,
+    );
+    await holder.ready;
+    holder.child.stdin.end("go\n");
+    await holder.blocked;
+    waiter.child.stdin.end("go\n");
 
-  await assert.rejects(
-    state.store.set("replacement value"),
-    /Unable to clear legacy Enable Banking test secret from Keychain/,
-  );
+    const completedBeforeUnlock = await Promise.race([
+      waiter.completed.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 300)),
+    ]);
+    await holder.completed;
+    await waiter.completed;
 
-  assert.equal(state.legacy.get("test-service"), legacyManifest);
-  assert.equal(state.legacy.get("test-service.part.unknown-id.0"), "orphaned legacy value");
-  assert.equal(await state.store.get(), "replacement value");
+    const records = JSON.parse(readFileSync(keychainPath, "utf8"));
+    const bundle = JSON.parse(
+      records["enable-banking-mcp.credentials.native"].slice(bundlePrefix.length),
+    );
+    assert.equal(completedBeforeUnlock, false);
+    assert.equal(bundle.session, "updated-session-placeholder");
+    assert.equal(bundle.application, "application-placeholder");
+  } finally {
+    for (const worker of [waiter, holder].filter(Boolean)) {
+      if (worker.child.exitCode === null) worker.child.kill("SIGKILL");
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

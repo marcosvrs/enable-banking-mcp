@@ -1,3 +1,9 @@
+import { writeFileSync } from "node:fs";
+import { Effect } from "effect";
+import {
+  MacKeychainCredentialVault,
+  setNativeKeyringEntryFactory,
+} from "../../dist/session-store.js";
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
@@ -5,27 +11,48 @@ import { PassThrough } from "node:stream";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 
-import { setNativeKeyringEntryFactory } from "../../dist/session-store.js";
 
-const nativeRecords = new Map();
+const nativeRecords = new Map(
+  Object.entries(JSON.parse(process.env.MCP_TEST_KEYCHAIN || "{}")).map(
+    ([service, value]) => [
+      `${service}\u0000${process.env.USER?.trim() || "default"}`,
+      value,
+    ],
+  ),
+);
 setNativeKeyringEntryFactory((service, account) => ({
   getPassword: () => nativeRecords.get(`${service}\u0000${account}`) ?? null,
   setPassword: (value) => nativeRecords.set(`${service}\u0000${account}`, value),
   deletePassword: () => {
     const key = `${service}\u0000${account}`;
     if (
-      service === "enable-banking-mcp.native" &&
+      service === "enable-banking-mcp.credentials.native" &&
       certificateDeleteAttempted &&
-      oneShotFailures.delete("delete-session")
+      oneShotFailures.delete("delete-credential-item")
     ) {
       throw new Error("Injected Keychain deletion failure");
     }
     return nativeRecords.delete(key);
   },
 }));
-const records = new Map(
-  Object.entries(JSON.parse(process.env.MCP_TEST_KEYCHAIN || "{}")),
+const sessionClearDelayMs = Number(
+  process.env.MCP_TEST_DELAY_SESSION_CLEAR_MS || 0,
 );
+if (sessionClearDelayMs > 0) {
+  const clearStartedFile = process.env.MCP_TEST_SESSION_CLEAR_STARTED_FILE;
+  const clearCredential = MacKeychainCredentialVault.prototype.clear;
+  MacKeychainCredentialVault.prototype.clear = function (slot) {
+    const clear = clearCredential.call(this, slot);
+    return slot === "session"
+      ? Effect.zipRight(
+          Effect.sync(() => {
+            if (clearStartedFile) writeFileSync(clearStartedFile, "started");
+          }),
+          Effect.zipRight(Effect.sleep(sessionClearDelayMs), clear),
+        )
+      : clear;
+  };
+}
 const realSpawn = childProcess.spawn.bind(childProcess);
 const oneShotFailures = new Set(
   (process.env.MCP_TEST_FAIL_ONCE || "").split(",").filter(Boolean),
@@ -38,6 +65,7 @@ let failFirstSessionCreate =
 let certificateDeleteAttempted = false;
 let delayApplicationRegistration =
   process.env.MCP_TEST_DELAY_REGISTRATION === "true";
+let applicationActivationDeadline;
 
 function completedChild(stdout = "", stderr = "", code = 0, delay = 0) {
   const child = new EventEmitter();
@@ -58,30 +86,6 @@ function completedChild(stdout = "", stderr = "", code = 0, delay = 0) {
 
 function runSecurity(args) {
   const operation = args[0];
-  const serviceIndex = args.indexOf("-s");
-  const service = serviceIndex === -1 ? undefined : args[serviceIndex + 1];
-  if (operation === "find-generic-password" && service) {
-    const value = records.get(service);
-    const delay =
-      service === "enable-banking-mcp.application" &&
-      process.env.MCP_TEST_DELAY_APPLICATION_LOOKUP === "true"
-        ? 250
-        : 0;
-    return value === undefined
-      ? completedChild("", "The specified item could not be found in the keychain.", 44, delay)
-      : completedChild(`${value}\n`, "", 0, delay);
-  }
-  if (operation === "delete-generic-password" && service) {
-    if (
-      service === "enable-banking-mcp" &&
-      certificateDeleteAttempted &&
-      oneShotFailures.delete("delete-session")
-    ) {
-      return completedChild("", "Injected Keychain deletion failure", 1);
-    }
-    records.delete(service);
-    return completedChild();
-  }
   if (operation === "add-trusted-cert") return completedChild();
   if (operation === "delete-certificate") {
     certificateDeleteAttempted = true;
@@ -94,21 +98,6 @@ function runSecurity(args) {
 
 childProcess.spawn = (command, args = [], options) => {
   if (command === "/usr/bin/security") {
-    if (oneShotFailures.delete("security-no-stdio")) {
-      const child = new EventEmitter();
-      child.kill = () => true;
-      return child;
-    }
-    if (oneShotFailures.delete("security-spawn-error")) {
-      const child = new EventEmitter();
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
-      child.kill = () => true;
-      queueMicrotask(() => {
-        child.emit("error", new Error("Injected security spawn error"));
-      });
-      return child;
-    }
     return runSecurity(args);
   }
   if (command === "/usr/bin/open") return completedChild();
@@ -167,6 +156,14 @@ globalThis.fetch = async (input, init = {}) => {
     });
   }
   if (url.hostname === "enablebanking.com" && url.pathname === "/api/applications") {
+    if (process.env.MCP_TEST_FAIL_APPLICATION_REGISTRATION === "true") {
+      return Response.json(
+        {
+          message: `fixture provider rejected ${process.env.MCP_TEST_PROVIDER_ERROR_EMAIL ?? "registration"}`,
+        },
+        { status: 400 },
+      );
+    }
     if (delayApplicationRegistration) {
       delayApplicationRegistration = false;
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -177,17 +174,27 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.hostname === "api.enablebanking.com") {
     if (url.pathname === "/application") {
       applicationRequests += 1;
+      if (process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true") {
+        applicationActivationDeadline ??= Date.now() + 8_000;
+      }
       return Response.json({
         name: "Fixture application",
         kid: "fixture-app-id",
         environment: "PRODUCTION",
         redirect_urls: ["https://localhost:8765/callback"],
-        active: applicationRequests > 3,
+        active:
+          process.env.MCP_TEST_APPLICATION_ACTIVE === "true" ||
+          (process.env.MCP_TEST_DELAY_APPLICATION_ACTIVATION === "true"
+            ? Date.now() >=
+              (applicationActivationDeadline ?? Number.POSITIVE_INFINITY)
+            : applicationRequests > 2),
         countries: ["IE"],
         services: ["AIS"],
       });
     }
     if (url.pathname === "/aspsps") {
+      const delay = Number(process.env.MCP_TEST_DELAY_BANK_LIST_MS) || 0;
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       return Response.json({ aspsps: [{ name: "Fixture Bank", country: "IE" }] });
     }
     if (url.pathname === "/auth") {
@@ -195,7 +202,14 @@ globalThis.fetch = async (input, init = {}) => {
       const callback = new URL(request.redirect_url);
       callback.searchParams.set("code", "fixture-bank-code");
       callback.searchParams.set("state", request.state);
-      setTimeout(() => sendLocalCallback(callback, true), 250);
+      const callbackDelay =
+        Number(process.env.MCP_TEST_BANK_CALLBACK_DELAY_MS) ||
+        (process.env.MCP_TEST_DELAY_BANK_CALLBACK === "true" ? 1000 : 250);
+      const callbackTimer = setTimeout(
+        () => sendLocalCallback(callback, true),
+        callbackDelay,
+      );
+      callbackTimer.unref();
       return Response.json({
         url: "https://bank.example/authorize",
         authorization_id: "fixture-authorization-id",

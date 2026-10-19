@@ -9,9 +9,9 @@ Use this skill whenever the user asks to connect their bank, inspect account sta
 
 This skill describes only the MCP server's tools, schemas, results, and user-facing workflows. Do not bypass those tools with direct provider calls or include provider implementation guidance.
 
-This guide documents the `0.3.0-beta.10` MCP contract. `npx skills add`
+This guide documents the `0.4.0-beta.1` MCP contract. `npx skills add`
 installs instructions only; it does not install or update the server. Connect
-the host to `enable-banking-mcp@0.3.0-beta.10` or a newer release, and follow
+the host to `enable-banking-mcp@0.4.0-beta.1` or a newer release, and follow
 the live tool schemas if they differ.
 
 ## Operating model and boundaries
@@ -27,23 +27,22 @@ the live tool schemas if they differ.
 ## Fast decision tree
 
 1. Call `connection_status` (no arguments) before setup or account reads. It is read-only and does not return account data.
-2. If `connection` is `connected`, use `list_accounts` and `get_account_balances` for requested balances; `connect_bank` returns account/access metadata, not balances. Use account-specific tools when the request names or selects an account.
+2. If connected and the user wants balances, use `list_accounts` and `get_account_balances`; `connect_bank` also returns account/access metadata and balances when it finds a valid session.
 3. If the user wants transactions, obtain account UIDs with `list_accounts`, select the requested account(s), then call `get_account_transactions`. Follow `continuationKey` while `hasMore` is true if the user asked for all results in that range.
-4. If setup is required, use `connect_bank` as the primary guided path. Follow the state and `next_action` from `connection_status`; when the user completes a browser/dashboard step, call `connect_bank` again to resume.
+4. If setup is required, call `connect_bank` as the primary guided path. It requests the Control Panel email, country and bank through one MCP form. Follow `connection_status`; the active call monitors required browser/dashboard steps and continues automatically. Do not rerun it while a step is pending.
 5. Do not infer that an expired Control Panel login means the bank session is invalid. `control_panel_session` and `bank_session` are separate states.
 
 ## Guided onboarding: `connect_bank`
 
-`connect_bank` is the primary onboarding and resume tool. It accepts optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), `country` (two-letter code), `aspsp_name` (exact bank name), and `access_profile` (`balances` default or `balances_and_transactions`). It has no `valid_until` input.
+`connect_bank` is the one-call guided onboarding path. It accepts optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), and `access_profile` (`balances` default or `balances_and_transactions`). The MCP form collects the Control Panel email, bank country, and bank name; these are not tool inputs. It has no `valid_until` input.
 
 ### First-run Production
 
-1. Call `connect_bank` without asking the user to provide secrets in chat. Pass a known `country` and `aspsp_name` when available; otherwise let the MCP provide supported choices or ask the user to select from those choices.
-2. If a Control Panel email is needed, the MCP uses form elicitation when supported. If the result is `needs_control_panel_email`, tell the user to set `ENABLE_BANKING_CONTROL_PANEL_EMAIL` in the local MCP server environment and retry; never ask them to disclose the email in chat.
-3. The user must open the Control Panel email sign-in link if one is required. The MCP handles its local callback and continues setup in the background.
-4. For a new/inactive Production app, follow `connection_status`/`setup_status` and their `next_action`. The user must link an account in the dashboard to activate the application. Dashboard linking does not authorize MCP account-data reads.
-5. After activation, continue with `connect_bank`. Select a country/bank from the MCP-provided choices if needed; do not guess. The user then completes the separate bank-hosted sign-in, MFA, and explicit consent. A local certificate-trust prompt may also require the user's approval.
-6. Once `connection_status` reports `connected`, use `list_accounts` and the account-specific tools to retrieve the requested data.
+1. Call `connect_bank` without asking the user to provide secrets in chat. The MCP requests the Control Panel email, country, and bank together through form elicitation. If the form is unsupported or declined, onboarding stops; do not substitute environment variables or guessed values.
+2. The user must open the Control Panel email sign-in link if one is required. The active `connect_bank` call handles its local callback and continues.
+3. For a new/inactive Production app, the user must link an account in the dashboard to activate the application. The active `connect_bank` call monitors activation and continues; if no guided call is active, call `connect_bank` after dashboard linking. Dashboard linking does not authorize account-data reads.
+4. The user then completes the separate bank-hosted sign-in, MFA, and explicit consent. A local certificate-trust prompt may also require the user's approval.
+5. Once `connection_status` reports `connected`, `connect_bank` can return balances; use `list_accounts` and account-specific tools for further requested data.
 
 ### Production requires two separate bank-access steps
 
@@ -54,14 +53,14 @@ The Control Panel email sign-in link may be an additional login to manage the ap
 
 ### Sandbox
 
-In Sandbox, `connect_bank` accepts optional country/bank choices and may ask for missing choices through supported MCP forms; if a form is unavailable, use the returned choices and ask the user to select. Sandbox skips Production dashboard account linking, but the user still completes the separate bank sign-in/MFA/consent flow. The default `access_profile` is `balances`.
+In Sandbox, the MCP form collects the Control Panel email, country, and bank; those are not `connect_bank` arguments. If form elicitation is unavailable or declined, onboarding stops. Sandbox skips Production dashboard account linking, but the user still completes the separate bank sign-in/MFA/consent flow. The default `access_profile` is `balances`.
 
 ### Existing app/session and resume behavior
 
-- A stored Production app skips first-run email input. If inactive, the MCP opens the dashboard; the user links an account and then calls `connect_bank` again.
-- A valid stored bank session makes `connect_bank` return connected account/access metadata; use `list_accounts` and the account-specific tools for balances or transactions.
-- If an onboarding call returns `awaiting_user` or `setup_started`, follow its `next_action`, monitor with `connection_status`/`setup_status`, and resume with `connect_bank` after the user/provider step. Do not start overlapping setup calls.
-- Setup progress is in memory; application/session credentials are stored separately. After an MCP process restart, call `connect_bank` to recover/resume from stored/provider state; there is no durable in-memory flow checkpoint.
+- A stored Production app skips first-run email input. The MCP form still collects country and bank. If inactive, the active `connect_bank` call monitors dashboard activation; if no guided call is active, the user links an account and calls `connect_bank` to start or continue.
+- A valid stored bank session makes `connect_bank` return connected account/access metadata and balances; use `list_accounts` and account-specific tools for targeted reads.
+- If `connection_status` reports `awaiting_user`, complete the indicated browser/dashboard step and monitor status. The active guided call continues automatically; do not rerun `connect_bank` while it is pending.
+- Setup progress is in memory; application/session credentials are stored separately. After an MCP process restart, call `connect_bank` to recover from stored/provider state; there is no durable in-memory flow checkpoint.
 - `connect_bank` defaults to `access_profile: "balances"`. Use `"balances_and_transactions"` only when the user requests transactions. `setup_enable_banking` and `authorize_bank` also default to balances; those advanced tools accept optional future RFC3339 `valid_until` (30-day default). The bank decides the actual granted scope.
 
 ## Checking state and progress
@@ -72,16 +71,16 @@ Call with `{}`. It verifies a stored provider session, reports setup/onboarding 
 
 - `connected`: a stored provider session was accepted; account-specific operations are available.
 - `setup_required`: no application is configured; start `connect_bank`.
-- `application_activation_required`: a Production application is inactive; link an account in the dashboard, then resume with `connect_bank`.
+- `application_activation_required`: a Production application is inactive and no guided call is monitoring it; link an account in the dashboard, then call `connect_bank`.
 - `bank_authorization_required`: app exists but no usable bank session; use `connect_bank` (or an explicitly requested advanced authorization flow).
-- `awaiting_user`: a browser action is required; follow `next_action`, monitor status, then resume with `connect_bank`.
+- `awaiting_user`: a guided browser/dashboard step is pending; complete it and monitor status. Do not rerun `connect_bank` while its active call is monitoring the step.
 - `status_unavailable`: provider state could not be verified. This is **not** proof that the session is invalid; retry later and do not discard local credentials.
 
 Other useful fields: `application` (`configured`, `active`, `inactive`, `not_configured`, `unknown`), `bank_session` (`valid`, `missing`, `invalid`, `unknown`), `control_panel_session` (`not_stored`, `stored`, `expired`), optional `application_environment`, `phase`, and `next_action`. An expired Control Panel session can coexist with a valid bank session.
 
 ### `setup_status`
 
-No arguments. Informational status for an advanced `setup_enable_banking`/registration flow. It does not start, resume, or monitor provider callbacks by itself; use `connection_status` for guided `connect_bank` progress. May include the current phase, pending flag, app ID, dashboard/authorization URL, message, error and sessionStored flag. Treat returned URLs and identifiers as sensitive; do not repeat them unnecessarily.
+No arguments. Informational progress for guided or advanced setup/registration. It does not start or resume work; use `connection_status` to check guided state. A pending `connect_bank` call monitors provider callbacks and continues automatically. May include the current phase, pending flag, app ID, dashboard/authorization URL, message, error and `sessionStored` flag. Treat returned URLs and identifiers as sensitive; do not repeat them unnecessarily.
 
 ## Retrieving balances
 
@@ -134,9 +133,9 @@ The live MCP tool schema is authoritative. This list describes the current 20 pu
 
 | Tool | Inputs | Behavior |
 |---|---|---|
-| `connect_bank` | Optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), `country` (two-letter code), `aspsp_name` (bank name), `access_profile` (default `balances`, or `balances_and_transactions`) | Primary resumable onboarding. If the stored session grants the requested access, returns authorized account/access metadata; otherwise starts or resumes setup and reports progress/choices. |
+| `connect_bank` | Optional `app_name` (default `Enable Banking MCP`), `environment` (`PRODUCTION` default or `SANDBOX`), `access_profile` (default `balances`, or `balances_and_transactions`) | Primary one-call guided onboarding. Requests Control Panel email, country, and bank through MCP form elicitation; returns balances when a valid bank session is available. The active call monitors callback, dashboard activation, and bank-consent steps. |
 | `connection_status` | None | Read-only provider/application/session/onboarding status and `next_action`; no account data or side effects. |
-| `setup_status` | None | Reports advanced setup progress; does not start/resume work. |
+| `setup_status` | None | Reports guided or advanced setup progress; does not start or resume work. |
 | `control_panel_authenticate` | None | Reuses/refreshes Control Panel login or initiates email-link sign-in. Does not take email/token as a tool argument; uses MCP form elicitation when supported, or returns instructions to set `ENABLE_BANKING_CONTROL_PANEL_EMAIL` locally. |
 | `control_panel_status` | None | Reports stored/expired Control Panel login without revealing email or tokens. |
 | `control_panel_logout` | None | Removes local Control Panel authentication only; does not delete the bank session or provider application. |
@@ -189,12 +188,12 @@ Credentials, application/session state and Control Panel authentication are stor
 ## Common errors and how to respond
 
 - Missing app/session: do not retry account reads; start `connect_bank` if the user wants onboarding.
-- Authorization pending: tell the user to finish the already-open browser step, check `connection_status`, then resume. Do not start duplicate authorization/setup calls.
+- Authorization pending: complete the already-open browser step and check `connection_status`. The active `connect_bank` call continues automatically; do not start another guided call while it is pending.
 - `status_unavailable`: provider state could not be verified; retry later, but do not report disconnected or clear sessions.
 - Account not authorized: refresh the account list from the current session and use an exact returned UID. Do not reuse account IDs across sessions/users.
 - Transaction scope/date/filter error: correct the request according to the schema. `date_to` requires `date_from`; a balance-only bank grant cannot be bypassed.
 - MCP/provider error: preserve the returned status/message and any `retry_after` value. Avoid blind retries for authorization, validation, or permission failures; retry transient read failures only when appropriate and within the returned retry guidance.
-- Elicitation declined: treat as cancellation. If Control Panel email form elicitation is unavailable and the result requests `ENABLE_BANKING_CONTROL_PANEL_EMAIL`, have the user configure it in the local MCP server environment; never ask them to share the email in chat. For missing country/bank choices, use the returned options and ask the user to choose.
+- Elicitation declined: treat as cancellation. If `connect_bank` form elicitation is unavailable or declined, onboarding stops before setup; do not fall back to an environment email or agent-owned form. The separate advanced `control_panel_authenticate` tool may request local email configuration when its own form is unavailable.
 
 ## Example tool-call arguments
 
